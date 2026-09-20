@@ -20,7 +20,7 @@ use sugo::state::{AppState, SharedState};
 /// Spawn a fake NNTP server that only understands `BODY` and `QUIT`. `known`
 /// maps bare Message-IDs to the article body the client should get back;
 /// anything else gets a `430`.
-pub fn spawn_fake_server(known: HashMap<&'static str, Vec<u8>>) -> SocketAddr {
+pub fn spawn_fake_server(known: HashMap<String, Vec<u8>>) -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
 
@@ -35,7 +35,7 @@ pub fn spawn_fake_server(known: HashMap<&'static str, Vec<u8>>) -> SocketAddr {
     addr
 }
 
-fn handle_connection(stream: TcpStream, known: HashMap<&'static str, Vec<u8>>) {
+fn handle_connection(stream: TcpStream, known: HashMap<String, Vec<u8>>) {
     let mut writer = match stream.try_clone() {
         Ok(w) => w,
         Err(_) => return,
