@@ -548,6 +548,25 @@ fn parse_strips_angle_brackets_and_re_adds_them() {
     assert_eq!(parsed.segments[0].message_id, "<msgid@host>");
 }
 
+#[test]
+fn parse_strips_xml_comments_from_tag_text() {
+    let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<nzb xmlns="http://www.newzbin.com/DTD/2003/nzb">
+  <file poster="poster" date="1700000000" subject="&quot;file.bin&quot; yEnc (1/1)">
+    <groups>
+      <group>alt.<!-- ignored -->test</group>
+    </groups>
+    <segments>
+      <segment bytes="100" number="1">msg-01<!-- ignored -->@host</segment>
+    </segments>
+  </file>
+</nzb>"#;
+
+    let parsed = parse(xml).expect("inline XML comments should be ignored");
+    assert_eq!(parsed.groups, vec!["alt.test"]);
+    assert_eq!(parsed.segments[0].message_id, "<msg-01@host>");
+}
+
 /// Real-world NZBs (every indexer/posting tool, `pesto` included) never
 /// write a `name` attribute on `<file>` — only `subject`, per the
 /// standard NZB 1.1 DTD. `parse()` must derive the filename from the

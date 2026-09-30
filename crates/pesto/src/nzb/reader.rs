@@ -350,7 +350,17 @@ fn xml_text(line: &str, tag: &str) -> Option<String> {
     if close_start < open_end + 1 {
         return None;
     }
-    Some(xml_unescape(&line[open_end + 1..close_start]))
+    let text = &line[open_end + 1..close_start];
+    let mut without_comments = String::with_capacity(text.len());
+    let mut remaining = text;
+    while let Some(start) = remaining.find("<!--") {
+        without_comments.push_str(&remaining[..start]);
+        let after_start = &remaining[start + 4..];
+        let end = after_start.find("-->")?;
+        remaining = &after_start[end + 3..];
+    }
+    without_comments.push_str(remaining);
+    Some(xml_unescape(&without_comments))
 }
 
 /// Strip the `"name" yEnc (N/M)` or `"name" yEnc` wrapper from a subject line.
