@@ -417,6 +417,51 @@ fn test_unencrypted_nzb_compatibility() {
 }
 
 #[test]
+fn test_reader_strips_xml_comments_from_tag_text() {
+    let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<nzb xmlns="http://www.newzbin.com/DTD/2003/nzb">
+  <file poster="poster" date="1700000000" subject="&quot;file.bin&quot; yEnc (1/1)">
+    <groups>
+      <group>alt.<!-- ignored -->test</group>
+    </groups>
+    <segments>
+      <segment bytes="100" number="1">msg-01<!-- ignored -->@host</segment>
+    </segments>
+  </file>
+</nzb>"#;
+
+    let parsed = parse(xml).expect("inline XML comments should be ignored");
+    assert_eq!(parsed.groups, vec!["alt.test"]);
+    assert_eq!(parsed.segments[0].message_id, "<msg-01@host>");
+}
+
+#[test]
+fn test_reader_rejects_mixed_encrypted_and_ordinary_files() {
+    let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<nzb xmlns="http://www.newzbin.com/DTD/2003/nzb">
+  <head>
+    <meta type="password">transport-password</meta>
+    <meta type="yenc_encrypted">true</meta>
+  </head>
+  <file poster="poster@example.com" date="1774300000" subject="encrypted.bin">
+    <groups><group>alt.binaries.test</group></groups>
+    <segments>
+      <segment bytes="100" number="1" segmentIndex="1">encrypted@example.com</segment>
+    </segments>
+  </file>
+  <file poster="poster@example.com" date="1774300000" subject="ordinary.bin">
+    <groups><group>alt.binaries.test</group></groups>
+    <segments>
+      <segment bytes="100" number="1">ordinary@example.com</segment>
+    </segments>
+  </file>
+</nzb>"#;
+
+    let err = parse(xml).unwrap_err();
+    assert!(err.to_string().contains("MISSING_SEGMENT_INDEX"));
+}
+
+#[test]
 fn test_validate_segments_allows_decoupled_obfuscation_and_subsets() {
     // Uncounted geometry (0, 0)
     let id1 = SegmentIdentity::explicit(0, 0, 1, 10).unwrap();

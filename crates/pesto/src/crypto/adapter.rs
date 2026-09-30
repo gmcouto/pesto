@@ -494,6 +494,78 @@ mod tests {
     }
 
     #[test]
+    fn encrypted_control_lines_round_trip_with_lf_endings() {
+        let password = "lf-only-control-lines";
+        let salt = control::generate_alphabet_salt();
+        let session = Arc::new(EncryptionSession::new(password, salt).unwrap());
+        let upload_adapter = UploadEncryptionAdapter::new(session);
+        let payload = b"LF-only encrypted control framing";
+        let identity = SegmentIdentity::checked(0, 1, 1, 1).unwrap();
+        let mut body = Vec::new();
+        let encoded = upload_adapter
+            .encode_article(
+                "lf.bin",
+                payload.len() as u64,
+                PartSpec {
+                    number: 1,
+                    total: 1,
+                    offset: 0,
+                },
+                payload,
+                128,
+                None,
+                identity,
+                &mut body,
+            )
+            .unwrap();
+        let mut lf_wire = encoded.body;
+        let mut index = 0;
+        while index + 1 < lf_wire.len() {
+            if lf_wire[index..].starts_with(b"\r\n") {
+                lf_wire.remove(index);
+            }
+            index += 1;
+        }
+
+        let decoded = DownloadDecryptionAdapter::with_password(password)
+            .decode_article(&lf_wire, Some(identity.segment_index))
+            .unwrap();
+        assert_eq!(decoded.data, payload);
+    }
+
+    #[test]
+    fn zero_length_encrypted_body_round_trips() {
+        let password = "zero-length-body";
+        let salt = control::generate_alphabet_salt();
+        let session = Arc::new(EncryptionSession::new(password, salt).unwrap());
+        let upload_adapter = UploadEncryptionAdapter::new(session);
+        let identity = SegmentIdentity::checked(0, 1, 1, 1).unwrap();
+        let mut body = Vec::new();
+        let encoded = upload_adapter
+            .encode_article(
+                "empty.bin",
+                0,
+                PartSpec {
+                    number: 1,
+                    total: 1,
+                    offset: 0,
+                },
+                b"",
+                128,
+                None,
+                identity,
+                &mut body,
+            )
+            .unwrap();
+
+        let decoded = DownloadDecryptionAdapter::with_password(password)
+            .decode_article(&encoded.body, Some(identity.segment_index))
+            .unwrap();
+        assert!(decoded.data.is_empty());
+        assert_eq!(decoded.file_size, 0);
+    }
+
+    #[test]
     fn test_single_part_filename_containing_part_equals() {
         let password = "test-part-equals-password";
         let salt = control::generate_alphabet_salt();

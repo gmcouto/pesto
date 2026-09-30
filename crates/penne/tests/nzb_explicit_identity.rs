@@ -2,8 +2,9 @@ use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::path::PathBuf;
 
+use penne::download::validate_queue_identity;
 use penne::nzb::{load, load_encrypted};
-use penne::queue::build;
+use penne::queue::{build, DownloadQueue, QueuedFile, QueuedSegment};
 use tempfile::NamedTempFile;
 
 fn test_vectors_dir() -> PathBuf {
@@ -273,6 +274,34 @@ fn test_conformance_vectors_penne_nzb_segment_identity() {
             "missing assertion coverage for canonical error token '{token}'"
         );
     }
+}
+
+#[test]
+fn test_queue_rejects_conflicting_message_id_indices() {
+    let queue = DownloadQueue {
+        files: vec![QueuedFile {
+            name: "conflict.bin".to_string(),
+            file_ordinal: Some(1),
+            total_files: Some(1),
+            segments: vec![
+                QueuedSegment {
+                    message_id: "same-message@test".to_string(),
+                    part: 1,
+                    bytes: 100,
+                    segment_index: Some(1),
+                },
+                QueuedSegment {
+                    message_id: "same-message@test".to_string(),
+                    part: 2,
+                    bytes: 100,
+                    segment_index: Some(2),
+                },
+            ],
+        }],
+    };
+
+    let err = validate_queue_identity(&queue, true).unwrap_err();
+    assert!(err.to_string().contains("CONFLICTING_MESSAGE_ID_INDEX"));
 }
 
 #[test]

@@ -394,6 +394,60 @@ async fn test_download_sparse_subsets() {
 }
 
 #[tokio::test]
+async fn test_download_accepts_boundary_segment_indices() {
+    let password = "test-pass-boundary-indices";
+    let salt = [0x3au8; 16];
+    let session = Arc::new(EncryptionSession::new(password, salt).unwrap());
+    let cases = [
+        (u32::MAX - 1, "boundary-max-minus-one.bin"),
+        (u32::MAX, "boundary-max.bin"),
+    ];
+    let mut known = HashMap::new();
+    let mut files = String::new();
+
+    for (index, name) in cases {
+        let payload = format!("payload for segment index {index}");
+        let message_id = format!("boundary-{index}@test");
+        known.insert(
+            message_id.clone(),
+            encode_test_article(
+                &session,
+                name,
+                payload.len() as u64,
+                PartSpec {
+                    number: 1,
+                    total: 1,
+                    offset: 0,
+                },
+                payload.as_bytes(),
+                index,
+            ),
+        );
+        files.push_str(&format!(
+            "<file poster=\"uploader@example.com\" date=\"1774300000\" subject=\"&quot;{name}&quot; yEnc\">\n<groups>\n<group>alt.binaries.test</group>\n</groups>\n<segments>\n<segment bytes=\"{}\" number=\"1\" segmentIndex=\"{index}\">{message_id}</segment>\n</segments>\n</file>\n",
+            payload.len()
+        ));
+    }
+
+    let xml = format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<nzb xmlns=\"http://www.newzbin.com/DTD/2003/nzb\">\n<head>\n<meta type=\"password\">{password}</meta>\n<meta type=\"yenc_encrypted\">true</meta>\n</head>\n{files}</nzb>"
+    );
+    let addr = spawn_mock_nntp_server(known, None);
+    let dest = tempfile::tempdir().unwrap();
+    let outcome =
+        run_download_nzb(&xml, &[ServerTier::solo(server_entry(addr))], dest.path()).await;
+
+    assert!(outcome.missing.is_empty());
+    assert!(outcome.corrupt.is_empty());
+    for (index, name) in cases {
+        assert_eq!(
+            std::fs::read_to_string(dest.path().join(name)).unwrap(),
+            format!("payload for segment index {index}")
+        );
+    }
+}
+
+#[tokio::test]
 async fn test_download_provider_failover() {
     let password = "test-pass-failover-tier";
     let salt = [0x35u8; 16];
