@@ -522,6 +522,32 @@ async fn body_returns_none_on_430() {
 }
 
 #[tokio::test]
+async fn body_rejects_article_larger_than_transport_limit() {
+    let (client, mut server) = tokio::io::duplex(64 * 1024);
+    let mut conn = Connection::from_stream(client);
+    let writer = tokio::spawn(async move {
+        server
+            .write_all(b"222 0 <large@host> body\r\n")
+            .await
+            .unwrap();
+        let chunk = vec![b'x'; 64 * 1024 - 2];
+        for _ in 0..=(MAX_ARTICLE_BODY_SIZE / chunk.len()) {
+            server.write_all(&chunk).await.unwrap();
+            server.write_all(b"\r\n").await.unwrap();
+        }
+        server.write_all(b".\r\n").await.unwrap();
+    });
+
+    let err = conn.body("large@host").await.unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("NNTP article body exceeded maximum allowed size"),
+        "unexpected error: {err:#}"
+    );
+    writer.abort();
+}
+
+#[tokio::test]
 async fn head_returns_header_block_on_221() {
     let (mut conn, _server) = mock_conn(
         b"221 0 <mid@host> headers follow\r\n\

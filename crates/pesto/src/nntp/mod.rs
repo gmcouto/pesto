@@ -33,6 +33,8 @@ use response::with_hint;
 pub use response::{classify_error, ErrorHint, Response};
 use tls::tls_config;
 
+const MAX_ARTICLE_BODY_SIZE: usize = 32 * 1024 * 1024;
+
 /// Read + write stream, in either plain or TLS form, behind a trait object so
 /// [`Connection`] does not need to be generic.
 trait Stream: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
@@ -472,6 +474,14 @@ impl Connection {
             }
             if is_dot_terminator(&line) {
                 break;
+            }
+            let decoded_len = if line.starts_with(b"..") {
+                line.len() - 1
+            } else {
+                line.len()
+            };
+            if out.len().saturating_add(decoded_len) > MAX_ARTICLE_BODY_SIZE {
+                bail!("NNTP article body exceeded maximum allowed size");
             }
             if let Some(rest) = line.strip_prefix(b"..") {
                 out.push(b'.');
