@@ -1,7 +1,7 @@
 //! Cryptographic adapter presenting standard yEnc encode and decode article contracts.
 
 use anyhow::{bail, ensure, Context, Result};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
 use super::body;
@@ -307,28 +307,37 @@ pub fn extract_and_remove_yencryption(input: &[u8]) -> Result<(YEncryptionParams
     Ok((params, out))
 }
 
+const MAX_CACHED_SESSIONS: usize = 16;
+
+type SessionCache = (
+    HashMap<[u8; 16], Arc<EncryptionSession>>,
+    VecDeque<[u8; 16]>,
+);
+
 /// Thin adapter presenting standard yEnc decode contract for downloaded articles.
 pub struct DownloadDecryptionAdapter {
     password: Option<String>,
-    cached_sessions: std::sync::Mutex<HashMap<[u8; 16], Arc<EncryptionSession>>>,
+    cached_sessions: std::sync::Mutex<SessionCache>,
 }
 
 impl DownloadDecryptionAdapter {
     pub fn new(session: Option<Arc<EncryptionSession>>) -> Self {
         let mut map = HashMap::new();
+        let mut order = VecDeque::new();
         if let Some(s) = session {
+            order.push_back(s.salt());
             map.insert(s.salt(), s);
         }
         Self {
             password: None,
-            cached_sessions: std::sync::Mutex::new(map),
+            cached_sessions: std::sync::Mutex::new((map, order)),
         }
     }
 
     pub fn with_password(password: &str) -> Self {
         Self {
             password: Some(password.to_string()),
-            cached_sessions: std::sync::Mutex::new(HashMap::new()),
+            cached_sessions: std::sync::Mutex::new((HashMap::new(), VecDeque::new())),
         }
     }
 
@@ -416,13 +425,19 @@ impl DownloadDecryptionAdapter {
 
     fn get_or_create_session(&self, salt: [u8; 16]) -> Result<Arc<EncryptionSession>> {
         let mut guard = self.cached_sessions.lock().unwrap();
-        if let Some(session) = guard.get(&salt) {
+        if let Some(session) = guard.0.get(&salt) {
             return Ok(session.clone());
         }
 
         if let Some(ref pwd) = self.password {
             let session = Arc::new(EncryptionSession::new(pwd, salt)?);
-            guard.insert(salt, session.clone());
+            if guard.0.len() == MAX_CACHED_SESSIONS {
+                if let Some(oldest) = guard.1.pop_front() {
+                    guard.0.remove(&oldest);
+                }
+            }
+            guard.0.insert(salt, session.clone());
+            guard.1.push_back(salt);
             return Ok(session);
         }
 
@@ -455,6 +470,27 @@ mod tests {
         // Re-request salt2: must return cached instance (same Arc pointer)
         let s2_again = adapter.get_or_create_session(salt2).unwrap();
         assert!(Arc::ptr_eq(&s2, &s2_again));
+    }
+
+    #[test]
+    fn decryption_session_cache_evicts_oldest_entry_at_capacity() {
+        let adapter = DownloadDecryptionAdapter::with_password("bounded-session-cache");
+        let mut first = None;
+        for value in 1u8..=17 {
+            let session = adapter.get_or_create_session([value; 16]).unwrap();
+            if value == 1 {
+                first = Some(session);
+            }
+        }
+
+        let guard = adapter.cached_sessions.lock().unwrap();
+        assert_eq!(guard.0.len(), 16);
+        assert!(!guard.0.contains_key(&[1; 16]));
+        assert!(guard.0.contains_key(&[17; 16]));
+        drop(guard);
+
+        let first_again = adapter.get_or_create_session([1; 16]).unwrap();
+        assert!(!Arc::ptr_eq(&first.unwrap(), &first_again));
     }
 
     #[test]
