@@ -31,10 +31,13 @@ pub fn numeral_to_byte(n: u16) -> Result<u8> {
     }
 }
 
-/// Extract and validate the 16-byte random salt from the first encrypted control line.
-pub fn extract_salt_from_line1(line1: &[u8]) -> Result<[u8; 16]> {
-    if line1.len() < 18 {
-        bail!("LINE_TRUNCATED: line 1 length is {} < 18", line1.len());
+pub const BOOTSTRAP_PREFIX_LEN: usize = 20;
+
+/// Extract and validate the 20-byte bootstrap prefix ([16B salt][4B uint32_be(segmentIndex)])
+/// from the first encrypted control line.
+pub fn extract_bootstrap_from_line1(line1: &[u8]) -> Result<([u8; 16], u32)> {
+    if line1.len() < 22 {
+        bail!("LINE_TRUNCATED: line 1 length is {} < 22", line1.len());
     }
     let mut salt = [0u8; 16];
     salt.copy_from_slice(&line1[0..16]);
@@ -46,6 +49,16 @@ pub fn extract_salt_from_line1(line1: &[u8]) -> Result<[u8; 16]> {
             );
         }
     }
+    let segment_index = u32::from_be_bytes(line1[16..20].try_into().unwrap());
+    if segment_index == 0 {
+        bail!("ZERO_SEGMENT_INDEX: segment index cannot be zero");
+    }
+    Ok((salt, segment_index))
+}
+
+/// Extract and validate the 16-byte random salt from the first encrypted control line.
+pub fn extract_salt_from_line1(line1: &[u8]) -> Result<[u8; 16]> {
+    let (salt, _) = extract_bootstrap_from_line1(line1)?;
     Ok(salt)
 }
 
@@ -114,11 +127,19 @@ pub struct LineSlice<'a> {
 }
 
 /// Split a buffer into lines while preserving line terminators (`\r\n` or `\n`).
+///
+/// For encrypted wire articles (which do not begin with `=y`), Line 1 carries a
+/// 20-byte bootstrap prefix ([16B salt][4B uint32_be(segmentIndex)]). Because
+/// uint32_be(segmentIndex) may contain 0x0A (LF) or 0x0D (CR), the Line 1 terminator
+/// is searched strictly after the 20-byte bootstrap prefix.
 pub fn split_lines_preserving_endings(input: &[u8]) -> Vec<LineSlice<'_>> {
     let mut lines = Vec::new();
     let mut pos = 0;
     while pos < input.len() {
         let start = pos;
+        if lines.is_empty() && !input.starts_with(b"=y") && input.len() >= BOOTSTRAP_PREFIX_LEN {
+            pos += BOOTSTRAP_PREFIX_LEN;
+        }
         while pos < input.len() && input[pos] != b'\n' {
             pos += 1;
         }
@@ -154,9 +175,9 @@ pub fn split_lines_preserving_endings(input: &[u8]) -> Vec<LineSlice<'_>> {
 
 /// Encrypt control lines in a yEnc block, preserving data lines and line terminators.
 ///
-/// Follows NIST SP 800-38G FF1 and yEnc Control Lines Standard v1.0:
+/// Follows NIST SP 800-38G FF1 and yEnc Control Lines Standard v1.1:
 /// - Physical lineIndex is 1-based, incrementing on every line (header, data, footer).
-/// - Line 1 (=ybegin) prepends 16-byte random salt to ciphertext.
+/// - Line 1 (=ybegin) prepends 20-byte bootstrap prefix ([16B salt][4B uint32_be(segmentIndex)]) to ciphertext.
 /// - Lines 2..N preserve exact length.
 /// - Data lines (not starting with `=y`) remain untouched.
 pub fn encrypt_yenc_control_lines(
@@ -169,7 +190,7 @@ pub fn encrypt_yenc_control_lines(
         return Ok(Vec::new());
     }
 
-    let mut out = Vec::with_capacity(yenc_block.len() + 16);
+    let mut out = Vec::with_capacity(yenc_block.len() + BOOTSTRAP_PREFIX_LEN);
     let salt = session.salt();
 
     for (i, line) in lines.iter().enumerate() {
@@ -179,6 +200,7 @@ pub fn encrypt_yenc_control_lines(
             let ct = ff1_encrypt_line(session.control_key(), &tweak, line.content)?;
             if line_index == 1 {
                 out.extend_from_slice(&salt);
+                out.extend_from_slice(&segment_index.to_be_bytes());
             }
             out.extend_from_slice(&ct);
             out.extend_from_slice(line.ending);
@@ -193,7 +215,7 @@ pub fn encrypt_yenc_control_lines(
 
 /// Decrypt control lines in a yEnc block, restoring original control lines.
 ///
-/// - Line 1: extracts 16-byte salt, decrypts, and verifies `=ybegin`.
+/// - Line 1: extracts 20-byte bootstrap prefix ([16B salt][4B uint32_be(segmentIndex)]), decrypts, and verifies `=ybegin`.
 /// - Subsequent header lines: decrypts until a data line is encountered.
 /// - Data lines: untouched.
 /// - Footer line: decrypts with lineIndex=N, verifies `=yend`.
@@ -208,15 +230,18 @@ pub fn decrypt_yenc_control_lines(
     }
 
     let n = lines.len();
-    let mut out = Vec::with_capacity(yenc_block.len().saturating_sub(16));
+    let mut out = Vec::with_capacity(yenc_block.len().saturating_sub(BOOTSTRAP_PREFIX_LEN));
 
     // Process line 1
     let line1 = &lines[0];
-    let salt = extract_salt_from_line1(line1.content)?;
+    let (salt, line1_segment_index) = extract_bootstrap_from_line1(line1.content)?;
     if salt != session.salt() {
         bail!("salt mismatch: line 1 salt does not match session salt");
     }
-    let ct1 = &line1.content[16..];
+    if line1_segment_index != segment_index {
+        bail!("DUAL_INDEX_MISMATCH: line 1 segment index {line1_segment_index} does not match expected {segment_index}");
+    }
+    let ct1 = &line1.content[BOOTSTRAP_PREFIX_LEN..];
     let tweak1 = session.derive_control_tweak(segment_index, 1);
     let pt1 = ff1_decrypt_line(session.control_key(), &tweak1, ct1)?;
     if !pt1.starts_with(b"=ybegin") {

@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{ensure, Context, Result};
+use anyhow::{ensure, Result};
 
 use crate::article::default_subject;
 use crate::config::ObfuscateMode;
@@ -258,7 +258,7 @@ pub fn generate(
 
     if is_encrypted {
         metas.push(("yenc_encrypted", "true"));
-        metas.push(("yenc_version", "1.0"));
+        metas.push(("yenc_version", "1.1"));
         metas.push(("yenc_cipher", "XChaCha20-Poly1305"));
     }
 
@@ -376,7 +376,7 @@ pub(super) fn write_file(
     groups: &[String],
     segs: &[PostedSegment],
     _obfuscate: ObfuscateMode,
-    is_encrypted: bool,
+    _is_encrypted: bool,
 ) -> Result<()> {
     let first = &segs[0];
     let file_counter = (first.total_files > 0).then_some((first.file_index, first.total_files));
@@ -418,30 +418,12 @@ pub(super) fn write_file(
     for seg in segs {
         // NZB segment bodies carry the Message-ID without angle brackets.
         let id = seg.message_id.trim_start_matches('<').trim_end_matches('>');
-        if is_encrypted {
-            let seg_idx = seg
-                .segment_identity
-                .as_ref()
-                .map(|i| i.segment_index)
-                .context(format!(
-                    "missing segment identity on encrypted segment for file `{}` part {}",
-                    seg.file_name, seg.part
-                ))?;
-            out.push_str(&format!(
-                "      <segment bytes=\"{}\" number=\"{}\" segmentIndex=\"{}\">{}</segment>\n",
-                seg.bytes,
-                seg.part,
-                seg_idx,
-                escape(id),
-            ));
-        } else {
-            out.push_str(&format!(
-                "      <segment bytes=\"{}\" number=\"{}\">{}</segment>\n",
-                seg.bytes,
-                seg.part,
-                escape(id),
-            ));
-        }
+        out.push_str(&format!(
+            "      <segment bytes=\"{}\" number=\"{}\">{}</segment>\n",
+            seg.bytes,
+            seg.part,
+            escape(id),
+        ));
     }
     out.push_str("    </segments>\n");
     out.push_str("  </file>\n");

@@ -221,13 +221,16 @@ fn parse_internal(content: &str, force_encrypted: bool) -> Result<ParsedNzb> {
     }
 
     let any_segment_has_index = raw_segments.iter().any(|s| s.raw_segment_index.is_some());
+    if force_encrypted && !explicit_yenc_encrypted && !any_segment_has_index {
+        bail!("MISSING_SEGMENT_INDEX: release lacks encryption provenance and segment index");
+    }
     let is_encrypted = force_encrypted
         || explicit_yenc_encrypted
         || (meta.password.is_some() && any_segment_has_index);
 
     if is_encrypted {
         if let Some(ref ver) = meta.yenc_version {
-            if ver != "1.0" {
+            if ver != "1.0" && ver != "1.1" {
                 bail!("unsupported yenc_version in nzb: {ver}");
             }
         }
@@ -237,65 +240,101 @@ fn parse_internal(content: &str, force_encrypted: bool) -> Result<ParsedNzb> {
             }
         }
         meta.yenc_encrypted = true;
-        let mut segment_identities = HashMap::new();
-        let mut seen_indices = HashSet::new();
-        let mut seen_message_ids: HashMap<String, u32> = HashMap::new();
-        let mut segments = Vec::with_capacity(raw_segments.len());
 
-        for raw in raw_segments {
-            let seg_idx_str = raw
-                .raw_segment_index
-                .as_deref()
-                .context("MISSING_SEGMENT_INDEX")?;
-            let seg_idx = parse_segment_index(seg_idx_str)?;
+        if any_segment_has_index {
+            let mut segment_identities = HashMap::new();
+            let mut seen_indices = HashSet::new();
+            let mut seen_message_ids: HashMap<String, u32> = HashMap::new();
+            let mut segments = Vec::with_capacity(raw_segments.len());
 
-            if let Some(&existing_idx) = seen_message_ids.get(&raw.message_id) {
-                if existing_idx != seg_idx {
-                    bail!("CONFLICTING_MESSAGE_ID_INDEX");
+            for raw in raw_segments {
+                let seg_idx_str = raw
+                    .raw_segment_index
+                    .as_deref()
+                    .context("MISSING_SEGMENT_INDEX")?;
+                let seg_idx = parse_segment_index(seg_idx_str)?;
+
+                if let Some(&existing_idx) = seen_message_ids.get(&raw.message_id) {
+                    if existing_idx != seg_idx {
+                        bail!("CONFLICTING_MESSAGE_ID_INDEX");
+                    }
+                } else {
+                    seen_message_ids.insert(raw.message_id.clone(), seg_idx);
                 }
-            } else {
-                seen_message_ids.insert(raw.message_id.clone(), seg_idx);
+
+                if !seen_indices.insert(seg_idx) {
+                    bail!("DUPLICATE_SEGMENT_INDEX");
+                }
+
+                let identity = SegmentIdentity::explicit(0, 0, raw.part, seg_idx)
+                    .context("failed to construct explicit segment identity")?;
+
+                segment_identities.insert(raw.message_id.clone(), identity);
+
+                segments.push(PostedSegment {
+                    file_name: raw.file_name.clone(),
+                    file_path: Arc::from(Path::new(&raw.file_name)),
+                    subject_name: Arc::from(raw.subject_name.as_str()),
+                    wire_name: Arc::from(""),
+                    wire_yenc_name: Arc::from(""),
+                    file_size: 0,
+                    part: raw.part,
+                    total: raw.total,
+                    message_id: raw.message_id,
+                    bytes: raw.bytes,
+                    from: Arc::from(raw.poster.as_str()),
+                    date: (None, raw.date),
+                    full_crc32: 0,
+                    server_idx: 0,
+                    file_index: raw.file_ordinal,
+                    total_files: raw.total_files,
+                    segment_identity: Some(identity),
+                });
             }
 
-            if !seen_indices.insert(seg_idx) {
-                bail!("DUPLICATE_SEGMENT_INDEX");
+            segments.sort_by(|a, b| a.file_name.cmp(&b.file_name).then(a.part.cmp(&b.part)));
+
+            Ok(ParsedNzb {
+                poster,
+                groups,
+                segments,
+                meta,
+                segment_identities: Some(segment_identities),
+            })
+        } else {
+            let mut segments = Vec::with_capacity(raw_segments.len());
+            for raw in raw_segments {
+                segments.push(PostedSegment {
+                    file_name: raw.file_name.clone(),
+                    file_path: Arc::from(Path::new(&raw.file_name)),
+                    subject_name: Arc::from(raw.subject_name.as_str()),
+                    wire_name: Arc::from(""),
+                    wire_yenc_name: Arc::from(""),
+                    file_size: 0,
+                    part: raw.part,
+                    total: raw.total,
+                    message_id: raw.message_id,
+                    bytes: raw.bytes,
+                    from: Arc::from(raw.poster.as_str()),
+                    date: (None, raw.date),
+                    full_crc32: 0,
+                    server_idx: 0,
+                    file_index: raw.file_ordinal,
+                    total_files: raw.total_files,
+                    segment_identity: None,
+                });
             }
 
-            let identity = SegmentIdentity::explicit(0, 0, raw.part, seg_idx)
-                .context("failed to construct explicit segment identity")?;
+            segments.sort_by(|a, b| a.file_name.cmp(&b.file_name).then(a.part.cmp(&b.part)));
 
-            segment_identities.insert(raw.message_id.clone(), identity);
-
-            segments.push(PostedSegment {
-                file_name: raw.file_name.clone(),
-                file_path: Arc::from(Path::new(&raw.file_name)),
-                subject_name: Arc::from(raw.subject_name.as_str()),
-                wire_name: Arc::from(""),
-                wire_yenc_name: Arc::from(""),
-                file_size: 0,
-                part: raw.part,
-                total: raw.total,
-                message_id: raw.message_id,
-                bytes: raw.bytes,
-                from: Arc::from(raw.poster.as_str()),
-                date: (None, raw.date),
-                full_crc32: 0,
-                server_idx: 0,
-                file_index: raw.file_ordinal,
-                total_files: raw.total_files,
-                segment_identity: Some(identity),
-            });
+            Ok(ParsedNzb {
+                poster,
+                groups,
+                segments,
+                meta,
+                segment_identities: None,
+            })
         }
-
-        segments.sort_by(|a, b| a.file_name.cmp(&b.file_name).then(a.part.cmp(&b.part)));
-
-        Ok(ParsedNzb {
-            poster,
-            groups,
-            segments,
-            meta,
-            segment_identities: Some(segment_identities),
-        })
     } else {
         meta.yenc_encrypted = false;
         let mut segments = Vec::with_capacity(raw_segments.len());

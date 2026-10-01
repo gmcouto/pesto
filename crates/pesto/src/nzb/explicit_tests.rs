@@ -70,8 +70,8 @@ fn test_tracer_explicit_segment_index_round_trip() {
         generate(&groups, &[segment], &meta, ObfuscateMode::None).expect("generation must succeed");
 
     assert!(
-        xml.contains("segmentIndex=\"1\""),
-        "XML must contain explicit segmentIndex attribute, got:\n{xml}"
+        !xml.contains("segmentIndex="),
+        "XML must NOT contain custom segmentIndex attribute, got:\n{xml}"
     );
     assert!(
         xml.contains("<meta type=\"yenc_encrypted\">true</meta>"),
@@ -83,25 +83,16 @@ fn test_tracer_explicit_segment_index_round_trip() {
         parsed.meta.yenc_encrypted,
         "parsed meta must be marked encrypted"
     );
-    let identities = parsed
-        .segment_identities
-        .expect("segment_identities map must be populated");
-
-    let parsed_id = identities
-        .get("<test-msg-01@example.com>")
-        .expect("segment identity must be present for message ID");
-    assert_eq!(parsed_id.segment_index, 1);
-    assert_eq!(parsed_id.part_number, 1);
-    assert_eq!(parsed_id.file_ordinal, 0);
-    assert_eq!(parsed_id.total_files, 0);
+    assert!(
+        parsed.segment_identities.is_none(),
+        "clean NZB 1.1 must have segment_identities: None"
+    );
 
     assert_eq!(parsed.segments.len(), 1);
-    let parsed_seg_id = parsed.segments[0]
-        .segment_identity
-        .expect("parsed segment must carry segment identity");
-    assert_eq!(parsed_seg_id.segment_index, 1);
-    assert_eq!(parsed_seg_id.file_ordinal, 0);
-    assert_eq!(parsed_seg_id.total_files, 0);
+    assert!(
+        parsed.segments[0].segment_identity.is_none(),
+        "clean NZB 1.1 parsed segment must have segment_identity: None"
+    );
 }
 
 #[test]
@@ -125,10 +116,10 @@ fn test_conformance_vectors_nzb_segment_identity() {
                 let parsed = parse_encrypted(nzb_xml)
                     .unwrap_or_else(|e| panic!("vector {id} failed valid parsing: {e}"));
                 assert!(parsed.meta.yenc_encrypted, "vector {id} must be encrypted");
-                let identities = parsed
-                    .segment_identities
-                    .as_ref()
-                    .unwrap_or_else(|| panic!("vector {id} missing identities map"));
+                assert!(
+                    parsed.segment_identities.is_none(),
+                    "clean NZB 1.1 must have segment_identities: None"
+                );
 
                 let expected_segs = vec["expected_segments"].as_array().unwrap();
                 assert_eq!(
@@ -138,43 +129,35 @@ fn test_conformance_vectors_nzb_segment_identity() {
                 );
 
                 for exp in expected_segs {
-                    let msg_id = exp["message_id"].as_str().unwrap();
-                    let canonical_mid = if msg_id.starts_with('<') {
-                        msg_id.to_string()
+                    let exp_mid = exp["message_id"].as_str().unwrap();
+                    let canonical_mid = if exp_mid.starts_with('<') {
+                        exp_mid.to_string()
                     } else {
-                        format!("<{msg_id}>")
+                        format!("<{exp_mid}>")
                     };
-                    let exp_index = exp["segment_index"].as_u64().unwrap() as u32;
-
-                    let id_val = identities.get(&canonical_mid).unwrap_or_else(|| {
-                        panic!("vector {id} missing identity for {canonical_mid}")
-                    });
-                    assert_eq!(
-                        id_val.segment_index, exp_index,
-                        "vector {id} index mismatch for {canonical_mid}"
-                    );
-                    assert_eq!(
-                        id_val.file_ordinal, 0,
-                        "vector {id} file_ordinal must be 0 (uncounted)"
-                    );
-                    assert_eq!(
-                        id_val.total_files, 0,
-                        "vector {id} total_files must be 0 (uncounted)"
-                    );
+                    let seg = parsed
+                        .segments
+                        .iter()
+                        .find(|s| s.message_id == canonical_mid)
+                        .unwrap_or_else(|| panic!("missing segment {canonical_mid}"));
+                    assert_eq!(seg.bytes, exp["bytes"].as_u64().unwrap());
+                    assert_eq!(seg.part, exp["part"].as_u64().unwrap() as u32);
+                    assert!(seg.segment_identity.is_none());
+                }
+            }
+            "legacy_attribute_ignored" => {
+                let parsed = parse_encrypted(nzb_xml)
+                    .unwrap_or_else(|e| panic!("vector {id} failed legacy parsing: {e}"));
+                assert!(parsed.meta.yenc_encrypted, "vector {id} must be encrypted");
+                assert!(parsed.segment_identities.is_none());
+                for seg in &parsed.segments {
+                    assert!(seg.segment_identity.is_none());
                 }
             }
             "invalid_identity" => {
-                let expected_error = vec["expected_error"].as_str().unwrap();
-                let res = parse_encrypted(nzb_xml);
-                assert!(
-                    res.is_err(),
-                    "vector {id} expected error {expected_error}, but passed successfully"
-                );
-                let err_msg = res.unwrap_err().to_string();
-                assert!(
-                    err_msg.contains(expected_error),
-                    "vector {id} error message '{err_msg}' should contain '{expected_error}'"
-                );
+                let parsed =
+                    parse(nzb_xml).unwrap_or_else(|e| panic!("vector {id} failed parse: {e}"));
+                assert!(parsed.meta.password.is_some());
             }
             "unencrypted_compatibility" => {
                 let parsed = parse(nzb_xml)
@@ -199,7 +182,12 @@ fn test_conformance_vectors_nzb_segment_identity() {
                     .unwrap_or_else(|e| panic!("vector {id} failed parse_encrypted: {e}"));
                 assert!(parsed.meta.yenc_encrypted);
 
-                let pwd = vec["transport_kdf_input"].as_str().unwrap();
+                let pwd = vec
+                    .get("transport_kdf_input")
+                    .or_else(|| vec.get("password"))
+                    .unwrap()
+                    .as_str()
+                    .unwrap();
                 let salt_vec = hex_decode(vec["salt_hex"].as_str().unwrap());
                 let mut salt = [0u8; 16];
                 salt.copy_from_slice(&salt_vec);
@@ -296,22 +284,19 @@ fn test_nzb_writer_emits_segment_indices() {
     )
     .unwrap();
 
-    assert!(xml.contains("segmentIndex=\"1\""));
-    assert!(xml.contains("segmentIndex=\"2\""));
+    assert!(!xml.contains("segmentIndex="));
     assert!(xml.contains("<meta type=\"yenc_encrypted\">true</meta>"));
-    assert!(xml.contains("<meta type=\"yenc_version\">1.0</meta>"));
+    assert!(xml.contains("<meta type=\"yenc_version\">1.1</meta>"));
     assert!(xml.contains("<meta type=\"yenc_cipher\">XChaCha20-Poly1305</meta>"));
 
     let parsed = parse_encrypted(&xml).unwrap();
     assert_eq!(parsed.segments.len(), 2);
-    assert_eq!(parsed.meta.yenc_version.as_deref(), Some("1.0"));
+    assert_eq!(parsed.meta.yenc_version.as_deref(), Some("1.1"));
     assert_eq!(
         parsed.meta.yenc_cipher.as_deref(),
         Some("XChaCha20-Poly1305")
     );
-    let id_map = parsed.segment_identities.unwrap();
-    assert_eq!(id_map.get("<id1@x>").unwrap().segment_index, 1);
-    assert_eq!(id_map.get("<id2@x>").unwrap().segment_index, 2);
+    assert!(parsed.segment_identities.is_none());
 }
 
 #[test]
@@ -504,13 +489,10 @@ fn test_validate_segments_allows_decoupled_obfuscation_and_subsets() {
         ObfuscateMode::Full,
     )
     .unwrap();
-    assert!(xml.contains("segmentIndex=\"10\""));
-    assert!(xml.contains("segmentIndex=\"20\""));
+    assert!(!xml.contains("segmentIndex="));
 
     let parsed = parse_encrypted(&xml).unwrap();
-    let id_map = parsed.segment_identities.unwrap();
-    assert_eq!(id_map.get("<id1@x>").unwrap().segment_index, 10);
-    assert_eq!(id_map.get("<id2@x>").unwrap().segment_index, 20);
+    assert!(parsed.segment_identities.is_none());
 }
 
 #[test]
@@ -545,18 +527,9 @@ fn test_imported_uncounted_identity_round_trip() {
     let groups = vec!["alt.binaries.test".to_string()];
     let regen_xml = generate(&groups, &parsed.segments, &parsed.meta, ObfuscateMode::None).unwrap();
 
-    assert!(regen_xml.contains("segmentIndex=\"42\""));
-    assert!(regen_xml.contains("segmentIndex=\"99\""));
+    assert!(!regen_xml.contains("segmentIndex="));
     assert!(regen_xml.contains("<meta type=\"yenc_encrypted\">true</meta>"));
 
     let parsed2 = parse_encrypted(&regen_xml).unwrap();
-    let id_map = parsed2.segment_identities.unwrap();
-    assert_eq!(
-        id_map.get("<art-42@example.com>").unwrap().segment_index,
-        42
-    );
-    assert_eq!(
-        id_map.get("<art-99@example.com>").unwrap().segment_index,
-        99
-    );
+    assert!(parsed2.segment_identities.is_none());
 }

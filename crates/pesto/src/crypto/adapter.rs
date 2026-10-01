@@ -68,8 +68,8 @@ impl UploadEncryptionAdapter {
             write!(&mut hex_tag, "{:02x}", b).unwrap();
         }
         let yenc_line = format!(
-            "=yencryption cipher=XChaCha20-Poly1305 salt={} tag={}\r\n",
-            hex_salt, hex_tag
+            "=yencryption cipher=XChaCha20-Poly1305 salt={} index={:08x} tag={}\r\n",
+            hex_salt, identity.segment_index, hex_tag
         );
 
         // Insert =yencryption after =ypart (if multipart) or after =ybegin (if single-part)
@@ -113,14 +113,16 @@ impl UploadEncryptionAdapter {
 pub struct YEncryptionParams {
     pub cipher: String,
     pub salt: [u8; 16],
+    pub segment_index: u32,
     pub tag: [u8; 16],
 }
 
 /// Parse parameters from `=yencryption ...` control line.
 ///
 /// Accepts only the canonical token sequence:
-/// `=yencryption cipher=XChaCha20-Poly1305 salt=<32_hex_chars> tag=<32_hex_chars>`
+/// `=yencryption cipher=XChaCha20-Poly1305 salt=<32_hex_chars> index=<8_hex_chars> tag=<32_hex_chars>`
 /// Salt and tag must be exactly 32 lowercase hexadecimal characters.
+/// Index must be exactly 8 lowercase hexadecimal characters representing uint32_be > 0.
 /// No extra, duplicate, missing, or reordered fields are permitted.
 pub fn parse_yencryption_line(line: &[u8]) -> Result<YEncryptionParams> {
     ensure!(line.starts_with(b"=yencryption"), "not a =yencryption line");
@@ -152,7 +154,7 @@ pub fn parse_yencryption_line(line: &[u8]) -> Result<YEncryptionParams> {
         if tokens.iter().skip(1).any(|t| t.starts_with("cipher=")) {
             bail!("REORDERED_HEADER: cipher parameter out of order");
         } else {
-            bail!("MISSING_CIPHER: cipher parameter missing");
+            bail!("INVALID_TOKEN_COUNT: missing cipher parameter");
         }
     }
     let cipher_val = &tokens[1]["cipher=".len()..];
@@ -163,15 +165,22 @@ pub fn parse_yencryption_line(line: &[u8]) -> Result<YEncryptionParams> {
         bail!("UNSUPPORTED_CIPHER: unsupported cipher {cipher_val}");
     }
 
-    // Token 2 must be salt=
-    if tokens.len() < 3 {
-        bail!("MISSING_SALT: salt parameter missing");
+    if tokens.len() < 5 {
+        bail!(
+            "INVALID_TOKEN_COUNT: expected 5 tokens, got {}",
+            tokens.len()
+        );
     }
+    if tokens.len() > 5 {
+        bail!("EXTRA_PARAMETER: unexpected additional parameters in =yencryption header");
+    }
+
+    // Token 2 must be salt=
     if !tokens[2].starts_with("salt=") {
-        if tokens.iter().skip(3).any(|t| t.starts_with("salt=")) {
+        if tokens.iter().skip(1).any(|t| t.starts_with("salt=")) {
             bail!("REORDERED_HEADER: salt parameter out of order");
         } else {
-            bail!("MISSING_SALT: salt parameter missing");
+            bail!("INVALID_TOKEN_COUNT: missing salt parameter");
         }
     }
     let salt_str = &tokens[2]["salt=".len()..];
@@ -193,18 +202,45 @@ pub fn parse_yencryption_line(line: &[u8]) -> Result<YEncryptionParams> {
             .map_err(|_| anyhow::anyhow!("INVALID_SALT_HEX: salt contains non-hex characters"))?;
     }
 
-    // Token 3 must be tag=
-    if tokens.len() < 4 {
-        bail!("MISSING_TAG: tag parameter missing");
+    // Token 3 must be index=
+    if !tokens[3].starts_with("index=") {
+        if tokens.iter().skip(1).any(|t| t.starts_with("index=")) {
+            bail!("REORDERED_HEADER: index parameter out of order");
+        } else {
+            bail!("INVALID_TOKEN_COUNT: missing index parameter");
+        }
     }
-    if !tokens[3].starts_with("tag=") {
+    let index_str = &tokens[3]["index=".len()..];
+    if index_str.len() != 8 {
+        bail!(
+            "INVALID_INDEX_LENGTH: index must be exactly 8 hex characters, got {}",
+            index_str.len()
+        );
+    }
+    if index_str.chars().any(|c| matches!(c, 'A'..='F')) {
+        bail!("UPPERCASE_HEX: index contains uppercase hex characters");
+    }
+    if index_str
+        .chars()
+        .any(|c| !c.is_ascii_digit() && !matches!(c, 'a'..='f'))
+    {
+        bail!("INVALID_INDEX_HEX: index contains non-hex characters");
+    }
+    let segment_index = u32::from_str_radix(index_str, 16)
+        .map_err(|_| anyhow::anyhow!("INVALID_INDEX_HEX: failed to parse index hex"))?;
+    if segment_index == 0 {
+        bail!("ZERO_SEGMENT_INDEX: segment index cannot be zero");
+    }
+
+    // Token 4 must be tag=
+    if !tokens[4].starts_with("tag=") {
         if tokens.iter().skip(1).any(|t| t.starts_with("tag=")) {
             bail!("REORDERED_HEADER: tag parameter out of order");
         } else {
-            bail!("MISSING_TAG: tag parameter missing");
+            bail!("INVALID_TOKEN_COUNT: missing tag parameter");
         }
     }
-    let tag_str = &tokens[3]["tag=".len()..];
+    let tag_str = &tokens[4]["tag=".len()..];
     if tag_str.len() != 32 {
         bail!(
             "INVALID_TAG_LENGTH: tag must be exactly 32 hex characters, got {}",
@@ -223,13 +259,10 @@ pub fn parse_yencryption_line(line: &[u8]) -> Result<YEncryptionParams> {
             .map_err(|_| anyhow::anyhow!("INVALID_TAG_HEX: tag contains non-hex characters"))?;
     }
 
-    if tokens.len() > 4 {
-        bail!("EXTRA_PARAMETER: unexpected additional parameters in =yencryption header");
-    }
-
     Ok(YEncryptionParams {
         cipher: "XChaCha20-Poly1305".to_string(),
         salt,
+        segment_index,
         tag,
     })
 }
@@ -347,29 +380,45 @@ impl DownloadDecryptionAdapter {
     /// If encrypted, requires `segment_index` and valid session/password.
     /// Strictly guarantees Zero-Output on authentication failure.
     pub fn decode_article(&self, body: &[u8], segment_index: Option<u32>) -> Result<DecodedPart> {
-        let Some(segment_index) = segment_index else {
-            ensure!(
-                body.starts_with(b"=ybegin"),
-                "encrypted article received without segment identity"
-            );
+        let caller_segment_index = segment_index;
+        if body.starts_with(b"=ybegin") {
+            if caller_segment_index.is_some() {
+                bail!(
+                    "UNAUTHENTICATED_ARTICLE: unencrypted article received for encrypted segment"
+                );
+            }
             return yenc::decode_part(body);
-        };
+        }
 
-        ensure!(segment_index > 0, "segment index must be greater than zero");
-        ensure!(
-            !body.starts_with(b"=ybegin"),
-            "UNAUTHENTICATED_ARTICLE: unencrypted article received for encrypted segment"
-        );
-
-        let first_line_end = body
-            .iter()
-            .position(|&b| b == b'\n')
-            .context("article has no newline terminators")?;
+        let first_line_end =
+            if !body.starts_with(b"=y") && body.len() >= control::BOOTSTRAP_PREFIX_LEN {
+                body[control::BOOTSTRAP_PREFIX_LEN..]
+                    .iter()
+                    .position(|&b| b == b'\n')
+                    .map(|p| p + control::BOOTSTRAP_PREFIX_LEN)
+                    .context("article has no newline terminators")?
+            } else {
+                body.iter()
+                    .position(|&b| b == b'\n')
+                    .context("article has no newline terminators")?
+            };
         let first_line = &body[..first_line_end]
             .strip_suffix(b"\r")
             .unwrap_or(&body[..first_line_end]);
 
-        let salt = control::extract_salt_from_line1(first_line)?;
+        let (salt, line1_segment_index) = control::extract_bootstrap_from_line1(first_line)?;
+        let segment_index = match caller_segment_index {
+            Some(caller_idx) => {
+                ensure!(
+                    caller_idx == line1_segment_index,
+                    "CALLER_INDEX_MISMATCH: caller index {} does not match line 1 bootstrap index {}",
+                    caller_idx,
+                    line1_segment_index
+                );
+                caller_idx
+            }
+            None => line1_segment_index,
+        };
         let session = self.get_or_create_session(salt)?;
 
         // Decrypt control lines
@@ -378,10 +427,16 @@ impl DownloadDecryptionAdapter {
         // Extract and remove =yencryption line
         let (yenc_params, clean_yenc) = extract_and_remove_yencryption(&restored_yenc)?;
 
-        // Ensure salt agreement between control line 1 and =yencryption header
+        // Dual-Bootstrap Agreement
         ensure!(
             yenc_params.salt == session.salt(),
-            "salt mismatch between control line 1 and =yencryption header"
+            "SALT_MISMATCH: salt mismatch between control line 1 and =yencryption header"
+        );
+        ensure!(
+            yenc_params.segment_index == segment_index,
+            "DUAL_INDEX_MISMATCH: segmentIndex mismatch between control line 1 ({}) and =yencryption header ({})",
+            segment_index,
+            yenc_params.segment_index
         );
 
         // Decode yEnc ciphertext
@@ -390,7 +445,7 @@ impl DownloadDecryptionAdapter {
         // Ciphertext CRC check before AEAD decryption
         ensure!(decoded.crc_matches(), "ciphertext CRC mismatch");
 
-        // Authenticate and decrypt body ciphertext
+        // Authenticate and decrypt body ciphertext with Zero-Output Guarantee
         let nonce = session.derive_body_nonce(segment_index);
         let plaintext = body::decrypt_body(
             &decoded.data,
@@ -404,6 +459,7 @@ impl DownloadDecryptionAdapter {
         decoded.part_crc32 = None;
         decoded.file_crc32 = None;
         decoded.data = plaintext;
+
         Ok(decoded)
     }
 

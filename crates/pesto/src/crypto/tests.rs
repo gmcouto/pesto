@@ -153,7 +153,12 @@ fn test_nonce_and_tweak_test_vectors() {
         .find(|vector| vector["id"] == "control-vec-01-line-1-ybegin-single")
         .expect("canonical control-line vector must exist");
     assert_eq!(
-        control_vector["transport_kdf_input"].as_str().unwrap(),
+        control_vector
+            .get("transport_kdf_input")
+            .or_else(|| control_vector.get("password"))
+            .unwrap()
+            .as_str()
+            .unwrap(),
         argon2id_vector.transport_kdf_input
     );
     assert_eq!(
@@ -207,7 +212,11 @@ struct BodyEncryptionVector {
     segment_index: u32,
     plaintext_hex: String,
     expected_ciphertext_hex: String,
+    #[serde(default)]
+    expected_index_hex: Option<String>,
     expected_tag_hex: String,
+    #[serde(default)]
+    expected_yencryption_line: Option<String>,
 }
 
 #[test]
@@ -241,6 +250,29 @@ fn test_body_encryption_test_vectors() {
             "tag mismatch for vector {}",
             vec.id
         );
+
+        if let Some(expected_index) = &vec.expected_index_hex {
+            let actual_index = format!("{:08x}", vec.segment_index);
+            assert_eq!(
+                actual_index, *expected_index,
+                "index hex mismatch for vector {}",
+                vec.id
+            );
+        }
+
+        if let Some(expected_line) = &vec.expected_yencryption_line {
+            let actual_line = format!(
+                "=yencryption cipher=XChaCha20-Poly1305 salt={} index={:08x} tag={}",
+                vec.salt_hex,
+                vec.segment_index,
+                hex_encode(&tag)
+            );
+            assert_eq!(
+                actual_line, *expected_line,
+                "header mismatch for vector {}",
+                vec.id
+            );
+        }
 
         // Roundtrip decrypt
         let decrypted = decrypt_body(&ct, &tag, session.master_key(), &nonce)
@@ -284,8 +316,8 @@ fn test_control_line_encryption_test_vectors() {
             let is_line_1 = vec["is_line_1"].as_bool().unwrap_or(false);
             let wire_bytes = if is_line_1 {
                 let expected_wire = hex_decode(vec["expected_wire_hex"].as_str().unwrap());
-                let salt = &expected_wire[0..16];
-                [salt, &ct_bytes].concat()
+                let bootstrap = &expected_wire[0..control::BOOTSTRAP_PREFIX_LEN];
+                [bootstrap, &ct_bytes].concat()
             } else {
                 ct_bytes.clone()
             };
@@ -316,7 +348,12 @@ fn test_control_line_encryption_test_vectors() {
                 .map(|h| h.as_str().unwrap())
                 .collect();
 
-            let password = vec["transport_kdf_input"].as_str().unwrap();
+            let password = vec
+                .get("transport_kdf_input")
+                .or_else(|| vec.get("password"))
+                .unwrap()
+                .as_str()
+                .unwrap();
             let salt_bytes = hex_decode(vec["salt_hex"].as_str().unwrap());
             let mut salt = [0u8; 16];
             salt.copy_from_slice(&salt_bytes);
@@ -445,7 +482,12 @@ fn test_malformed_inputs_rejection() {
                 );
             }
             "auth_failure" => {
-                let password = vec["transport_kdf_input"].as_str().unwrap();
+                let password = vec
+                    .get("transport_kdf_input")
+                    .or_else(|| vec.get("password"))
+                    .unwrap()
+                    .as_str()
+                    .unwrap();
                 let salt_bytes = hex_decode(vec["salt_hex"].as_str().unwrap());
                 let mut salt = [0u8; 16];
                 salt.copy_from_slice(&salt_bytes);
@@ -526,6 +568,67 @@ fn test_malformed_inputs_rejection() {
                         "vector {id} error '{err_msg}' should contain '{expected_err}'"
                     );
                 }
+            }
+            "salt_mismatch" => {
+                let line1_salt_bytes = hex_decode(vec["line1_salt_hex"].as_str().unwrap());
+                let header_salt_hex = vec["header_salt_hex"].as_str().unwrap();
+                let line1_idx = vec["line1_index"].as_u64().unwrap() as u32;
+                let header_idx = vec["header_index"].as_u64().unwrap() as u32;
+
+                let mut salt = [0u8; 16];
+                salt.copy_from_slice(&line1_salt_bytes);
+                let session = Arc::new(EncryptionSession::new("test123", salt).unwrap());
+                let upload_adapter = UploadEncryptionAdapter::new(session.clone());
+
+                let payload = b"Hello World Dual Bootstrap Test";
+                let spec = PartSpec {
+                    number: 1,
+                    total: 1,
+                    offset: 0,
+                };
+                let identity = SegmentIdentity::checked(0, 1, 1, line1_idx).unwrap();
+                let mut body = Vec::new();
+                let enc = upload_adapter
+                    .encode_article(
+                        "file.bin",
+                        payload.len() as u64,
+                        spec,
+                        payload,
+                        128,
+                        None,
+                        identity,
+                        &mut body,
+                    )
+                    .unwrap();
+
+                let restored =
+                    control::decrypt_yenc_control_lines(&session, line1_idx, &enc.body).unwrap();
+                let split = control::split_lines_preserving_endings(&restored);
+                let mut modified = Vec::new();
+                for line in split {
+                    if line.content.starts_with(b"=yencryption") {
+                        let new_header = format!(
+                            "=yencryption cipher=XChaCha20-Poly1305 salt={} index={:08x} tag=ed70d238067735a20783df5e094ccafa",
+                            header_salt_hex, header_idx
+                        );
+                        modified.extend_from_slice(new_header.as_bytes());
+                        modified.extend_from_slice(line.ending);
+                    } else {
+                        modified.extend_from_slice(line.content);
+                        modified.extend_from_slice(line.ending);
+                    }
+                }
+                let re_enc =
+                    control::encrypt_yenc_control_lines(&session, line1_idx, &modified).unwrap();
+
+                let download_adapter = DownloadDecryptionAdapter::with_password("test123");
+                let res = download_adapter.decode_article(&re_enc, None);
+                assert!(res.is_err(), "vector {id} expected error {expected_err}");
+                let err_msg = res.unwrap_err().to_string();
+                assert!(
+                    err_msg.contains(expected_err),
+                    "vector {id} error '{err_msg}' should contain '{expected_err}'"
+                );
             }
             _ => {}
         }
@@ -847,17 +950,23 @@ fn test_adapter_malformed_headers_matrix() {
     // 1. Test parse_yencryption_line on various malformed lines
     let bad_cases = [
         ("=yencryption", "MISSING_CIPHER"),
-        ("=yencryption cipher=AES-256-GCM salt=1a2b3c4d5e6f7890abcdef1234567890 tag=ed70d238067735a20783df5e094ccafa", "UNSUPPORTED_CIPHER"),
-        ("=yencryption cipher=XChaCha20-Poly1305 tag=ed70d238067735a20783df5e094ccafa salt=1a2b3c4d5e6f7890abcdef1234567890", "REORDERED_HEADER"),
-        ("=yencryption salt=1a2b3c4d5e6f7890abcdef1234567890 cipher=XChaCha20-Poly1305 tag=ed70d238067735a20783df5e094ccafa", "REORDERED_HEADER"),
-        ("=yencryption cipher=XChaCha20-Poly1305 salt=1A2B3C4D5E6F7890ABCDEF1234567890 tag=ed70d238067735a20783df5e094ccafa", "INVALID_SALT_HEX"),
-        ("=yencryption cipher=XChaCha20-Poly1305 salt=1a2b3c4d5e6f7890abcdef1234567890 tag=ED70D238067735A20783DF5E094CCAFA", "INVALID_TAG_HEX"),
-        ("=yencryption cipher=XChaCha20-Poly1305 salt=1a2b3c4d5e6f7890abcdef12345678 tag=ed70d238067735a20783df5e094ccafa", "INVALID_SALT_LENGTH"),
-        ("=yencryption cipher=XChaCha20-Poly1305 salt=1a2b3c4d5e6f7890abcdef123456789011 tag=ed70d238067735a20783df5e094ccafa", "INVALID_SALT_LENGTH"),
-        ("=yencryption cipher=XChaCha20-Poly1305 salt=1a2b3c4d5e6f7890abcdef1234567890 tag=ed70d238067735a20783df5e094cca", "INVALID_TAG_LENGTH"),
-        ("=yencryption cipher=XChaCha20-Poly1305 salt=1a2b3c4d5e6f7890abcdef1234567890 tag=ed70d238067735a20783df5e094ccafaaa", "INVALID_TAG_LENGTH"),
-        ("=yencryption cipher=XChaCha20-Poly1305 salt=1a2b3c4d5e6f7890abcdef1234567890 tag=ed70d238067735a20783df5e094ccafa extra=1", "EXTRA_PARAMETER"),
-        ("=yencryption cipher=XChaCha20-Poly1305 salt=1a2b3c4d5e6f7890abcdef1234567890 salt=1a2b3c4d5e6f7890abcdef1234567890 tag=ed70d238067735a20783df5e094ccafa", "DUPLICATE_PARAMETER"),
+        ("=yencryption cipher=AES-256-GCM salt=1a2b3c4d5e6f7890abcdef1234567890 index=00000001 tag=ed70d238067735a20783df5e094ccafa", "UNSUPPORTED_CIPHER"),
+        ("=yencryption cipher=XChaCha20-Poly1305 tag=ed70d238067735a20783df5e094ccafa salt=1a2b3c4d5e6f7890abcdef1234567890 index=00000001", "REORDERED_HEADER"),
+        ("=yencryption salt=1a2b3c4d5e6f7890abcdef1234567890 cipher=XChaCha20-Poly1305 index=00000001 tag=ed70d238067735a20783df5e094ccafa", "REORDERED_HEADER"),
+        ("=yencryption cipher=XChaCha20-Poly1305 salt=1A2B3C4D5E6F7890ABCDEF1234567890 index=00000001 tag=ed70d238067735a20783df5e094ccafa", "INVALID_SALT_HEX"),
+        ("=yencryption cipher=XChaCha20-Poly1305 salt=1a2b3c4d5e6f7890abcdef1234567890 index=00000001 tag=ED70D238067735A20783DF5E094CCAFA", "INVALID_TAG_HEX"),
+        ("=yencryption cipher=XChaCha20-Poly1305 salt=1a2b3c4d5e6f7890abcdef12345678 index=00000001 tag=ed70d238067735a20783df5e094ccafa", "INVALID_SALT_LENGTH"),
+        ("=yencryption cipher=XChaCha20-Poly1305 salt=1a2b3c4d5e6f7890abcdef123456789011 index=00000001 tag=ed70d238067735a20783df5e094ccafa", "INVALID_SALT_LENGTH"),
+        ("=yencryption cipher=XChaCha20-Poly1305 salt=1a2b3c4d5e6f7890abcdef1234567890 index=00000001 tag=ed70d238067735a20783df5e094cca", "INVALID_TAG_LENGTH"),
+        ("=yencryption cipher=XChaCha20-Poly1305 salt=1a2b3c4d5e6f7890abcdef1234567890 index=00000001 tag=ed70d238067735a20783df5e094ccafaaa", "INVALID_TAG_LENGTH"),
+        ("=yencryption cipher=XChaCha20-Poly1305 salt=1a2b3c4d5e6f7890abcdef1234567890 index=00000001 tag=ed70d238067735a20783df5e094ccafa extra=1", "EXTRA_PARAMETER"),
+        ("=yencryption cipher=XChaCha20-Poly1305 salt=1a2b3c4d5e6f7890abcdef1234567890 index=00000001 salt=1a2b3c4d5e6f7890abcdef1234567890 tag=ed70d238067735a20783df5e094ccafa", "DUPLICATE_PARAMETER"),
+        ("=yencryption cipher=XChaCha20-Poly1305 salt=1a2b3c4d5e6f7890abcdef1234567890 index=00000000 tag=ed70d238067735a20783df5e094ccafa", "ZERO_SEGMENT_INDEX"),
+        ("=yencryption cipher=XChaCha20-Poly1305 salt=1a2b3c4d5e6f7890abcdef1234567890 index=0001 tag=ed70d238067735a20783df5e094ccafa", "INVALID_INDEX_LENGTH"),
+        ("=yencryption cipher=XChaCha20-Poly1305 salt=1a2b3c4d5e6f7890abcdef1234567890 index=000000001 tag=ed70d238067735a20783df5e094ccafa", "INVALID_INDEX_LENGTH"),
+        ("=yencryption cipher=XChaCha20-Poly1305 salt=1a2b3c4d5e6f7890abcdef1234567890 index=0000000g tag=ed70d238067735a20783df5e094ccafa", "INVALID_INDEX_HEX"),
+        ("=yencryption cipher=XChaCha20-Poly1305 salt=1a2b3c4d5e6f7890abcdef1234567890 index=0000000F tag=ed70d238067735a20783df5e094ccafa", "UPPERCASE_HEX"),
+        ("=yencryption cipher=XChaCha20-Poly1305 salt=1a2b3c4d5e6f7890abcdef1234567890 tag=ed70d238067735a20783df5e094ccafa", "INVALID_TOKEN_COUNT"),
     ];
 
     for (line, expected_err) in bad_cases {
@@ -871,7 +980,7 @@ fn test_adapter_malformed_headers_matrix() {
     }
 
     // 2. Misplaced and duplicate =yencryption in full article
-    let article_duplicate = b"=ybegin line=128 size=4 name=test.bin\r\n=yencryption cipher=XChaCha20-Poly1305 salt=1a2b3c4d5e6f7890abcdef1234567890 tag=ed70d238067735a20783df5e094ccafa\r\ntest\r\n=yencryption cipher=XChaCha20-Poly1305 salt=1a2b3c4d5e6f7890abcdef1234567890 tag=ed70d238067735a20783df5e094ccafa\r\n=yend size=4 crc32=d87f7e0c\r\n".to_vec();
+    let article_duplicate = b"=ybegin line=128 size=4 name=test.bin\r\n=yencryption cipher=XChaCha20-Poly1305 salt=1a2b3c4d5e6f7890abcdef1234567890 index=00000001 tag=ed70d238067735a20783df5e094ccafa\r\ntest\r\n=yencryption cipher=XChaCha20-Poly1305 salt=1a2b3c4d5e6f7890abcdef1234567890 index=00000001 tag=ed70d238067735a20783df5e094ccafa\r\n=yend size=4 crc32=d87f7e0c\r\n".to_vec();
     let res_dup = extract_and_remove_yencryption(&article_duplicate);
     assert!(res_dup.is_err());
     assert!(res_dup
@@ -880,7 +989,7 @@ fn test_adapter_malformed_headers_matrix() {
         .contains("duplicate or misplaced"));
 
     // Multipart missing =ypart before =yencryption
-    let article_bad_multipart = b"=ybegin part=1 total=2 line=128 size=8 name=test.bin\r\n=yencryption cipher=XChaCha20-Poly1305 salt=1a2b3c4d5e6f7890abcdef1234567890 tag=ed70d238067735a20783df5e094ccafa\r\n=ypart begin=1 end=4\r\ntest\r\n=yend size=4 part=1 pcrc32=d87f7e0c\r\n";
+    let article_bad_multipart = b"=ybegin part=1 total=2 line=128 size=8 name=test.bin\r\n=yencryption cipher=XChaCha20-Poly1305 salt=1a2b3c4d5e6f7890abcdef1234567890 index=00000001 tag=ed70d238067735a20783df5e094ccafa\r\n=ypart begin=1 end=4\r\ntest\r\n=yend size=4 part=1 pcrc32=d87f7e0c\r\n";
     let res_bad_mp = extract_and_remove_yencryption(article_bad_multipart);
     assert!(res_bad_mp.is_err());
 }
@@ -915,10 +1024,13 @@ fn test_adapter_zero_output_rejection_matrix() {
 
     let download_adapter = Arc::new(DownloadDecryptionAdapter::with_password(password));
 
-    // 1. Missing segment identity on encrypted article fails closed
-    assert!(download_adapter.decode_article(&enc.body, None).is_err());
+    // 1. Calling decode_article with None succeeds because article is self-describing
+    let dec_none = download_adapter
+        .decode_article(&enc.body, None)
+        .expect("self-describing article decodes with None segment_index");
+    assert_eq!(dec_none.data, payload);
 
-    // 2. Segment index mismatch fails closed
+    // 2. Caller segment index mismatch fails closed
     assert!(download_adapter.decode_article(&enc.body, Some(2)).is_err());
 
     // 3. Wrong password fails closed

@@ -242,7 +242,9 @@ fn test_cli_upload_artifacts_emits_encrypted_nzb() {
         pesto::nzb::parse_encrypted(&content).expect("generated nzb must parse as encrypted");
     assert!(parsed.meta.yenc_encrypted);
     assert_eq!(parsed.meta.password.as_deref(), Some("testpass"));
-    assert!(content.contains("segmentIndex=\"1\""));
+    assert!(!content.contains("segmentIndex="));
+    assert!(content.contains("<meta type=\"yenc_encrypted\">true</meta>"));
+    assert!(parsed.segment_identities.is_none());
 }
 
 #[test]
@@ -337,9 +339,9 @@ fn test_cli_merge_encrypted_nzbs_preserves_encryption() {
     assert!(parsed.meta.yenc_encrypted);
     assert_eq!(parsed.meta.password.as_deref(), Some("sharedpass"));
     assert_eq!(parsed.segments.len(), 2);
-    let id_map = parsed.segment_identities.unwrap();
-    assert_eq!(id_map.get("<art1@example.com>").unwrap().segment_index, 1);
-    assert_eq!(id_map.get("<art2@example.com>").unwrap().segment_index, 2);
+    assert!(parsed.segment_identities.is_none());
+    assert!(!merged_content.contains("segmentIndex="));
+    assert!(merged_content.contains("<meta type=\"yenc_encrypted\">true</meta>"));
 }
 
 #[test]
@@ -485,20 +487,12 @@ async fn test_encrypted_upload_emits_segment_indices() {
         ObfuscateMode::None,
     )
     .unwrap();
-    assert!(xml.contains("segmentIndex=\"1\""));
-    assert!(xml.contains("segmentIndex=\"2\""));
+    assert!(!xml.contains("segmentIndex="));
     assert!(xml.contains("<meta type=\"yenc_encrypted\">true</meta>"));
 
     let parsed = pesto::nzb::parse_encrypted(&xml).unwrap();
     assert!(parsed.meta.yenc_encrypted);
-    let id_map = parsed.segment_identities.unwrap();
-    for seg in &outcome.segments {
-        let actual_id = id_map.get(&seg.message_id).unwrap();
-        assert_eq!(
-            actual_id.segment_index,
-            seg.segment_identity.unwrap().segment_index
-        );
-    }
+    assert!(parsed.segment_identities.is_none());
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -850,19 +844,17 @@ async fn test_persistence_lifecycle_invariants() {
     assert_eq!(xml1, xml2);
 
     let parsed = pesto::nzb::parse_encrypted(&xml1).unwrap();
-    let id_map = parsed.segment_identities.unwrap();
-    for seg in &outcome.segments {
-        assert_eq!(
-            id_map.get(&seg.message_id).unwrap().segment_index,
-            seg.segment_identity.unwrap().segment_index
-        );
-    }
+    assert!(parsed.meta.yenc_encrypted);
+    assert!(!xml1.contains("segmentIndex="));
+    assert!(xml1.contains("<meta type=\"yenc_encrypted\">true</meta>"));
+    assert!(parsed.segment_identities.is_none());
 
     // Assert that captured articles match the saved salt
     let articles = captured.lock().unwrap();
     for article in articles.iter() {
         let body = article_body(article);
-        let art_salt = control::extract_salt_from_line1(body).unwrap();
+        let (art_salt, art_index) = control::extract_bootstrap_from_line1(body).unwrap();
         assert_eq!(&art_salt, saved_salt);
+        assert!(art_index > 0);
     }
 }
