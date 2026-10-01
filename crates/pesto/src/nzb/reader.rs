@@ -166,10 +166,9 @@ fn parse_internal(content: &str, force_encrypted: bool) -> Result<ParsedNzb> {
         } else if t == "</groups>" {
             in_groups = false;
         } else if in_groups {
-            if let Some(g) = xml_text(t, "group") {
-                if !groups.contains(&g) {
-                    groups.push(g);
-                }
+            let g = xml_text(t, "group").context("malformed XML text in group")?;
+            if !groups.contains(&g) {
+                groups.push(g);
             }
         } else if in_file && t.starts_with("<segment ") {
             let bytes: u64 = xml_attr(t, "bytes")
@@ -178,7 +177,7 @@ fn parse_internal(content: &str, force_encrypted: bool) -> Result<ParsedNzb> {
             let part: u32 = xml_attr(t, "number")
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(0);
-            let raw_id = xml_text(t, "segment").unwrap_or_default();
+            let raw_id = xml_text(t, "segment").context("malformed XML text in segment")?;
             let message_id = if raw_id.starts_with('<') {
                 raw_id
             } else {
@@ -201,7 +200,7 @@ fn parse_internal(content: &str, force_encrypted: bool) -> Result<ParsedNzb> {
             });
         } else if t.starts_with("<meta ") {
             let kind = xml_attr(t, "type").unwrap_or_default();
-            let value = xml_text(t, "meta").unwrap_or_default();
+            let value = xml_text(t, "meta").context("malformed XML text in meta")?;
             match kind.as_str() {
                 "title" => meta.name = Some(value),
                 "password" => meta.password = Some(value),
