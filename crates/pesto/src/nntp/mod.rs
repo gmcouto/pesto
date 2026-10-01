@@ -459,19 +459,37 @@ impl Connection {
         let mut out = Vec::new();
         loop {
             let mut line = Vec::new();
-            let n =
-                tokio::time::timeout(self.read_timeout, self.stream.read_until(b'\n', &mut line))
-                    .await
-                    .map_err(|_| {
-                        anyhow!(
-                            "NNTP read timed out after {}s (connection likely dead)",
-                            self.read_timeout.as_secs()
-                        )
-                    })?
-                    .context("reading NNTP body")?;
-            if n == 0 {
-                bail!("NNTP connection closed by server while reading body");
-            }
+            tokio::time::timeout(self.read_timeout, async {
+                loop {
+                    let available = self.stream.fill_buf().await.context("reading NNTP body")?;
+                    if available.is_empty() {
+                        bail!("NNTP connection closed by server while reading body");
+                    }
+                    let consumed = available
+                        .iter()
+                        .position(|&byte| byte == b'\n')
+                        .map_or(available.len(), |position| position + 1);
+                    let max_wire_line = MAX_ARTICLE_BODY_SIZE
+                        .saturating_sub(out.len())
+                        .saturating_add(1)
+                        .max(3);
+                    if line.len().saturating_add(consumed) > max_wire_line {
+                        bail!("NNTP article body exceeded maximum allowed size");
+                    }
+                    line.extend_from_slice(&available[..consumed]);
+                    self.stream.consume(consumed);
+                    if line.ends_with(b"\n") {
+                        return Ok::<(), anyhow::Error>(());
+                    }
+                }
+            })
+            .await
+            .map_err(|_| {
+                anyhow!(
+                    "NNTP read timed out after {}s (connection likely dead)",
+                    self.read_timeout.as_secs()
+                )
+            })??;
             if is_dot_terminator(&line) {
                 break;
             }
