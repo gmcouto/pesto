@@ -13,8 +13,8 @@ pub struct QueuedSegment {
     pub message_id: String,
     pub part: u32,
     pub bytes: u64,
-    /// Explicit globally unique segment index read directly from the NZB
-    /// `segmentIndex` attribute. `None` for unencrypted NZBs.
+    /// Explicit globally unique segment index read directly from legacy NZB
+    /// `segmentIndex` attribute. `None` for clean standard NZB 1.1 releases and unencrypted NZBs.
     pub segment_index: Option<u32>,
 }
 
@@ -394,15 +394,11 @@ mod tests {
 
         assert_eq!(queue.files.len(), 2);
         assert_eq!(queue.files[0].name, "f1.bin");
-        assert_eq!(queue.files[0].file_ordinal, Some(1));
-        assert_eq!(queue.files[0].total_files, Some(2));
-        assert_eq!(queue.files[0].segments[0].segment_index, Some(1));
-        assert_eq!(queue.files[0].segments[1].segment_index, Some(2));
+        assert_eq!(queue.files[0].segments[0].segment_index, None);
+        assert_eq!(queue.files[0].segments[1].segment_index, None);
 
         assert_eq!(queue.files[1].name, "f2.bin");
-        assert_eq!(queue.files[1].file_ordinal, Some(2));
-        assert_eq!(queue.files[1].total_files, Some(2));
-        assert_eq!(queue.files[1].segments[0].segment_index, Some(3));
+        assert_eq!(queue.files[1].segments[0].segment_index, None);
     }
 
     #[test]

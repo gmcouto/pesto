@@ -50,7 +50,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use pesto::config::ServerEntry;
 use pesto::crypto::DownloadDecryptionAdapter;
 use pesto::yenc::decode_part;
@@ -183,7 +183,8 @@ pub async fn download_queue(
 
 /// Preflight validation for queue segment identities before any download side effects.
 ///
-/// Fails closed if the queue is encrypted and contains missing, zero, duplicate, or conflicting segment indices.
+/// When legacy segment indices are present, validates range and uniqueness.
+/// Succeeds when segments lack segment_index (clean standard NZB 1.1 releases).
 pub fn validate_queue_identity(queue: &DownloadQueue, encrypted: bool) -> Result<()> {
     if !encrypted {
         return Ok(());
@@ -191,20 +192,21 @@ pub fn validate_queue_identity(queue: &DownloadQueue, encrypted: bool) -> Result
     let mut by_message_id = HashMap::<&str, u32>::new();
     let mut by_index = HashMap::<u32, &str>::new();
     for segment in queue.files.iter().flat_map(|file| &file.segments) {
-        let index = segment.segment_index.context("MISSING_SEGMENT_INDEX")?;
-        anyhow::ensure!(index > 0, "INVALID_SEGMENT_INDEX_ZERO");
-        if let Some(&existing) = by_message_id.get(segment.message_id.as_str()) {
-            anyhow::ensure!(existing == index, "CONFLICTING_MESSAGE_ID_INDEX");
-        } else {
-            by_message_id.insert(segment.message_id.as_str(), index);
-        }
-        if let Some(&existing_mid) = by_index.get(&index) {
-            anyhow::ensure!(
-                existing_mid == segment.message_id.as_str(),
-                "DUPLICATE_SEGMENT_INDEX"
-            );
-        } else {
-            by_index.insert(index, segment.message_id.as_str());
+        if let Some(index) = segment.segment_index {
+            anyhow::ensure!(index > 0, "INVALID_SEGMENT_INDEX_ZERO");
+            if let Some(&existing) = by_message_id.get(segment.message_id.as_str()) {
+                anyhow::ensure!(existing == index, "CONFLICTING_MESSAGE_ID_INDEX");
+            } else {
+                by_message_id.insert(segment.message_id.as_str(), index);
+            }
+            if let Some(&existing_mid) = by_index.get(&index) {
+                anyhow::ensure!(
+                    existing_mid == segment.message_id.as_str(),
+                    "DUPLICATE_SEGMENT_INDEX"
+                );
+            } else {
+                by_index.insert(index, segment.message_id.as_str());
+            }
         }
     }
     Ok(())

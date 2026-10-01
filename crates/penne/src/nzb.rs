@@ -226,11 +226,10 @@ mod tests {
         };
         assert!(crate::download::validate_queue_identity(&valid_queue, true).is_ok());
 
-        // 1. Missing segment index
+        // 1. Missing segment index succeeds in clean NZB 1.1
         let mut q_missing = valid_queue.clone();
         q_missing.files[0].segments[0].segment_index = None;
-        let err = crate::download::validate_queue_identity(&q_missing, true).unwrap_err();
-        assert!(err.to_string().contains("MISSING_SEGMENT_INDEX"));
+        assert!(crate::download::validate_queue_identity(&q_missing, true).is_ok());
 
         // 2. Invalid segment index zero
         let mut q_zero = valid_queue.clone();

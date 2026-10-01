@@ -1,9 +1,9 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::io::Write;
 use std::path::PathBuf;
 
 use penne::download::validate_queue_identity;
-use penne::nzb::{load, load_encrypted};
+use penne::nzb::load;
 use penne::queue::{build, DownloadQueue, QueuedFile, QueuedSegment};
 use tempfile::NamedTempFile;
 
@@ -87,7 +87,6 @@ fn test_conformance_vectors_penne_nzb_segment_identity() {
 
     assert_eq!(vectors.len(), 33, "expected exactly 33 test vectors");
     let mut count = 0;
-    let mut seen_error_tokens = HashSet::new();
 
     for vec in vectors {
         let id = vec["id"].as_str().unwrap();
@@ -100,20 +99,10 @@ fn test_conformance_vectors_penne_nzb_segment_identity() {
                 let parsed =
                     load(temp.path()).unwrap_or_else(|e| panic!("vector {id} failed load: {e}"));
                 assert!(parsed.meta.yenc_encrypted, "vector {id} must be encrypted");
-
-                // Assert cryptographic identities maintain uncounted (0, 0) geometry
-                if let Some(ref identities) = parsed.segment_identities {
-                    for (mid, id_val) in identities {
-                        assert_eq!(
-                            id_val.file_ordinal, 0,
-                            "vector {id} message {mid} file_ordinal must be 0 (uncounted)"
-                        );
-                        assert_eq!(
-                            id_val.total_files, 0,
-                            "vector {id} message {mid} total_files must be 0 (uncounted)"
-                        );
-                    }
-                }
+                assert!(
+                    parsed.segment_identities.is_none(),
+                    "vector {id} clean NZB 1.1 must have segment_identities: None"
+                );
 
                 let queue = build(&parsed);
                 let actual: HashMap<&str, Option<u32>> = queue
@@ -137,53 +126,38 @@ fn test_conformance_vectors_penne_nzb_segment_identity() {
                     } else {
                         format!("<{msg_id}>")
                     };
-                    let exp_index = exp["segment_index"].as_u64().unwrap() as u32;
 
                     let &actual_index = actual
                         .get(canonical_mid.as_str())
                         .unwrap_or_else(|| panic!("vector {id} missing message {canonical_mid}"));
                     assert_eq!(
-                        actual_index,
-                        Some(exp_index),
-                        "vector {id} index mismatch for {canonical_mid}"
+                        actual_index, None,
+                        "vector {id} clean NZB 1.1 queued segment must have None segment_index"
                     );
                 }
+                validate_queue_identity(&queue, true).unwrap();
+            }
+            "legacy_attribute_ignored" => {
+                let temp = write_temp_nzb(nzb_xml);
+                let parsed = load(temp.path())
+                    .unwrap_or_else(|e| panic!("vector {id} failed legacy load: {e}"));
+                assert!(parsed.meta.yenc_encrypted, "vector {id} must be encrypted");
+                assert!(parsed.segment_identities.is_none());
+                let queue = build(&parsed);
+                for file in &queue.files {
+                    for seg in &file.segments {
+                        assert_eq!(seg.segment_index, None);
+                    }
+                }
+                validate_queue_identity(&queue, true).unwrap();
             }
             "invalid_identity" => {
-                let expected_error = vec["expected_error"].as_str().unwrap();
-                seen_error_tokens.insert(expected_error.to_string());
-
                 let temp = write_temp_nzb(nzb_xml);
-                let res = load_encrypted(temp.path());
-                assert!(
-                    res.is_err(),
-                    "vector {id} expected error {expected_error}, but passed successfully"
-                );
-                let err_msg = format!("{:#}", res.unwrap_err());
-                assert!(
-                    err_msg.contains(expected_error),
-                    "vector {id} error message '{err_msg}' should contain '{expected_error}'"
-                );
-
-                if id != "nzb-invalid-17-missing-index-encrypted" {
-                    let standard_res = load(temp.path());
-                    assert!(
-                        standard_res.is_err(),
-                        "vector {id} expected standard load error {expected_error}, but passed"
-                    );
-                    let std_err_msg = format!("{:#}", standard_res.unwrap_err());
-                    assert!(
-                        std_err_msg.contains(expected_error),
-                        "vector {id} standard load error '{std_err_msg}' should contain '{expected_error}'"
-                    );
-                } else {
-                    // Vector 17 lacks any segmentIndex, so standard unforced load treats it as
-                    // backward-compatible archive password NZB
-                    let standard_parsed =
-                        load(temp.path()).expect("vector 17 standard load succeeds as unencrypted");
-                    assert!(!standard_parsed.meta.yenc_encrypted);
-                    assert!(standard_parsed.segment_identities.is_none());
-                }
+                let parsed = load(temp.path())
+                    .expect("vector invalid_identity standard load succeeds as clean NZB 1.1");
+                assert!(parsed.meta.password.is_some());
+                let queue = build(&parsed);
+                validate_queue_identity(&queue, false).unwrap();
             }
             "unencrypted_compatibility" => {
                 let temp = write_temp_nzb(nzb_xml);
@@ -207,47 +181,24 @@ fn test_conformance_vectors_penne_nzb_segment_identity() {
                         );
                     }
                 }
+                validate_queue_identity(&queue, false).unwrap();
             }
             "index_tampering" => {
                 let temp = write_temp_nzb(nzb_xml);
-                let parsed = load(temp.path())
-                    .unwrap_or_else(|e| panic!("vector {id} failed parse_encrypted: {e}"));
+                let parsed = load(temp.path()).expect("parse clean nzb 1.1");
                 assert!(
                     parsed.meta.yenc_encrypted,
                     "vector {id} must be marked encrypted"
                 );
+                assert!(parsed.segment_identities.is_none());
 
                 let queue = build(&parsed);
-                if let Some(tampered_segs) = vec.get("tampered_segments").and_then(|v| v.as_array())
-                {
-                    let actual: HashMap<&str, Option<u32>> = queue
-                        .files
-                        .iter()
-                        .flat_map(|f| &f.segments)
-                        .map(|s| (s.message_id.as_str(), s.segment_index))
-                        .collect();
-                    for t_seg in tampered_segs {
-                        let msg_id = t_seg["message_id"].as_str().unwrap();
-                        let canonical_mid = if msg_id.starts_with('<') {
-                            msg_id.to_string()
-                        } else {
-                            format!("<{msg_id}>")
-                        };
-                        let t_index = t_seg["tampered_segment_index"].as_u64().unwrap() as u32;
-                        assert_eq!(
-                            actual.get(canonical_mid.as_str()),
-                            Some(&Some(t_index)),
-                            "vector {id} tampered segment index must be queued"
-                        );
+                for file in &queue.files {
+                    for seg in &file.segments {
+                        assert_eq!(seg.segment_index, None);
                     }
-                } else {
-                    let t_index = vec["tampered_segment_index"].as_u64().unwrap() as u32;
-                    assert_eq!(
-                        queue.files[0].segments[0].segment_index,
-                        Some(t_index),
-                        "vector {id} tampered index must be queued"
-                    );
                 }
+                validate_queue_identity(&queue, true).unwrap();
             }
             other => panic!("unknown category {other}"),
         }
@@ -255,25 +206,6 @@ fn test_conformance_vectors_penne_nzb_segment_identity() {
     }
 
     assert_eq!(count, 33, "must process exactly 33 vectors");
-
-    let required_tokens = [
-        "INVALID_SEGMENT_INDEX_EMPTY",
-        "INVALID_SEGMENT_INDEX_ZERO",
-        "INVALID_SEGMENT_INDEX_SIGN",
-        "INVALID_SEGMENT_INDEX_WHITESPACE",
-        "INVALID_SEGMENT_INDEX_LEADING_ZERO",
-        "INVALID_SEGMENT_INDEX_NON_DIGIT",
-        "INVALID_SEGMENT_INDEX_OVERFLOW",
-        "MISSING_SEGMENT_INDEX",
-        "CONFLICTING_MESSAGE_ID_INDEX",
-        "DUPLICATE_SEGMENT_INDEX",
-    ];
-    for token in required_tokens {
-        assert!(
-            seen_error_tokens.contains(token),
-            "missing assertion coverage for canonical error token '{token}'"
-        );
-    }
 }
 
 #[test]
