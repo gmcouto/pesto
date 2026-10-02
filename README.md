@@ -601,7 +601,7 @@ password = "MySecretPassword"
 
 ### Unsupported Operations
 
-- **Season Consolidation (`--season`):** Multi-session / season pack consolidation into a single combined NZB is currently **not supported** for encrypted releases. Each episode upload generates an independent random session salt and a separate global segment index space starting at 1. Combining multiple independent upload sessions into a single `.nzb` violates global segment index uniqueness and causes duplicate indices. Individual per-episode NZBs are generated instead.
+- **Season Consolidation (`--season`):** Multi-session / season pack consolidation into a single combined NZB is currently **not supported** for encrypted releases. Each episode upload generates an independent random session salt and a separate global segment index space starting at 1. Combining multiple independent upload sessions into a single `.nzb` violates global segment index uniqueness and causes duplicate indices. Invocations of `--season` with `--encrypt` are rejected up-front during preflight validation; use `--each` to post episodes as independent releases with individual per-episode NZBs.
 - **Archive Passwords vs Transport Encryption:** An archive password passed to `--password` encrypts the archive file itself. It is distinct from `--encrypt`, which activates yEnc body and control-line transport encryption. Conforming downloaders inspect `<meta type="yenc_encrypted">true</meta>` to distinguish transport encryption from archive extraction passwords.
 
 ### Protocol Status
