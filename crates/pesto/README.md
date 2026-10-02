@@ -418,15 +418,24 @@ pesto --obfuscate=full --password=MySecret42 ./MyShow.S01/
 
 ## Encryption (yEnc body & control lines)
 
-Pesto supports opt-in yEnc body and control-line encryption according to the
-yEnc encryption standards. Article bodies are encrypted with XChaCha20-Poly1305
-before yEnc encoding, and yEnc control lines (`=ybegin`, `=ypart`, `=yend`,
-`=yencryption`) are encrypted using Radix 253 NIST SP 800-38G FF1.
+Pesto supports opt-in yEnc body and control-line encryption according to the v1.1
+Self-Describing Article Bootstrap Standard. Article bodies are encrypted with
+XChaCha20-Poly1305 before yEnc encoding, and yEnc control lines (`=ybegin`, `=ypart`,
+`=yend`, `=yencryption`) are encrypted using Radix 253 NIST SP 800-38G FF1.
 
-The generated `.nzb` contains `<meta type="yenc_encrypted">true</meta>` and
-`<meta type="password">`, allowing conforming downloaders (currently Penne and Sugo;
-support in SABnzbd and NZBGet is in development) to authenticate and decrypt articles
-automatically.
+Under the v1.1 bootstrap standard, each posted Usenet article is self-describing
+and embeds its salt and monotonic segment index directly into the wire bytes:
+- A 20-byte bootstrap prefix (`[16-byte raw salt][4-byte uint32_be(segmentIndex)]`)
+  is prepended to physical Line 1 (`=ybegin`) before FF1 ciphertext.
+- A canonical 5-token header line (`=yencryption cipher=XChaCha20-Poly1305 salt=<32_hex> index=<8_hex> tag=<32_hex>`)
+  provides dual-bootstrap agreement for downloaders.
+
+Generated NZBs strictly conform to the standard NZB 1.1 DTD without custom
+XML attributes on `<segment>` elements, including only `<meta type="yenc_encrypted">true</meta>`
+and `<meta type="password">` in `<head>`.
+
+Encrypted releases are fully interoperable with all conforming downloaders across the
+ecosystem, including Penne, Sugo, SABnzbd, and NZBGet.
 
 ### CLI usage
 

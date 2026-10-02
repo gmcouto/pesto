@@ -36,7 +36,7 @@ To enable yEnc body and control-line encryption for posting tasks dispatched by 
 password = "MySecretPassword"
 ```
 
-When configured, uploads automatically encrypt bodies with XChaCha20-Poly1305, encrypt control lines with Radix 253 FF1, and embed `<meta type="yenc_encrypted">true</meta>` with `<meta type="password">` in generated NZBs, compatible with Penne and Sugo (support in SABnzbd and NZBGet is in development).
+When configured, uploads automatically encrypt bodies with XChaCha20-Poly1305, encrypt control lines with Radix 253 FF1 according to the v1.1 Self-Describing Article Bootstrap Standard, and embed `<meta type="yenc_encrypted">true</meta>` with `<meta type="password">` in generated clean standard NZB 1.1 files, fully compatible with Penne, Sugo, SABnzbd, and NZBGet.
 
 > **Threat Model & Confidentiality:**
 > Content encryption at the article layer (XChaCha20-Poly1305) protects Usenet articles from parties lacking the NZB and password. However, because the encryption password is conventionally embedded in `<meta type="password">` within the generated NZB, confidentiality depends strictly on private distribution of the `.nzb` file.

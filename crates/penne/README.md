@@ -550,11 +550,14 @@ higher) run can still use it.
 ### Encrypted releases (yEnc encryption)
 
 Penne and Sugo support downloading releases encrypted with yEnc body and control-line
-encryption (XChaCha20-Poly1305 and Radix 253 FF1). Third-party downloader implementations
-(SABnzbd, NZBGet) are currently in active development.
+encryption (XChaCha20-Poly1305 and Radix 253 FF1) according to the v1.1 Self-Describing
+Article Bootstrap Standard.
 
 When an NZB includes `<meta type="yenc_encrypted">true</meta>`, decryption occurs
-automatically using the password embedded in `<meta type="password">`.
+automatically using the password embedded in `<meta type="password">`. Penne extracts the
+16-byte salt and unsigned 32-bit segment index directly from the 20-byte Line 1 bootstrap
+prefix, validates dual-bootstrap cross-header agreement against `=yencryption`, and decodes
+the article. Standard NZB 1.1 XML files without custom segment attributes are supported.
 
 To supply or override the password manually:
 
@@ -564,6 +567,9 @@ cargo run --bin penne -- download path/to/encrypted.nzb --password MySecretPassw
 
 Decryption operates on an article-by-article basis. Failed authentication releases
 zero plaintext and triggers alternate-server failover before failing the job.
+
+Encrypted releases are fully interoperable across all conforming ecosystem clients,
+including Pesto, Nyuu, ngPost, Penne, Sugo, SABnzbd, and NZBGet.
 
 **Security and Threat Model:**
 - Content encryption at the article layer (XChaCha20-Poly1305) protects stored Usenet articles from unauthorized retrieval.
