@@ -229,8 +229,8 @@ select the entry, and `penne` refuses to load the config.
 cargo run --bin penne -- info path/to/release.nzb
 
 # Download, assemble, deobfuscate, PAR2-verify/repair, and extract.
-# --out-dir defaults to the config's download_dir; --password overrides
-# the .nzb's own embedded password (for archive extraction and encrypted yEnc).
+# --out-dir defaults to the config's download_dir; --password supplies
+# the password for downstream archive extraction (unrar/7z).
 cargo run --bin penne -- download path/to/release.nzb \
     --out-dir ./downloads \
     --password hunter2
@@ -559,11 +559,9 @@ automatically using the password embedded in `<meta type="password">`. Penne ext
 prefix, validates dual-bootstrap cross-header agreement against `=yencryption`, and decodes
 the article. Standard NZB 1.1 XML files without custom segment attributes are supported.
 
-To supply or override the password manually:
-
-```bash
-cargo run --bin penne -- download path/to/encrypted.nzb --password MySecretPassword
-```
+Transport decryption requires the password to be present in `<meta type="password">`
+within the NZB. The CLI `--password` option is used for downstream archive extraction
+(unrar/7z unpacking) after download and assembly.
 
 Decryption operates on an article-by-article basis. Failed authentication releases
 zero plaintext and triggers alternate-server failover before failing the job.
