@@ -137,8 +137,16 @@ pub fn split_lines_preserving_endings(input: &[u8]) -> Vec<LineSlice<'_>> {
     let mut pos = 0;
     while pos < input.len() {
         let start = pos;
-        if lines.is_empty() && !input.starts_with(b"=y") && input.len() >= BOOTSTRAP_PREFIX_LEN {
-            pos += BOOTSTRAP_PREFIX_LEN;
+        if lines.is_empty() && !input.starts_with(b"=y") {
+            if input.len() >= BOOTSTRAP_PREFIX_LEN {
+                pos += BOOTSTRAP_PREFIX_LEN;
+            } else {
+                // Encrypted article too short to carry the 20-byte bootstrap
+                // prefix: treat the entire input as one truncated line 1 so a
+                // stray 0x0A inside the (missing) prefix cannot fragment it.
+                // `extract_bootstrap_from_line1` then reports LINE_TRUNCATED.
+                pos = input.len();
+            }
         }
         while pos < input.len() && input[pos] != b'\n' {
             pos += 1;

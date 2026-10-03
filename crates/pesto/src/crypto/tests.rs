@@ -1083,3 +1083,34 @@ fn test_adapter_zero_output_rejection_matrix() {
         h.join().unwrap();
     }
 }
+
+#[test]
+fn truncated_wire_line1_is_not_split_on_stray_newline_bytes() {
+    // C2-04 regression: an encrypted wire article whose total length is shorter
+    // than the 20-byte bootstrap prefix must be treated as a single truncated
+    // line 1, not split at a 0x0A byte that happens to fall inside the (absent)
+    // prefix. Before the fix, `split_lines_preserving_endings` skipped the
+    // prefix only when `input.len() >= BOOTSTRAP_PREFIX_LEN`, so a short
+    // adversarial body containing an embedded LF fragmented into multiple
+    // "lines" before `extract_bootstrap_from_line1` could see it.
+    let mut short_wire = vec![0x41u8; 10];
+    short_wire[4] = b'\n'; // stray LF inside the truncated prefix region
+    short_wire[7] = b'\r';
+    short_wire[8] = b'\n';
+
+    let lines = control::split_lines_preserving_endings(&short_wire);
+    assert_eq!(
+        lines.len(),
+        1,
+        "short wire body must yield exactly one truncated line, got {} lines",
+        lines.len()
+    );
+    assert_eq!(lines[0].content, &short_wire[..]);
+
+    // The decoder surfaces the truncation as a clean LINE_TRUNCATED error.
+    let err = control::extract_bootstrap_from_line1(lines[0].content).unwrap_err();
+    assert!(
+        err.to_string().contains("LINE_TRUNCATED"),
+        "expected LINE_TRUNCATED, got: {err}"
+    );
+}

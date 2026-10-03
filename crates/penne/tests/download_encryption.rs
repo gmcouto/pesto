@@ -707,3 +707,97 @@ async fn test_multipart_partial_auth_failure_cleanup() {
         "temporary partial file must be cleaned up"
     );
 }
+
+/// C2-01 regression: an encrypted download (decryptor configured) must reject a
+/// spoofed *unencrypted* article served for a clean NZB 1.1 segment that carries
+/// no explicit `segment_index` (so `decode_article` is called with `None`).
+///
+/// Before the fix, `caller_segment_index.is_some()` was the only guard, so a
+/// `None` caller let `=ybegin` plaintext pass straight through — an
+/// authentication bypass that released unauthenticated plaintext to disk.
+/// The fix fails closed whenever the adapter holds decryption credentials.
+#[tokio::test]
+async fn test_unencrypted_spoof_rejected_for_decoupled_nzb_with_none_segment_index() {
+    let password = "decoupled-spoof-password";
+
+    // Adversary-supplied unauthenticated plaintext article: a normal, valid yEnc
+    // body with no encryption framing whatsoever.
+    let plain_payload = b"FORGED PLAINTEXT that must never reach disk";
+    let spoofed_body = encode_part(
+        "spoofed_decoupled.bin",
+        plain_payload.len() as u64,
+        PartSpec {
+            number: 1,
+            total: 1,
+            offset: 0,
+        },
+        plain_payload,
+        128,
+        None,
+    )
+    .body;
+    assert!(spoofed_body.starts_with(b"=ybegin"));
+
+    let mut known = HashMap::new();
+    known.insert("spoof-none-idx-01".to_string(), spoofed_body);
+    let addr = spawn_fake_server(known);
+
+    // Clean NZB 1.1 decoupling: no explicit index, so the queue segment has
+    // `segment_index: None`.
+    let queue = DownloadQueue {
+        files: vec![QueuedFile {
+            name: "spoofed_decoupled.bin".to_string(),
+            file_ordinal: Some(1),
+            total_files: Some(1),
+            segments: vec![QueuedSegment {
+                message_id: "spoof-none-idx-01".to_string(),
+                part: 1,
+                bytes: plain_payload.len() as u64,
+                segment_index: None,
+            }],
+        }],
+    };
+
+    let dest_dir = tempfile::tempdir().unwrap();
+    let decryptor = Arc::new(DownloadDecryptionAdapter::with_password(password));
+
+    let outcome = download_queue_with_decryptor(
+        &queue,
+        &[ServerTier::solo(server_entry(addr))],
+        dest_dir.path(),
+        0,
+        None,
+        Some(decryptor),
+    )
+    .await
+    .expect("download completes with a corrupt segment, not a hard error");
+
+    // The spoofed plaintext must be classified as corrupt, never downloaded.
+    assert!(
+        outcome.segments.is_empty(),
+        "spoofed unencrypted article must not be recorded as fetched"
+    );
+    assert_eq!(outcome.corrupt.len(), 1, "spoof must be reported corrupt");
+    assert!(
+        outcome.corrupt[0].error.contains("UNAUTHENTICATED_ARTICLE"),
+        "error must name the authentication bypass, got: {}",
+        outcome.corrupt[0].error
+    );
+
+    // ZERO-OUTPUT GUARANTEE: no final file, no temp sibling, no cache entry.
+    assert!(
+        !dest_dir.path().join("spoofed_decoupled.bin").exists(),
+        "final file must not exist for a rejected spoof"
+    );
+    assert!(
+        !dest_dir
+            .path()
+            .join("spoofed_decoupled.bin.penne-part")
+            .exists(),
+        "temp file must not exist for a rejected spoof"
+    );
+    assert!(
+        penne::cache::load(dest_dir.path(), "spoof-none-idx-01").is_none(),
+        "rejected spoof must not be written to the resume cache"
+    );
+}

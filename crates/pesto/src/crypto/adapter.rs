@@ -376,13 +376,17 @@ impl DownloadDecryptionAdapter {
 
     /// Decode an article wire body, restoring encrypted control lines and decrypting body ciphertext.
     ///
-    /// If the article is unencrypted, delegates directly to standard yEnc decoding.
+    /// If the adapter holds decryption credentials (`password` or a cached session) the caller
+    /// has configured transport decryption for this download: any unencrypted article starting
+    /// with `=ybegin` is rejected as `UNAUTHENTICATED_ARTICLE` (fail closed), because accepting
+    /// it would release unauthenticated plaintext and violate the Zero-Output Guarantee.
+    /// Unencrypted passthrough is only allowed for an adapter with no credentials at all.
     /// If encrypted, requires `segment_index` and valid session/password.
     /// Strictly guarantees Zero-Output on authentication failure.
     pub fn decode_article(&self, body: &[u8], segment_index: Option<u32>) -> Result<DecodedPart> {
         let caller_segment_index = segment_index;
         if body.starts_with(b"=ybegin") {
-            if caller_segment_index.is_some() {
+            if caller_segment_index.is_some() || self.has_decryption_credentials() {
                 bail!(
                     "UNAUTHENTICATED_ARTICLE: unencrypted article received for encrypted segment"
                 );
@@ -477,6 +481,21 @@ impl DownloadDecryptionAdapter {
         let nonce = session.derive_body_nonce(segment_index);
         body::decrypt_body(ciphertext, tag, session.master_key(), &nonce)
             .map_err(|e| anyhow::anyhow!("AUTHENTICATION_FAILURE: {e}"))
+    }
+
+    /// Whether this adapter holds any decryption credentials (an explicit password
+    /// or at least one cached encryption session). When true, `decode_article` fails
+    /// closed on unencrypted (`=ybegin`-prefixed) articles: the caller configured
+    /// transport decryption, so plaintext passthrough is an authentication bypass
+    /// (Zero-Output Guarantee — see `crypto/mod.rs` threat model).
+    fn has_decryption_credentials(&self) -> bool {
+        if self.password.is_some() {
+            return true;
+        }
+        self.cached_sessions
+            .lock()
+            .map(|guard| !guard.0.is_empty())
+            .unwrap_or(true)
     }
 
     fn get_or_create_session(&self, salt: [u8; 16]) -> Result<Arc<EncryptionSession>> {
