@@ -145,9 +145,16 @@ pub async fn write_with_metadata(
     buf.extend_from_slice(body);
 
     let path = entry_path(dir, file_name, part);
-    tokio::fs::write(&path, buf)
+    // Atomic write: stage in a sibling temp file and rename over the target,
+    // so a crash mid-write can never leave a torn/zero-byte spool entry
+    // behind (mirrors `ResumeState::save`'s crash-consistency contract).
+    let tmp_path = path.with_extension("tmp");
+    tokio::fs::write(&tmp_path, buf)
         .await
-        .with_context(|| format!("writing spool entry `{}`", path.display()))
+        .with_context(|| format!("writing spool entry `{}`", tmp_path.display()))?;
+    tokio::fs::rename(&tmp_path, &path)
+        .await
+        .with_context(|| format!("replacing spool entry `{}`", path.display()))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -186,9 +193,15 @@ async fn write_inner(
     buf.extend_from_slice(headers);
     buf.extend_from_slice(body);
     let path = entry_path(dir, file_name, part);
-    tokio::fs::write(&path, buf)
+    // Atomic write (see `write_with_metadata`): temp file + rename so a crash
+    // mid-write leaves either the previous entry or nothing, never a torn one.
+    let tmp_path = path.with_extension("tmp");
+    tokio::fs::write(&tmp_path, buf)
         .await
-        .with_context(|| format!("writing spool entry `{}`", path.display()))
+        .with_context(|| format!("writing spool entry `{}`", tmp_path.display()))?;
+    tokio::fs::rename(&tmp_path, &path)
+        .await
+        .with_context(|| format!("replacing spool entry `{}`", path.display()))
 }
 
 fn parse(buf: &[u8]) -> Option<SpooledArticle> {
@@ -395,6 +408,40 @@ mod tests {
         // No subdirectory was implied by the '/' in the file name.
         assert!(!spool.join("season01").exists());
         assert!(read(&spool, "season01/ep01.mkv", 1).is_some());
+    }
+
+    #[test]
+    fn atomic_spool_write_leaves_no_torn_tmp_file_behind() {
+        // Regression: C1-03. Spool entries must be written via a sibling temp
+        // file + rename so a crash mid-write cannot leave a torn/zero-byte
+        // `.spool` file. After a successful write, no `.tmp` leftover remains
+        // and the target entry is complete.
+        let dir = tempfile::tempdir().unwrap();
+        let spool = dir.path().join("release.pesto-spool");
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(write(&spool, "movie.bin", 1, "id@x", b"h", b"b"))
+            .unwrap();
+        assert!(
+            !spool.join("movie.bin.1.tmp").exists(),
+            "temp file must be renamed away, not left behind"
+        );
+        assert!(read(&spool, "movie.bin", 1).is_some());
+
+        rt.block_on(write_with_metadata(
+            &spool,
+            "movie2.bin",
+            2,
+            "id2@x",
+            b"h",
+            b"b",
+            &SpoolMetadata::default(),
+        ))
+        .unwrap();
+        assert!(
+            !spool.join("movie2.bin.2.tmp").exists(),
+            "temp file must be renamed away, not left behind"
+        );
+        assert!(read(&spool, "movie2.bin", 2).is_some());
     }
 
     #[test]

@@ -49,6 +49,13 @@ pub fn encode_scalar(out: &mut Vec<u8>, data: &[u8], line_len: usize) {
             out_ptr = out_ptr.add(2);
         }
 
+        // Safety invariant: every write above targets within `out`'s reserved
+        // capacity. Checked in debug builds so an escape/CRLF accounting error
+        // is caught before `set_len` blesses an out-of-bounds length.
+        debug_assert!(
+            (out_ptr as usize).saturating_sub(out_base as usize) <= out.capacity(),
+            "yEnc scalar write exceeded allocated capacity"
+        );
         out.set_len(out_ptr.offset_from(out_base) as usize);
     }
 }

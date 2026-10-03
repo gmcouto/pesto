@@ -272,6 +272,13 @@ unsafe fn encode_ssse3_impl(out: &mut Vec<u8>, data: &[u8], line_len: usize) {
         std::ptr::copy_nonoverlapping(b"\r\n".as_ptr(), out_ptr, 2);
         out_ptr = out_ptr.add(2);
     }
+    // Safety invariant: every write above targets within `out`'s reserved
+    // capacity. Checked in debug builds so an escape/CRLF accounting error
+    // is caught before `set_len` blesses an out-of-bounds length.
+    debug_assert!(
+        (out_ptr as usize).saturating_sub(out_base as usize) <= out.capacity(),
+        "yEnc SSSE3 write exceeded allocated capacity"
+    );
     out.set_len(out_ptr.offset_from(out_base) as usize);
 }
 
@@ -587,6 +594,13 @@ unsafe fn encode_avx2_impl(out: &mut Vec<u8>, data: &[u8], line_len: usize) {
         std::ptr::copy_nonoverlapping(b"\r\n".as_ptr(), out_ptr, 2);
         out_ptr = out_ptr.add(2);
     }
+    // Safety invariant: every write above targets within `out`'s reserved
+    // capacity. Checked in debug builds so an escape/CRLF accounting error
+    // is caught before `set_len` blesses an out-of-bounds length.
+    debug_assert!(
+        (out_ptr as usize).saturating_sub(out_base as usize) <= out.capacity(),
+        "yEnc AVX2 write exceeded allocated capacity"
+    );
     out.set_len(out_ptr.offset_from(out_base) as usize);
 }
 
@@ -857,6 +871,13 @@ unsafe fn encode_avx512_impl(out: &mut Vec<u8>, data: &[u8], line_len: usize) {
         std::ptr::copy_nonoverlapping(b"\r\n".as_ptr(), out_ptr, 2);
         out_ptr = out_ptr.add(2);
     }
+    // Safety invariant: every write above targets within `out`'s reserved
+    // capacity. Checked in debug builds so an escape/CRLF accounting error
+    // is caught before `set_len` blesses an out-of-bounds length.
+    debug_assert!(
+        (out_ptr as usize).saturating_sub(out_base as usize) <= out.capacity(),
+        "yEnc AVX-512 write exceeded allocated capacity"
+    );
     out.set_len(out_ptr.offset_from(out_base) as usize);
 }
 
