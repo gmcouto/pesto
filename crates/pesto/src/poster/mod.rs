@@ -424,7 +424,9 @@ async fn post_data_files(
         let mut i: u32 = 0;
         for (idx, &(offset, len)) in segments.iter().enumerate() {
             if shared.cancelled.load(Ordering::Relaxed) {
+                drop(read_rx.take());
                 if let Some(handle) = reader_handle {
+                    handle.abort();
                     let _ = handle.await;
                 }
                 return Ok(());
@@ -465,12 +467,15 @@ async fn post_data_files(
                 .await
                 .is_err()
             {
+                drop(read_rx.take());
                 if let Some(handle) = reader_handle {
+                    handle.abort();
                     let _ = handle.await;
                 }
                 return Ok(());
             }
         }
+        drop(read_rx.take());
         if let Some(handle) = reader_handle {
             let _ = handle.await?;
         }

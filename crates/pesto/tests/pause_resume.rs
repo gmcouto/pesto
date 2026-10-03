@@ -439,3 +439,74 @@ async fn cancel_while_paused_is_noticed_promptly_not_after_the_idle_keepalive_po
         outcome.segments.len()
     );
 }
+
+/// C3-01 regression test: When a file > 8MB is posted, `spawn_double_buffered_reader`
+/// feeds chunks into a bounded channel (capacity 2). If cancellation fires while the reader
+/// is blocked waiting for channel buffer space, the producer must drop the receiver and abort
+/// the reader handle so `reader_handle.await` does not deadlock.
+#[tokio::test(flavor = "multi_thread")]
+async fn cancel_with_double_buffered_reader_unblocks_promptly_without_deadlock() {
+    const CONNECTIONS: usize = 1;
+    const CHUNK_SEGMENTS: usize = 72; // 72 * 131072 = 9.4 MB > 8MB threshold for double-buffered reader
+    const ART_SIZE: usize = 131072;
+
+    let accepted = Arc::new(AtomicUsize::new(0));
+    let addr = spawn_slow_counting_server(accepted);
+
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("large_movie.bin");
+    std::fs::write(&input, vec![0x42u8; ART_SIZE * CHUNK_SEGMENTS]).unwrap();
+
+    let mut config = test_config(addr.port(), CONNECTIONS);
+    config.article_size = ART_SIZE;
+    let inputs = expand_inputs(std::slice::from_ref(&input)).unwrap();
+
+    let cancel = Arc::new(AtomicBool::new(false));
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+    let run = {
+        let cancel = cancel.clone();
+        tokio::spawn(async move {
+            post_files_inner(
+                &config,
+                &inputs,
+                Some(tx),
+                None,
+                Some(cancel),
+                None,
+                None,
+                None,
+            )
+            .await
+        })
+    };
+
+    // Wait for the first segment to complete so the reader has already read ahead and blocked on read_tx.send
+    loop {
+        match rx.recv().await {
+            Some(ProgressEvent::SegmentDone { .. }) => break,
+            Some(_) => continue,
+            None => panic!("progress channel closed before any segment completed"),
+        }
+    }
+
+    // Cancel while reader is blocked on capacity-2 channel
+    cancel.store(true, Ordering::Relaxed);
+    let t0 = std::time::Instant::now();
+
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), run)
+        .await
+        .expect("cancelling double-buffered reader deadlocked on reader_handle.await")
+        .unwrap()
+        .unwrap();
+    let elapsed = t0.elapsed();
+    assert!(
+        elapsed < std::time::Duration::from_millis(1500),
+        "cancellation took too long: {elapsed:?}"
+    );
+    assert!(outcome.cancelled, "expected outcome.cancelled to be true");
+    assert!(
+        outcome.segments.len() < CHUNK_SEGMENTS,
+        "expected run to be cut short by cancellation"
+    );
+}

@@ -422,7 +422,9 @@ pub(super) async fn producer(
                 let mut i: u32 = 0;
                 for (idx, &(offset, len)) in segments.iter().enumerate() {
                     if shared.cancelled.load(Ordering::Relaxed) {
+                        drop(read_rx.take());
                         if let Some(handle) = reader_handle {
+                            handle.abort();
                             let _ = handle.await;
                         }
                         return Ok(());
@@ -493,7 +495,9 @@ pub(super) async fn producer(
                                 .await
                                 .is_err()
                             {
+                                drop(read_rx.take());
                                 if let Some(handle) = reader_handle {
+                                    handle.abort();
                                     let _ = handle.await;
                                 }
                                 return Ok(()); // channel closed
@@ -515,6 +519,7 @@ pub(super) async fn producer(
                     }
                 }
 
+                drop(read_rx.take());
                 if let Some(handle) = reader_handle {
                     let _ = handle.await?;
                 }
