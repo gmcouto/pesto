@@ -59,6 +59,80 @@ secret:
       match: crc-validation-test-password
     - name: zero-output-rejection-password
       match: zero-output-rejection-password
+    # ── Phase 52 extension (SEC-PESTO-01): inline #[cfg(test)] literals under src/
+    #    that escape directory-based path suppression (52-AUDIT.md §3.3/§4) ──
+    - name: inline-test-password-s3cr3t
+      match: s3cr3t
+    - name: inline-test-password-hunter2
+      match: hunter2
+    - name: inline-test-password-secret123
+      match: secret123
+    - name: inline-test-password-mypassword
+      match: mypassword
+    - name: inline-test-password-rarpassword
+      match: rarpassword
+    - name: inline-test-password-encryption-secret-pass
+      match: encryption-secret-pass
+    - name: inline-test-password-archive-extract-pass
+      match: archive-extract-pass
+    - name: inline-test-password-transport-password
+      match: transport-password
+    - name: inline-test-fixture-value
+      match: fixture-value
+    - name: inline-test-password-nzbpass
+      match: nzbpass
+    - name: inline-test-password-mypass
+      match: mypass
+    - name: inline-test-password-auth-password
+      match: auth-password
+    - name: inline-test-my-secret
+      match: my_secret
+    - name: inline-test-password-multi-part-password
+      match: multi-part-password
+    - name: inline-test-password-test-password-123
+      match: test-password-123
+    - name: inline-test-password-encapsulation-test-pass
+      match: encapsulation-test-pass
+    - name: inline-test-password-wrong-password
+      match: wrong-password
+    - name: inline-test-password-wrong_password
+      match: wrong_password
+    - name: inline-test-password-multi-salt-cache-password
+      match: multi-salt-cache-password
+    - name: inline-test-password-test-multipart-ypart-password
+      match: test-multipart-ypart-password
+    - name: inline-test-password-test-part-equals-password
+      match: test-part-equals-password
+    - name: inline-test-toml-encryption-secret
+      match: toml-encryption-secret
+    - name: doc-example-archive-secret
+      match: archive-secret
+    - name: doc-example-transport-secret
+      match: transport-secret
+    - name: readme-example-password-mysecret42
+      match: MySecret42
+    - name: readme-example-password-mysecretpassword
+      match: MySecretPassword
+    # ── Phase 52 extension: integration-test literals (path-suppressed, added
+    #    per-literal for defense-in-depth; 52-AUDIT.md §3.4/§4) ──
+    - name: integration-test-pass-boundary-indices
+      match: test-pass-boundary-indices
+    - name: integration-test-decoupled-spoof-password
+      match: decoupled-spoof-password
+    - name: integration-test-test-secret-123
+      match: test-secret-123
+    - name: integration-test-resumepass
+      match: resumepass
+    - name: integration-test-sharedpass
+      match: sharedpass
+    - name: integration-test-testpass
+      match: testpass
+    - name: integration-test-testpass123
+      match: testpass123
+    - name: integration-test-top-secret-payload
+      match: top secret payload
+    - name: sugo-support-api-key-secret
+      match: secret
   ignored_paths:
     - "**/tests/**"
     - "**/test-vectors/**"
