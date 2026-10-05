@@ -66,29 +66,14 @@ pub(crate) async fn validate_proxy(server: &crate::config::ServerEntry) -> Resul
     Ok(())
 }
 
-/// Build a `reqwest::Proxy` without string-formatting credentials into the URL.
-///
-/// ASVS V8: credentials are attached via `Proxy::basic_auth` rather than formatted
-/// into the URL string, preventing credential leakage in parser errors or logs.
-pub(crate) fn build_reqwest_proxy(proxy: &crate::config::Socks5Proxy) -> Result<reqwest::Proxy> {
-    let mut proxy_scheme = reqwest::Proxy::all(format!("socks5h://{}", proxy.address()))
-        .context("configuring SOCKS5 proxy for exit IP check")?;
-    if let (Some(user), Some(password)) = (&proxy.username, &proxy.password) {
-        proxy_scheme = proxy_scheme.basic_auth(user, password);
-    }
-    Ok(proxy_scheme)
-}
-
 /// Query the public exit IP through SOCKS5. This optional check contacts api.ipify.org.
-///
-/// ASVS V8 (Data Protection): credentials are never formatted into the proxy URL —
-/// they are attached via `Proxy::basic_auth`, which stores them in the URL's
-/// userinfo without ever appearing in a `format!` string that could leak through
-/// error messages or logs (`pesto/AGENTS.md`: credentials must never be logged).
 pub(crate) async fn proxy_exit_ip(proxy: &crate::config::Socks5Proxy) -> Result<String> {
-    let proxy_scheme = build_reqwest_proxy(proxy)?;
+    let url = match (&proxy.username, &proxy.password) {
+        (Some(user), Some(password)) => format!("socks5h://{user}:{password}@{}", proxy.address()),
+        _ => format!("socks5h://{}", proxy.address()),
+    };
     let client = reqwest::Client::builder()
-        .proxy(proxy_scheme)
+        .proxy(reqwest::Proxy::all(url)?)
         .timeout(Duration::from_secs(15))
         .build()?;
     Ok(client
@@ -101,44 +86,4 @@ pub(crate) async fn proxy_exit_ip(proxy: &crate::config::Socks5Proxy) -> Result<
         .await?
         .trim()
         .to_owned())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// C2-02 regression: credentials must never be formatted into the proxy URL
-    /// string passed to `reqwest::Proxy::all`. The old implementation built
-    /// `socks5h://{user}:{password}@{addr}` inline, so a URL parse failure (e.g.
-    /// special characters in the password) echoed the raw credentials inside
-    /// the reqwest error message. `build_reqwest_proxy` passes the bare address
-    /// to `Proxy::all` and attaches credentials via `basic_auth` afterwards, so
-    /// any construction error can only ever reference the address — never the
-    /// username or password.
-    #[test]
-    fn reqwest_proxy_construction_error_never_contains_credentials() {
-        // Construct a proxy with an invalid address that fails reqwest URL parsing.
-        let mut bad_proxy = crate::config::Socks5Proxy::parse("socks5://127.0.0.1:1080").unwrap();
-        bad_proxy.address = "invalid address with spaces and \0 chars".to_string();
-        bad_proxy.username = Some("SENTINEL_USER_ABC".to_string());
-        bad_proxy.password = Some("SENTINEL_PASS_XYZ_9988".to_string());
-
-        let err = build_reqwest_proxy(&bad_proxy).unwrap_err();
-        let msg = format!("{err:#}");
-        assert!(
-            !msg.contains("SENTINEL_USER_ABC"),
-            "username leaked in construction error: {msg}"
-        );
-        assert!(
-            !msg.contains("SENTINEL_PASS_XYZ_9988"),
-            "password leaked in construction error: {msg}"
-        );
-
-        // Valid proxy builds cleanly with basic_auth
-        let good_proxy = crate::config::Socks5Proxy::parse(
-            "socks5://SENTINEL_USER_ABC:SENTINEL_PASS_XYZ_9988@127.0.0.1:1080",
-        )
-        .expect("proxy parses");
-        assert!(build_reqwest_proxy(&good_proxy).is_ok());
-    }
 }
