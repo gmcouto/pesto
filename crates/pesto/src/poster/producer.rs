@@ -725,6 +725,10 @@ pub(super) async fn producer(
                 file.write_all(&pkt).await.with_context(|| {
                     format!("writing PAR2 recovery volume `{}`", vol_path.display())
                 })?;
+                file.flush().await.with_context(|| {
+                    format!("flushing PAR2 recovery volume `{}`", vol_path.display())
+                })?;
+                drop(file);
                 par2_materialized_bytes += pkt.len() as u64;
                 shared.emit(crate::progress::ProgressEvent::Par2SliceWritten);
 
