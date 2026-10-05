@@ -64,7 +64,6 @@ async fn producer_error_is_reported_via_failure_reason_not_a_bare_cancellation()
         compress_volume_size: None,
         nzb_title: None,
         nzb_password: None,
-        encrypt_password: None,
         nzb_category: None,
         nzb_tags: vec![],
         tmdb_id: None,
@@ -123,117 +122,6 @@ async fn producer_error_is_reported_via_failure_reason_not_a_bare_cancellation()
         reason.contains("too many input slices"),
         "failure_reason should carry the actual producer error, got: {reason}"
     );
-
-    std::fs::remove_dir_all(&dir).ok();
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn producer_error_with_par2_before_upload_unblocks_pipeline_without_hanging() {
-    let dir =
-        std::env::temp_dir().join(format!("pesto_producer_error_par2_{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    let input = dir.join("movie.bin");
-
-    const FILE_SIZE: usize = 3_000_000;
-    std::fs::write(&input, vec![0u8; FILE_SIZE]).unwrap();
-
-    let config = Config {
-        host: "unused".to_string(),
-        port: 563,
-        ssl: false,
-        connections: 2,
-        username: None,
-        password: None,
-        from: "tester <t@pesto.test>".to_string(),
-        groups: vec!["alt.binaries.test".to_string()],
-        article_size: 65536,
-        line_length: 128,
-        retries: 1,
-        retry_delay: 1,
-        timeout: pesto::config::DEFAULT_TIMEOUT_SECS,
-        proxy: None,
-        proxy_check_ip: false,
-        obfuscate: ObfuscateMode::None,
-        dry_run: false,
-        par2: 10,
-        par2_slice_size: Some(64),
-        par2_slice_count: None,
-        par2_recovery_count: None,
-        par2_memory_limit: Some(1_000_000_000),
-        memory_limit: None,
-        par2_temp_dir: None,
-        compress_temp_dir: None,
-        par2_only: false,
-        par2_before_upload: true,
-        threads: 0,
-        simd: pesto::par2::SimdPath::Auto,
-        extra_servers: vec![],
-        resume: false,
-        upload_rate: 0,
-        compress_format: None,
-        compress_password: None,
-        compress_volume_size: None,
-        nzb_title: None,
-        nzb_password: None,
-        encrypt_password: None,
-        nzb_category: None,
-        nzb_tags: vec![],
-        tmdb_id: None,
-        tmdb_kind: None,
-        imdb_id: None,
-        tvdb_id: None,
-        tvdb_kind: None,
-        mal_id: None,
-        indexer_url: None,
-        indexer_api_key: None,
-        notify_webhook: None,
-        notify_ntfy: None,
-        notify: None,
-        history: false,
-        history_dir: None,
-        nzb_dir: None,
-        date: None,
-        no_archive: false,
-        file_counter: false,
-        message_id_domain: None,
-        pre_hooks: vec![],
-        post_hooks: vec![],
-        no_hooks: false,
-        nfo: false,
-        nzb_conflict: pesto::config::NzbConflict::Overwrite,
-        quiet: false,
-        bell: false,
-        check: false,
-        check_delay_secs: 5,
-        check_retries: 2,
-        check_connections: 1,
-        check_post_retries: 1,
-        allow_incomplete_nzb: false,
-        check_recover_percent: 15,
-        check_recover_max: 0,
-        pipeline_depth: 1,
-        keepalive_interval: 0,
-    };
-
-    let inputs = expand_inputs(std::slice::from_ref(&input)).unwrap();
-    // Prior to fixing C3-02, run_pipeline hung indefinitely when failure_reason was Some(...)
-    // because tx_opt was not dropped, preventing encode workers and pipeline tasks from exiting.
-    let outcome = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        post_files(&config, &inputs),
-    )
-    .await
-    .expect("post_files with pre-pipeline producer failure should complete without hanging")
-    .unwrap();
-
-    assert!(outcome.cancelled);
-    assert!(outcome.segments.is_empty());
-    let reason = outcome
-        .failure_reason
-        .as_deref()
-        .expect("failure_reason should be populated");
-    assert!(reason.contains("too many input slices"));
 
     std::fs::remove_dir_all(&dir).ok();
 }

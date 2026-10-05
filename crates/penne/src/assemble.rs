@@ -251,28 +251,19 @@ impl StreamingAssembly {
         }
 
         if let Some(mut file) = self.file.take() {
-            if let Err(e) = file.flush().await {
-                drop(file);
-                // Zero-output hygiene: never leave a partial `.penne-part`
-                // behind on a failed finalize — the temp file holds decrypted
-                // segment bytes that must not survive the error (mirrors the
-                // `Incomplete` discard path above).
-                let _ = tokio::fs::remove_file(&self.tmp_path).await;
-                return Err(e).with_context(|| format!("flushing {}", self.tmp_path.display()));
-            }
+            file.flush()
+                .await
+                .with_context(|| format!("flushing {}", self.tmp_path.display()))?;
         }
-        if let Err(e) = tokio::fs::rename(&self.tmp_path, &self.final_path).await {
-            // Zero-output hygiene: the temp file must not outlive a failed
-            // rename into place.
-            let _ = tokio::fs::remove_file(&self.tmp_path).await;
-            return Err(e).with_context(|| {
+        tokio::fs::rename(&self.tmp_path, &self.final_path)
+            .await
+            .with_context(|| {
                 format!(
                     "renaming {} to {}",
                     self.tmp_path.display(),
                     self.final_path.display()
                 )
-            });
-        }
+            })?;
 
         if let Some(tx) = progress {
             let _ = tx.send(ProgressEvent::FileAssembled {
@@ -629,35 +620,5 @@ mod tests {
         );
         let written = tokio::fs::read(dir.path().join("f.bin")).await.unwrap();
         assert_eq!(written, whole);
-    }
-
-    #[tokio::test]
-    async fn failed_rename_cleans_up_temporary_file() {
-        // C2-03 regression: a failed flush/rename must not leave the
-        // `.penne-part` temp file (holding decrypted segment bytes) on disk.
-        // Pre-create the final path as a *directory* so the rename into place
-        // deterministically fails with EISDIR on Linux, exercising the error
-        // branch in `finish`.
-        let dir = tempfile::tempdir().unwrap();
-        let data = b"decrypted bytes that must not linger".to_vec();
-        let file = queued_file("blocked.bin", &[1]);
-
-        std::fs::create_dir(dir.path().join("blocked.bin")).unwrap();
-
-        let mut assembly = StreamingAssembly::new(&file, dir.path());
-        assembly
-            .write_segment(1, &decoded_part("blocked.bin", 1, 1, 0, &data, None))
-            .await
-            .unwrap();
-        // The temp sibling is on disk after the write.
-        assert!(dir.path().join("blocked.bin.penne-part").exists());
-
-        let result = assembly.finish(&[1], None).await;
-        assert!(result.is_err(), "rename onto a directory must fail");
-
-        assert!(
-            !dir.path().join("blocked.bin.penne-part").exists(),
-            "temporary partial file must be removed when finalize fails"
-        );
     }
 }

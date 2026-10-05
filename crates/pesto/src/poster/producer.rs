@@ -422,9 +422,7 @@ pub(super) async fn producer(
                 let mut i: u32 = 0;
                 for (idx, &(offset, len)) in segments.iter().enumerate() {
                     if shared.cancelled.load(Ordering::Relaxed) {
-                        drop(read_rx.take());
                         if let Some(handle) = reader_handle {
-                            handle.abort();
                             let _ = handle.await;
                         }
                         return Ok(());
@@ -495,9 +493,7 @@ pub(super) async fn producer(
                                 .await
                                 .is_err()
                             {
-                                drop(read_rx.take());
                                 if let Some(handle) = reader_handle {
-                                    handle.abort();
                                     let _ = handle.await;
                                 }
                                 return Ok(()); // channel closed
@@ -519,7 +515,6 @@ pub(super) async fn producer(
                     }
                 }
 
-                drop(read_rx.take());
                 if let Some(handle) = reader_handle {
                     let _ = handle.await?;
                 }
@@ -730,10 +725,6 @@ pub(super) async fn producer(
                 file.write_all(&pkt).await.with_context(|| {
                     format!("writing PAR2 recovery volume `{}`", vol_path.display())
                 })?;
-                file.flush().await.with_context(|| {
-                    format!("flushing PAR2 recovery volume `{}`", vol_path.display())
-                })?;
-                drop(file);
                 par2_materialized_bytes += pkt.len() as u64;
                 shared.emit(crate::progress::ProgressEvent::Par2SliceWritten);
 

@@ -124,7 +124,7 @@ pub(super) fn start_pipeline(
 pub(super) async fn run_pipeline(
     shared: &Arc<Shared>,
     metas: Vec<Arc<FileMeta>>,
-    mut tx_opt: Option<TaskDispatcher<PostTask>>,
+    tx_opt: Option<TaskDispatcher<PostTask>>,
     will_defer: bool,
     par2_dir: PathBuf,
     recovery_count: usize,
@@ -149,12 +149,11 @@ pub(super) async fn run_pipeline(
     // if the generation phase above already failed — nothing valid to post.
     if failure_reason.is_none() && !force_abort {
         let producer_shared = shared.clone();
-        let tx = tx_opt.take();
         let producer_result: std::pin::Pin<
             Box<dyn std::future::Future<Output = Result<()>> + Send>,
         > = if will_defer {
             Box::pin(async move {
-                match tx.as_ref() {
+                match tx_opt.as_ref() {
                     Some(tx) => {
                         post_pregenerated_release(
                             &metas,
@@ -167,11 +166,11 @@ pub(super) async fn run_pipeline(
                     }
                     None => Ok(()),
                 }
-                // `tx` is owned by this future, so it closes here
+                // `tx_opt` is owned by this future, so it closes here
                 // even when a force-abort cancels the future.
             })
         } else {
-            Box::pin(producer(metas, tx, producer_shared, total_conns))
+            Box::pin(producer(metas, tx_opt, producer_shared, total_conns))
         };
         let result = tokio::select! {
             result = producer_result => Some(result),
@@ -197,12 +196,6 @@ pub(super) async fn run_pipeline(
             failure_reason = Some(description);
         }
     }
-
-    // Explicitly drop `tx_opt` before awaiting encode handles. If the producer
-    // was skipped (e.g. failure_reason was already Some), was cancelled, or
-    // did not take tx_opt, dropping it here closes the worker task channels
-    // so encode_worker loops exit instead of deadlocking.
-    drop(tx_opt);
 
     if !force_abort {
         while let Some(mut handle) = encode_handles.pop() {
