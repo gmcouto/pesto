@@ -19,9 +19,12 @@ use tracing::{debug, info, warn};
 /// segment_index = sum(parts(J) for J < file_ordinal) + part_number
 /// ```
 ///
-/// All fields are one-based `u32` values; zero is never valid. Construction
-/// is only through [`SegmentIdentity::checked`], which enforces the full
-/// contract and returns `None` on any violation.
+/// All fields are one-based `u32` values; zero is never valid, and — per
+/// CR-02 (yEnc Control Lines Encryption Standard §4/§8 producer req 6) —
+/// neither is any index whose big-endian `uint32_be` encoding contains a
+/// `0x0A` (LF) or `0x0D` (CR) byte, because such bytes would split Line 1
+/// on the wire. Construction is only through [`SegmentIdentity::checked`],
+/// which enforces the full contract and returns `None` on any violation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SegmentIdentity {
     /// 1-based file position in the release (`N` in `[N/M]`).
@@ -40,7 +43,8 @@ impl SegmentIdentity {
     /// `prefix_parts` is the sum of part counts for every file whose ordinal
     /// is strictly less than `file_ordinal`. Returns `None` if any input is
     /// zero, `file_ordinal > total_files`, or the resulting `segment_index`
-    /// overflows `u32` or equals zero.
+    /// overflows `u32`, equals zero, or is forbidden by CR-02 (any big-endian
+    /// byte equals `0x0A` or `0x0D`).
     pub fn checked(
         prefix_parts: u64,
         file_ordinal: u32,
@@ -55,7 +59,7 @@ impl SegmentIdentity {
         }
         let index_u64 = prefix_parts.checked_add(u64::from(part_number))?;
         let segment_index = u32::try_from(index_u64).ok()?;
-        if segment_index == 0 {
+        if !is_safe_segment_index(segment_index) {
             return None;
         }
         Some(SegmentIdentity {
@@ -68,7 +72,8 @@ impl SegmentIdentity {
 
     /// Construct a checked identity from an explicit segment index.
     ///
-    /// Requires `part_number > 0 && segment_index > 0`.
+    /// Requires `part_number > 0 && segment_index > 0` and CR-02 safety (no
+    /// big-endian byte equal to `0x0A` or `0x0D`).
     /// Enforces two legal geometry forms:
     /// - Counted geometry: `total_files > 0 && file_ordinal >= 1 && file_ordinal <= total_files`.
     /// - Uncounted geometry: exactly `file_ordinal == 0 && total_files == 0` (used for imported
@@ -82,7 +87,7 @@ impl SegmentIdentity {
         part_number: u32,
         segment_index: u32,
     ) -> Option<Self> {
-        if part_number == 0 || segment_index == 0 {
+        if part_number == 0 || !is_safe_segment_index(segment_index) {
             return None;
         }
         if total_files > 0 {
@@ -98,6 +103,78 @@ impl SegmentIdentity {
             part_number,
             segment_index,
         })
+    }
+}
+
+/// CR-02 wire-safety predicate (yEnc Control Lines Encryption Standard §4/§8
+/// producer req 6): `0` is never a valid index, and any index whose big-endian
+/// `uint32_be` encoding contains a `0x0A` (LF) or `0x0D` (CR) byte would split
+/// Line 1 on the wire and is forbidden.
+pub fn is_safe_segment_index(segment_index: u32) -> bool {
+    segment_index != 0
+        && segment_index
+            .to_be_bytes()
+            .iter()
+            .all(|&b| b != 0x0A && b != 0x0D)
+}
+
+/// Number of CR-02-forbidden values in `1..=n` (values whose big-endian
+/// bytes contain `0x0A` or `0x0D`). Computed by digit DP over the four
+/// big-endian bytes of `n` — exact, O(1), no enumeration.
+fn count_forbidden_le(n: u64) -> u64 {
+    let bytes = (n as u32).to_be_bytes();
+    let allowed = |b: u8| b != 0x0A && b != 0x0D;
+    const FREE: u64 = 254; // allowed byte values at a free position (256 - {0x0A, 0x0D})
+
+    // Count v in [0, n] whose four big-endian bytes are all allowed.
+    let mut safe_in_0_to_n = 0u64;
+    let mut prefix_allowed = true;
+    for (i, &bi) in bytes.iter().enumerate() {
+        let free_positions = 3 - i as u32;
+        safe_in_0_to_n += (0..bi).filter(|&b| allowed(b)).count() as u64 * FREE.pow(free_positions);
+        if !allowed(bi) {
+            prefix_allowed = false;
+            break;
+        }
+    }
+    if prefix_allowed {
+        safe_in_0_to_n += 1; // n itself
+    }
+    // `v == 0` has all bytes allowed but is excluded from the [1..=n] domain.
+    let safe_in_1_to_n = safe_in_0_to_n - 1;
+    n - safe_in_1_to_n
+}
+
+/// Map a 1-based ordinal (rank) to the ordinal-th permitted segment index:
+/// the monotonic sequence over `u32` that skips every CR-02-forbidden value
+/// (`0` and any value whose big-endian encoding contains `0x0A`/`0x0D`).
+///
+/// Ordinals 1-9 map to indices 1-9; ordinal 10→11, 11→12, 12→14, 13→15
+/// (skipping 10 and 13); crossing 266/269 follows the same rule. Monotonic
+/// and injective by construction. Returns `None` when the ordinal's safe
+/// index would exceed `u32::MAX` — callers fail layout construction cleanly
+/// instead of panicking.
+///
+/// Used CENTRALLY by [`super::ReleaseLayout::segment_identity`] so every
+/// identity consumer (data paths and the PAR2 path) gets safe indices, with
+/// identity finalized before salt/KDF.
+pub fn nth_safe_segment_index(ordinal: u64) -> Option<u32> {
+    if ordinal == 0 {
+        return None;
+    }
+    // Fixed-point: answer = ordinal + count_forbidden_le(answer). Each
+    // iteration jumps past every forbidden value in the current range; the
+    // forbidden density is tiny, so this converges in a few iterations.
+    let mut candidate = ordinal;
+    loop {
+        let next = ordinal.checked_add(count_forbidden_le(candidate))?;
+        if next > u64::from(u32::MAX) {
+            return None;
+        }
+        if next == candidate {
+            return Some(candidate as u32);
+        }
+        candidate = next;
     }
 }
 
@@ -478,5 +555,83 @@ mod tests {
         let had_failures = post_failures || missing_confirmed || inconclusive;
         assert!(had_failures);
         assert!(!should_write_season_nzb(false, had_failures, false));
+    }
+}
+
+#[cfg(test)]
+mod cr02_tests {
+    use super::*;
+
+    fn forbidden(i: u32) -> bool {
+        i == 0 || i.to_be_bytes().iter().any(|&b| b == 0x0A || b == 0x0D)
+    }
+
+    #[test]
+    fn checked_rejects_all_four_forbidden_indices() {
+        for idx in [10u32, 13, 266, 269] {
+            assert!(
+                SegmentIdentity::checked(0, 1, 1, idx).is_none(),
+                "checked must reject forbidden index {idx}"
+            );
+            assert!(
+                SegmentIdentity::explicit(1, 1, 1, idx).is_none(),
+                "explicit must reject forbidden index {idx}"
+            );
+            assert!(!is_safe_segment_index(idx));
+        }
+        // Neighbors remain valid.
+        for idx in [9u32, 11, 12, 14, 265, 267, 268, 270] {
+            assert!(is_safe_segment_index(idx));
+        }
+    }
+
+    #[test]
+    fn nth_safe_segment_index_rank_mapping() {
+        // Rank semantics per plan Task 1: the ordinal-th permitted value.
+        // Derived from the forbidden set {0, 10, 13, 266, 269} — the permitted
+        // sequence is 1..9, 11, 12, 14, 15, 16, ... so:
+        for (ordinal, expected) in [
+            (1u64, 1u32),
+            (9, 9),
+            (10, 11),
+            (11, 12),
+            (12, 14),
+            (13, 15),
+            (14, 16),
+        ] {
+            assert_eq!(
+                nth_safe_segment_index(ordinal),
+                Some(expected),
+                "ordinal {ordinal} must map to {expected}"
+            );
+        }
+        // Spanning the 266/269 forbidden pair: ranks shift past both.
+        let seq: Vec<u32> = (263u64..=268)
+            .map(|o| nth_safe_segment_index(o).unwrap())
+            .collect();
+        assert_eq!(seq, vec![265, 267, 268, 270, 271, 272]);
+    }
+
+    #[test]
+    fn nth_safe_segment_index_monotonic_and_injective() {
+        // Derived from the forbidden set — sweep a range covering both
+        // forbidden pairs and assert strict monotonicity + forbidden absence.
+        let mut prev = 0u32;
+        for ordinal in 1u64..=5000 {
+            let idx = nth_safe_segment_index(ordinal).expect("safe index in range");
+            assert!(idx > prev, "monotonicity broken at ordinal {ordinal}");
+            assert!(!forbidden(idx), "assigned forbidden index {idx}");
+            prev = idx;
+        }
+    }
+
+    #[test]
+    fn nth_safe_segment_index_overflow_fails_cleanly() {
+        assert_eq!(nth_safe_segment_index(0), None);
+        // An ordinal whose safe index exceeds u32::MAX returns None (no panic):
+        // the last permitted u32 value is 0xFFFFFFE9 (0x0A/0x0D trail the tail
+        // of the range), so u32::MAX as an ordinal is beyond capacity.
+        assert_eq!(nth_safe_segment_index(u64::from(u32::MAX)), None);
+        assert_eq!(nth_safe_segment_index(u64::from(u32::MAX) + 1), None);
     }
 }

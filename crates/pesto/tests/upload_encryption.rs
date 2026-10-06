@@ -540,10 +540,16 @@ async fn test_encrypted_upload_multifile_par2_standard() {
         .map(|s| s.segment_identity.unwrap().segment_index)
         .collect();
     indices.sort();
-    assert_eq!(
-        indices,
-        (1..=outcome.segments.len() as u32).collect::<Vec<u32>>()
-    );
+    // CR-02: assigned indices are the first N values of the safe sequence
+    // (skipping 10 and 13), not the raw ranks 1..=N.
+    assert_eq!(indices, {
+        let mut expected: Vec<u32> = (1..)
+            .filter(|&i: &u32| i.to_be_bytes().iter().all(|&b| b != 0x0A && b != 0x0D))
+            .take(outcome.segments.len())
+            .collect();
+        expected.sort_unstable();
+        expected
+    });
 
     let meta = pesto::nzb::NzbMeta {
         password: Some("testpass123".into()),
@@ -668,10 +674,16 @@ async fn test_encrypted_upload_multifile_par2_obfuscated() {
             .map(|s| s.segment_identity.unwrap().segment_index)
             .collect();
         indices.sort();
-        assert_eq!(
-            indices,
-            (1..=outcome.segments.len() as u32).collect::<Vec<u32>>()
-        );
+        // CR-02: assigned indices are the first N safe-sequence values
+        // (skipping 10 and 13), not the raw ranks 1..=N.
+        assert_eq!(indices, {
+            let mut expected: Vec<u32> = (1..)
+                .filter(|&i: &u32| i.to_be_bytes().iter().all(|&b| b != 0x0A && b != 0x0D))
+                .take(outcome.segments.len())
+                .collect();
+            expected.sort_unstable();
+            expected
+        });
 
         let meta = pesto::nzb::NzbMeta {
             password: Some("obfpass456".into()),
@@ -819,7 +831,16 @@ async fn test_persistence_lifecycle_invariants() {
         .iter()
         .map(|s| s.segment_identity.unwrap().segment_index)
         .collect();
-    assert_eq!(original_indices, (1..=20).collect::<Vec<u32>>());
+    // CR-02: the 20 assigned indices skip the forbidden values 10 and 13
+    // (uint32_be contains 0x0A/0x0D) — the safe sequence is 1..9, 11, 12,
+    // 14..22 per the nth_safe_segment_index rank mapping.
+    assert_eq!(original_indices, {
+        let mut expected: Vec<u32> = (1..=22u32)
+            .filter(|&i| i.to_be_bytes().iter().all(|&b| b != 0x0A && b != 0x0D))
+            .collect();
+        assert_eq!(expected.len(), 20);
+        expected
+    });
 
     // 3. Simulate post-check article repost check & NZB regeneration
     let meta = pesto::nzb::NzbMeta {

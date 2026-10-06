@@ -21,7 +21,7 @@ use super::file_md5_16k;
 use super::identity::{
     normalize_client_path, obfuscated_yenc_name, par2_release_base, resolve_date,
 };
-use super::outcome::SegmentIdentity;
+use super::outcome::{nth_safe_segment_index, SegmentIdentity};
 use super::par2::par2_geometry;
 use super::FileMeta;
 
@@ -491,6 +491,18 @@ impl ReleaseLayout {
             if prefix_parts > u64::from(u32::MAX) {
                 bail!("release layout total segments exceeds u32::MAX: {prefix_parts}");
             }
+            // CR-02 safe-index capacity: the CR-02 skip mapping can push the
+            // highest assigned safe index past u32::MAX earlier than the raw
+            // cumulative count check above — fail layout construction with an
+            // error (never panic) in that case.
+            let last_rank = prefix_parts;
+            match nth_safe_segment_index(last_rank) {
+                Some(idx) => idx,
+                None => bail!(
+                    "release layout total segments ({last_rank}) exceed the CR-02 safe \
+                     segment-index capacity of u32"
+                ),
+            };
         }
 
         Ok(ReleaseLayout {
@@ -539,7 +551,21 @@ impl ReleaseLayout {
         }
     }
 
-    /// Compute the SegmentIdentity for a given file ordinal and part number.
+    /// Compute the [`SegmentIdentity`] for a given file ordinal and part number.
+    ///
+    /// This is the CENTRAL segment-index allocator: the raw 1-based rank
+    /// (`prefix_parts + part_number`) is mapped release-wide through
+    /// [`nth_safe_segment_index`], which skips every CR-02-forbidden value
+    /// (zero, or any index whose big-endian bytes contain `0x0A`/`0x0D` — see
+    /// yEnc Control Lines Encryption Standard §4/§8 producer req 6). Every
+    /// identity consumer (data paths in `producer.rs`/`mod.rs` and the PAR2
+    /// path) goes through this method, so all consumers receive safe,
+    /// monotonic, injective indices. Identity is finalized here BEFORE any
+    /// salt/KDF derivation happens downstream.
+    ///
+    /// Resume policy (see `crate::resume::SEGMENT_INDEX_ALLOCATOR_VERSION`):
+    /// sessions persisted by a different allocator version fail closed at
+    /// resume rather than being silently re-mapped.
     pub fn segment_identity(
         &self,
         release_ordinal: u32,
@@ -549,12 +575,14 @@ impl ReleaseLayout {
         if part_number == 0 || part_number > entry.part_count {
             return None;
         }
-        SegmentIdentity::checked(
-            entry.prefix_parts,
-            release_ordinal,
-            self.total_files,
+        let rank = entry.prefix_parts.checked_add(u64::from(part_number))?;
+        let segment_index = nth_safe_segment_index(rank)?;
+        Some(SegmentIdentity {
+            file_ordinal: release_ordinal,
+            total_files: self.total_files,
             part_number,
-        )
+            segment_index,
+        })
     }
 
     /// Build the release layout from prepared input files and PAR2 configuration.

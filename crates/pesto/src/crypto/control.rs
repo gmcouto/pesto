@@ -53,6 +53,16 @@ pub fn extract_bootstrap_from_line1(line1: &[u8]) -> Result<([u8; 16], u32)> {
     if segment_index == 0 {
         bail!("ZERO_SEGMENT_INDEX: segment index cannot be zero");
     }
+    // CR-02 (Control Std §4/§8): a segmentIndex whose big-endian encoding
+    // contains 0x0A (LF) or 0x0D (CR) would have split Line 1 on the wire —
+    // reject under PROVIDER_FAILOVER.
+    if segment_index
+        .to_be_bytes()
+        .iter()
+        .any(|&b| b == 0x0A || b == 0x0D)
+    {
+        bail!("FORBIDDEN_SEGMENT_INDEX_BYTE: segment index bytes contain 0x0A or 0x0D");
+    }
     Ok((salt, segment_index))
 }
 

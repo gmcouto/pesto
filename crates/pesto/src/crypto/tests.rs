@@ -398,7 +398,13 @@ proptest! {
     fn control_line_roundtrip_preserves_framing_for_arbitrary_session_identity(
         password in "[ -~]{1,32}",
         salt_numerals in prop::array::uniform16(0u16..253),
-        segment_index in 1u32..=u32::MAX,
+        // CR-02: the round-trip must exercise only wire-safe indices (the
+        // uploader allocator never assigns forbidden ones); arbitrary u32
+        // values including forbidden indices are rejected at the bootstrap.
+        segment_index in (1u32..=200u32)
+            .prop_filter("segment_index must be CR-02-safe", |i| {
+                i.to_be_bytes().iter().all(|&b| b != 0x0A && b != 0x0D)
+            }),
         name in "[A-Za-z0-9._-]{1,48}",
         payload in prop::collection::vec(any::<u8>(), 0..512),
         line_len in 1usize..129,
@@ -1113,4 +1119,36 @@ fn truncated_wire_line1_is_not_split_on_stray_newline_bytes() {
         err.to_string().contains("LINE_TRUNCATED"),
         "expected LINE_TRUNCATED, got: {err}"
     );
+}
+
+#[test]
+fn bootstrap_extraction_rejects_forbidden_segment_index_bytes() {
+    // CR-02 (Control Std §4/§8): indices 10, 13, 266 (0x0000010A), 269
+    // (0x0000010D) contain 0x0A/0x0D in their big-endian encoding and are
+    // rejected under FORBIDDEN_SEGMENT_INDEX_BYTE (maps to PROVIDER_FAILOVER).
+    for idx in [10u32, 13, 266, 269] {
+        let mut line1 = vec![0x41u8; 16]; // salt placeholder (no forbidden bytes)
+        line1.extend_from_slice(&idx.to_be_bytes());
+        line1.extend_from_slice(b"=="); // minimal trailer past the 22-byte minimum
+        let err = control::extract_bootstrap_from_line1(&line1).unwrap_err();
+        assert!(
+            err.to_string().contains("FORBIDDEN_SEGMENT_INDEX_BYTE"),
+            "index {idx} must be rejected with FORBIDDEN_SEGMENT_INDEX_BYTE, got: {err}"
+        );
+    }
+    // Zero still rejected with its own token.
+    let mut line1 = vec![0x41u8; 16];
+    line1.extend_from_slice(&0u32.to_be_bytes());
+    line1.extend_from_slice(b"==");
+    let err = control::extract_bootstrap_from_line1(&line1).unwrap_err();
+    assert!(err.to_string().contains("ZERO_SEGMENT_INDEX"), "got: {err}");
+
+    // Neighboring safe indices still accepted.
+    for idx in [9u32, 11, 12, 14, 265, 267, 268, 270] {
+        let mut line1 = vec![0x41u8; 16];
+        line1.extend_from_slice(&idx.to_be_bytes());
+        line1.extend_from_slice(b"==");
+        let (_, extracted) = control::extract_bootstrap_from_line1(&line1).unwrap();
+        assert_eq!(extracted, idx);
+    }
 }

@@ -457,7 +457,10 @@ mod tests {
             date: Some("Thu, 24 Sep 2026 00:00:00 GMT".into()),
             unix_date: Some(1790208000),
         };
-        let seg_id = SegmentIdentity::checked(10, 2, 5, 3).unwrap();
+        // CR-02-safe identity: raw index 11 (10 is forbidden; the layout
+        // allocator would map rank 10 → 11 via nth_safe_segment_index).
+        let seg_id = SegmentIdentity::checked(10, 2, 5, 1).unwrap();
+        assert_eq!(seg_id.segment_index, 11);
         let salt = [0x42u8; 16];
         let layout_fp = "d3b07384d113edec49eaa6238ad5ff00";
 

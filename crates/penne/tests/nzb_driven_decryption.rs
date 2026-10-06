@@ -236,7 +236,7 @@ async fn test_download_reordered_files_and_segments() {
             offset: 0,
         },
         payload_f1,
-        10,
+        11,
     );
     let art_f2_p1 = encode_test_article(
         &session,
@@ -288,7 +288,7 @@ async fn test_download_reordered_files_and_segments() {
   <file poster="uploader@example.com" date="1774300000" subject="&quot;file_a.bin&quot; yEnc">
     <groups><group>alt.binaries.test</group></groups>
     <segments>
-      <segment bytes="{}" number="1" segmentIndex="10">msg-f1@test</segment>
+      <segment bytes="{}" number="1" segmentIndex="11">msg-f1@test</segment>
     </segments>
   </file>
 </nzb>"#,

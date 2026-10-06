@@ -88,7 +88,10 @@ fn release_layout_planned_par2_index_and_volumes_follow_data_files() {
     // PAR2 volume 2 (ordinal 5): prefix 8, segments 9..=12
     assert_eq!(layout.entry(5).unwrap().prefix_parts, 8);
     assert_eq!(layout.segment_identity(5, 1).unwrap().segment_index, 9);
-    assert_eq!(layout.segment_identity(5, 4).unwrap().segment_index, 12);
+    // CR-02: ranks 10 and 12 map through nth_safe_segment_index, skipping
+    // forbidden indices 10 and 13 (assigned 11 and 14).
+    assert_eq!(layout.segment_identity(5, 2).unwrap().segment_index, 11);
+    assert_eq!(layout.segment_identity(5, 4).unwrap().segment_index, 14);
 }
 
 #[test]
@@ -100,7 +103,23 @@ fn release_layout_fails_on_zero_parts() {
 #[test]
 fn release_layout_fails_on_cumulative_overflow_or_u32_max() {
     let err = ReleaseLayout::from_parts(2, &[(1, u32::MAX), (2, 1)]).unwrap_err();
-    assert!(err.to_string().contains("exceeds u32::MAX") || err.to_string().contains("overflow"));
+    assert!(
+        err.to_string().contains("exceeds u32::MAX")
+            || err.to_string().contains("overflow")
+            || err.to_string().contains("safe segment-index capacity")
+    );
+}
+
+#[test]
+fn release_layout_safe_index_overflow_fails_cleanly() {
+    // CR-02: a release whose highest rank's safe index would exceed u32::MAX
+    // fails layout construction with an error (never a panic) even though the
+    // raw cumulative count itself fits u32::MAX.
+    let err = ReleaseLayout::from_parts(1, &[(1, u32::MAX)]).unwrap_err();
+    assert!(
+        err.to_string().contains("safe segment-index capacity"),
+        "expected CR-02 capacity error, got: {err}"
+    );
 }
 
 #[test]

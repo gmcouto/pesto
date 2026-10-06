@@ -469,8 +469,8 @@ fn test_reader_rejects_mixed_encrypted_and_ordinary_files() {
 
 #[test]
 fn test_validate_segments_allows_decoupled_obfuscation_and_subsets() {
-    // Uncounted geometry (0, 0)
-    let id1 = SegmentIdentity::explicit(0, 0, 1, 10).unwrap();
+    // Uncounted geometry (0, 0); CR-02-safe indices (10 is forbidden, use 11)
+    let id1 = SegmentIdentity::explicit(0, 0, 1, 11).unwrap();
     let id2 = SegmentIdentity::explicit(0, 0, 1, 20).unwrap();
 
     let s1 = make_segment("obf1.bin", 1, 1, "id1@x", 100, Some(id1));
