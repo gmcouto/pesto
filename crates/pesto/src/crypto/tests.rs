@@ -1152,3 +1152,125 @@ fn bootstrap_extraction_rejects_forbidden_segment_index_bytes() {
         assert_eq!(extracted, idx);
     }
 }
+
+#[test]
+fn yencryption_whitespace_strictness() {
+    // T8 (v1.2 Control Std §3): strict single-SP grammar.
+    let canonical =
+        b"=yencryption cipher=XChaCha20-Poly1305 salt=1a2b3c4d5e6f7890abcdef1234567890 index=00000001 tag=ed70d238067735a20783df5e094ccafa";
+    assert_eq!(canonical.len(), 128, "canonical line must be 128 bytes");
+    parse_yencryption_line(canonical).expect("canonical line must parse");
+
+    // Tab separated (vector header-16-tab-separated)
+    let tabbed =
+        b"=yencryption\tcipher=XChaCha20-Poly1305\tsalt=1a2b3c4d5e6f7890abcdef1234567890\tindex=00000001\ttag=ed70d238067735a20783df5e094ccafa";
+    let err = parse_yencryption_line(tabbed).unwrap_err();
+    assert!(err.to_string().contains("INVALID_WHITESPACE"), "got: {err}");
+
+    // Double space (vector header-17-double-space)
+    let double_spaced =
+        b"=yencryption  cipher=XChaCha20-Poly1305  salt=1a2b3c4d5e6f7890abcdef1234567890  index=00000001  tag=ed70d238067735a20783df5e094ccafa";
+    let err = parse_yencryption_line(double_spaced).unwrap_err();
+    assert!(err.to_string().contains("INVALID_WHITESPACE"), "got: {err}");
+
+    // Trailing space before the final token boundary (append one more space
+    // + re-trim a tag char: still single-SP separated but ends with space).
+    let err = parse_yencryption_line(
+        b"=yencryption cipher=XChaCha20-Poly1305 salt=1a2b3c4d5e6f7890abcdef1234567890 index=00000001 tag=ed70d238067735a20783df5e094ccaf ",
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("INVALID_WHITESPACE"), "got: {err}");
+
+    // A canonical-looking line with a 6-char index hex (wrong total length,
+    // 127 bytes) is rejected by the 128-byte assertion after field checks.
+    let wrong_len = b"=yencryption cipher=XChaCha20-Poly1305 salt=1a2b3c4d5e6f7890abcdef1234567890 index=000001 tag=ed70d238067735a20783df5e094ccafa";
+    let err = parse_yencryption_line(wrong_len).unwrap_err();
+    assert!(
+        err.to_string().contains("INVALID_LINE_LENGTH")
+            || err.to_string().contains("INVALID_INDEX_LENGTH"),
+        "got: {err}"
+    );
+}
+
+#[test]
+fn header_loop_ff1_error_fails_closed_not_passthrough() {
+    // T7 (v1.2 Control Std §5 step 4): an FF1 decryption error on a line in
+    // the expected-header region is PROVIDER_FAILOVER — it must never be
+    // committed as a data line.
+    let password = "fail-closed-header-loop";
+    let salt = control::generate_alphabet_salt();
+    let session = Arc::new(EncryptionSession::new(password, salt).unwrap());
+    let segment_index = 7u32;
+
+    // Build a valid encrypted article, then corrupt line 2 (the =ypart line
+    // region — for multipart, line 2 is a header line) so its FF1 decryption
+    // fails.
+    let payload = b"fail closed payload bytes";
+    let uploader = UploadEncryptionAdapter::new(session.clone());
+    let mut body = Vec::new();
+    let encoded = uploader
+        .encode_article(
+            "fc.bin",
+            payload.len() as u64,
+            PartSpec {
+                number: 1,
+                total: 1,
+                offset: 0,
+            },
+            payload,
+            128,
+            None,
+            SegmentIdentity::explicit(1, 1, 1, segment_index).unwrap(),
+            &mut body,
+        )
+        .unwrap();
+
+    let mut lines: Vec<Vec<u8>> = control::split_lines_preserving_endings(&encoded.body)
+        .into_iter()
+        .map(|l| [l.content.to_vec(), l.ending.to_vec()].concat())
+        .collect();
+    assert!(lines.len() >= 3, "need header + data + footer");
+
+    // Case A: line 2 carries a byte OUTSIDE the Radix-253 Alphabet (0x00) —
+    // byte_to_numeral fails inside ff1_decrypt_line, a genuine FF1 error on
+    // an expected-header line. Must bail PROVIDER_FAILOVER, never become a
+    // data line.
+    let mut case_a = lines.clone();
+    let pos = case_a[1]
+        .iter()
+        .position(|&b| b != b'\r' && b != b'\n')
+        .unwrap();
+    case_a[1][pos] = 0x00;
+    let err =
+        control::decrypt_yenc_control_lines(&session, segment_index, &case_a.concat()).unwrap_err();
+    assert!(
+        err.to_string().contains("PROVIDER_FAILOVER"),
+        "out-of-Alphabet header byte must fail closed as PROVIDER_FAILOVER, got: {err}"
+    );
+
+    // Case B: a bit flip in the header ciphertext decrypts "successfully" to
+    // garbage (FF1 is a permutation) — the probe treats it as the first data
+    // line, but the restored block then lacks its =yencryption header, so the
+    // ADAPTER fails closed and releases zero output.
+    let mut case_b = lines.clone();
+    let flip = case_b[1]
+        .iter()
+        .position(|&b| b != b'\r' && b != b'\n')
+        .unwrap();
+    case_b[1][flip] ^= 0x01;
+    let corrupted = case_b.concat();
+    let adapter = DownloadDecryptionAdapter::with_password(password);
+    let res = adapter.decode_article(&corrupted, Some(segment_index));
+    assert!(
+        res.is_err(),
+        "corrupted =yencryption header must fail closed"
+    );
+    let msg = res.unwrap_err().to_string();
+    // Zero-output: the error must not carry the decrypted data line content.
+    let data_line = &lines[2];
+    let probe = &data_line[..data_line.len().min(16)];
+    assert!(
+        !msg.as_bytes().windows(probe.len()).any(|w| w == probe),
+        "error must not leak passthrough data"
+    );
+}

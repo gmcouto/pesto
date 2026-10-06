@@ -269,6 +269,21 @@ pub fn decrypt_yenc_control_lines(
     out.extend_from_slice(line1.ending);
 
     // Process lines 2..N-1
+    //
+    // Header-loop probe semantics (Control Std §5 step 4, amended v1.2):
+    // - FF1 decryption ERROR on a line in the expected-header region fails
+    //   closed under PROVIDER_FAILOVER — it must NEVER become passthrough
+    //   data (out-of-Alphabet bytes in a header position are corruption).
+    // - Decryption SUCCESS whose plaintext does not begin with `=y`
+    //   terminates the loop: this was the first data line, emitted
+    //   unchanged (a data line is not FF1 ciphertext — probing it yields
+    //   garbage plaintext, so the ORIGINAL line content is passed through).
+    //   A corrupted header that still FF1-decrypts (bit flip) lands here;
+    //   the adapter layer then fails closed on the missing/misplaced
+    //   `=yencryption` header, so no unauthenticated content is released.
+    // - Decryption success yielding an unexpected `=y` control header
+    //   (neither the expected `=ypart`/`=yencryption`) is a corruption
+    //   case — fail closed.
     let mut in_header = true;
     for (i, line) in lines.iter().enumerate().take(n.saturating_sub(1)).skip(1) {
         let line_index = (i + 1) as u32;
@@ -284,11 +299,30 @@ pub fn decrypt_yenc_control_lines(
                     out.extend_from_slice(line.ending);
                     in_header = false;
                 }
-                _ => {
+                // Decryption succeeded but yielded an unexpected control
+                // header (e.g. a second =ybegin or a premature =yend): the
+                // line is corrupted or misplaced — fail closed, never emit
+                // it as a data line.
+                Ok(pt) if pt.starts_with(b"=y") => bail!(
+                    "UNEXPECTED_CONTROL_LINE: line {line_index} decrypted to unexpected \
+                     control header while scanning the header region"
+                ),
+                // First data line: decryption succeeded and the plaintext is
+                // not a control line — terminate the header loop and pass
+                // the ORIGINAL line through (a data line is not FF1
+                // ciphertext; probing it produces garbage plaintext).
+                Ok(_) => {
                     in_header = false;
                     out.extend_from_slice(line.content);
                     out.extend_from_slice(line.ending);
                 }
+                // FF1 decryption error on an expected-header line: provider
+                // corruption — fail closed (PROVIDER_FAILOVER), never
+                // passthrough as a data line.
+                Err(_) => bail!(
+                    "PROVIDER_FAILOVER: control-line decryption failed at line {line_index} \
+                     in the header region"
+                ),
             }
         } else {
             out.extend_from_slice(line.content);

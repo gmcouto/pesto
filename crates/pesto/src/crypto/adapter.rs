@@ -124,11 +124,24 @@ pub struct YEncryptionParams {
 /// Salt and tag must be exactly 32 lowercase hexadecimal characters.
 /// Index must be exactly 8 lowercase hexadecimal characters representing uint32_be > 0.
 /// No extra, duplicate, missing, or reordered fields are permitted.
+///
+/// Whitespace strictness (v1.2 Control Std §3): tokens are separated by
+/// EXACTLY one ASCII space — a tab anywhere or two consecutive spaces
+/// anywhere is `INVALID_WHITESPACE`. The canonical line is exactly 128
+/// bytes long (`11 + 26 + 1 + 37 + 1 + 13 + 1 + 36`); any other length is
+/// rejected. Ordinary yEnc headers (`=ybegin`/`=ypart`/`=yend` in
+/// `yenc/decode.rs`) historically allow flexible whitespace and are
+/// deliberately NOT made strict here.
 pub fn parse_yencryption_line(line: &[u8]) -> Result<YEncryptionParams> {
     ensure!(line.starts_with(b"=yencryption"), "not a =yencryption line");
     let text =
         std::str::from_utf8(line).map_err(|_| anyhow::anyhow!("invalid utf8 in =yencryption"))?;
-    let tokens: Vec<&str> = text.split_whitespace().collect();
+    // Strict single-SP split: tab or double-space anywhere yields empty
+    // tokens / wrong counts and is rejected as INVALID_WHITESPACE below.
+    if text.contains('\t') || text.contains("  ") || text.starts_with(' ') || text.ends_with(' ') {
+        bail!("INVALID_WHITESPACE: tab or repeated space in =yencryption line");
+    }
+    let tokens: Vec<&str> = text.split(' ').collect();
 
     ensure!(
         tokens.first() == Some(&"=yencryption"),
@@ -258,6 +271,15 @@ pub fn parse_yencryption_line(line: &[u8]) -> Result<YEncryptionParams> {
         tag[i] = u8::from_str_radix(&tag_str[i * 2..i * 2 + 2], 16)
             .map_err(|_| anyhow::anyhow!("INVALID_TAG_HEX: tag contains non-hex characters"))?;
     }
+
+    // 128-byte total length assertion: the canonical five-token grammar is
+    // exactly 128 bytes, so any accepted line with a different total length
+    // would imply non-canonical content smuggled past the field checks.
+    ensure!(
+        line.len() == 128,
+        "INVALID_LINE_LENGTH: =yencryption line must be exactly 128 bytes, got {}",
+        line.len()
+    );
 
     Ok(YEncryptionParams {
         cipher: "XChaCha20-Poly1305".to_string(),
