@@ -1225,7 +1225,7 @@ fn header_loop_ff1_error_fails_closed_not_passthrough() {
         )
         .unwrap();
 
-    let mut lines: Vec<Vec<u8>> = control::split_lines_preserving_endings(&encoded.body)
+    let lines: Vec<Vec<u8>> = control::split_lines_preserving_endings(&encoded.body)
         .into_iter()
         .map(|l| [l.content.to_vec(), l.ending.to_vec()].concat())
         .collect();
