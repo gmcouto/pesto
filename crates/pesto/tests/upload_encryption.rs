@@ -835,7 +835,7 @@ async fn test_persistence_lifecycle_invariants() {
     // (uint32_be contains 0x0A/0x0D) — the safe sequence is 1..9, 11, 12,
     // 14..22 per the nth_safe_segment_index rank mapping.
     assert_eq!(original_indices, {
-        let mut expected: Vec<u32> = (1..=22u32)
+        let expected: Vec<u32> = (1..=22u32)
             .filter(|&i| i.to_be_bytes().iter().all(|&b| b != 0x0A && b != 0x0D))
             .collect();
         assert_eq!(expected.len(), 20);
