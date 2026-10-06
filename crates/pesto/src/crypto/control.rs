@@ -5,18 +5,24 @@ use anyhow::{bail, Result};
 use fpe::ff1::{FlexibleNumeralString, FF1};
 
 use super::kdf::EncryptionSession;
+use super::{attach_crypto_error_kind, CryptoErrorKind};
 
-/// Map byte octet to numeral 0..252 per yEnc Control Lines Standard v1.0.
+/// Map byte octet to numeral 0..252 per yEnc Control Lines Standard v1.0,
+/// attaching [`CryptoErrorKind::ProviderFailover`] (wire-corruption tier) to
+/// out-of-Alphabet rejections so downstream routers can classify.
 pub fn byte_to_numeral(b: u8) -> Result<u16> {
     match b {
         0x01..=0x09 => Ok((b - 1) as u16),
         0x0B => Ok(9),
         0x0C => Ok(10),
         0x0E..=0xFF => Ok((b - 3) as u16),
-        _ => bail!(
-            "byte 0x{:02x} is outside the 253-byte Alphabet (0x00, 0x0A, 0x0D forbidden)",
-            b
-        ),
+        _ => Err(attach_crypto_error_kind(
+            anyhow::anyhow!(
+                "byte 0x{:02x} is outside the 253-byte Alphabet (0x00, 0x0A, 0x0D forbidden)",
+                b
+            ),
+            CryptoErrorKind::ProviderFailover,
+        )),
     }
 }
 
@@ -55,13 +61,19 @@ pub fn extract_bootstrap_from_line1(line1: &[u8]) -> Result<([u8; 16], u32)> {
     }
     // CR-02 (Control Std §4/§8): a segmentIndex whose big-endian encoding
     // contains 0x0A (LF) or 0x0D (CR) would have split Line 1 on the wire —
-    // reject under PROVIDER_FAILOVER.
+    // reject under PROVIDER_FAILOVER (typed at origin for the failover
+    // router).
     if segment_index
         .to_be_bytes()
         .iter()
         .any(|&b| b == 0x0A || b == 0x0D)
     {
-        bail!("FORBIDDEN_SEGMENT_INDEX_BYTE: segment index bytes contain 0x0A or 0x0D");
+        return Err(attach_crypto_error_kind(
+            anyhow::anyhow!(
+                "FORBIDDEN_SEGMENT_INDEX_BYTE: segment index bytes contain 0x0A or 0x0D"
+            ),
+            CryptoErrorKind::ProviderFailover,
+        ));
     }
     Ok((salt, segment_index))
 }
@@ -319,10 +331,14 @@ pub fn decrypt_yenc_control_lines(
                 // FF1 decryption error on an expected-header line: provider
                 // corruption — fail closed (PROVIDER_FAILOVER), never
                 // passthrough as a data line.
-                Err(_) => bail!(
-                    "PROVIDER_FAILOVER: control-line decryption failed at line {line_index} \
-                     in the header region"
-                ),
+                Err(e) => {
+                    return Err(attach_crypto_error_kind(
+                        e.context(format!(
+                        "control-line decryption failed at line {line_index} in the header region"
+                    )),
+                        CryptoErrorKind::ProviderFailover,
+                    ))
+                }
             }
         } else {
             out.extend_from_slice(line.content);

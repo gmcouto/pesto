@@ -90,11 +90,12 @@
       "expected_nonce_hex": "d394289fc7bc2e9c43294b257fb5428e54ec2e4879dba786"
     }
   ],
-  "control_tweak_argon2id_vector": "argon2id-02-control-salt",
   "control_tweak_vectors": [
     {
       "id": "control-tweak-seg-1-line-1",
       "description": "Control tweak derivation for segmentIndex=1, lineIndex=1 (header line 1 (=ybegin))",
+      "master_key_hex": "de3bfc39034371d589b34d485c572c12ce2ac6d4464adaea47fc1fb1e0fbfbd3",
+      "enc_key_hex": "ad675564c3a679ff633bd2503f24209903fc440818c7ae39c7646df91857fb93",
       "segment_index": 1,
       "line_index": 1,
       "message_hex": "79656e632d636f6e74726f6c20747765616b0000000100000001",
@@ -105,6 +106,8 @@
     {
       "id": "control-tweak-seg-1-line-2",
       "description": "Control tweak derivation for segmentIndex=1, lineIndex=2 (header line 2 (=ypart))",
+      "master_key_hex": "de3bfc39034371d589b34d485c572c12ce2ac6d4464adaea47fc1fb1e0fbfbd3",
+      "enc_key_hex": "ad675564c3a679ff633bd2503f24209903fc440818c7ae39c7646df91857fb93",
       "segment_index": 1,
       "line_index": 2,
       "message_hex": "79656e632d636f6e74726f6c20747765616b0000000100000002",
@@ -115,6 +118,8 @@
     {
       "id": "control-tweak-seg-1-line-3",
       "description": "Control tweak derivation for segmentIndex=1, lineIndex=3 (header line 3 (=yencryption))",
+      "master_key_hex": "de3bfc39034371d589b34d485c572c12ce2ac6d4464adaea47fc1fb1e0fbfbd3",
+      "enc_key_hex": "ad675564c3a679ff633bd2503f24209903fc440818c7ae39c7646df91857fb93",
       "segment_index": 1,
       "line_index": 3,
       "message_hex": "79656e632d636f6e74726f6c20747765616b0000000100000003",
@@ -125,6 +130,8 @@
     {
       "id": "control-tweak-seg-1-line-54",
       "description": "Control tweak derivation for segmentIndex=1, lineIndex=54 (footer line (=yend for 54-line article))",
+      "master_key_hex": "de3bfc39034371d589b34d485c572c12ce2ac6d4464adaea47fc1fb1e0fbfbd3",
+      "enc_key_hex": "ad675564c3a679ff633bd2503f24209903fc440818c7ae39c7646df91857fb93",
       "segment_index": 1,
       "line_index": 54,
       "message_hex": "79656e632d636f6e74726f6c20747765616b0000000100000036",
@@ -135,6 +142,8 @@
     {
       "id": "control-tweak-seg-2-line-1",
       "description": "Control tweak derivation for segmentIndex=2, lineIndex=1 (second segment line 1 (=ybegin))",
+      "master_key_hex": "de3bfc39034371d589b34d485c572c12ce2ac6d4464adaea47fc1fb1e0fbfbd3",
+      "enc_key_hex": "ad675564c3a679ff633bd2503f24209903fc440818c7ae39c7646df91857fb93",
       "segment_index": 2,
       "line_index": 1,
       "message_hex": "79656e632d636f6e74726f6c20747765616b0000000200000001",
@@ -145,6 +154,8 @@
     {
       "id": "control-tweak-seg-2-line-4",
       "description": "Control tweak derivation for segmentIndex=2, lineIndex=4 (second segment line 4 (=yend))",
+      "master_key_hex": "de3bfc39034371d589b34d485c572c12ce2ac6d4464adaea47fc1fb1e0fbfbd3",
+      "enc_key_hex": "ad675564c3a679ff633bd2503f24209903fc440818c7ae39c7646df91857fb93",
       "segment_index": 2,
       "line_index": 4,
       "message_hex": "79656e632d636f6e74726f6c20747765616b0000000200000004",
@@ -155,6 +166,8 @@
     {
       "id": "control-tweak-seg-65536-line-1000",
       "description": "Control tweak derivation for segmentIndex=65536, lineIndex=1000 (high segment and line index pair)",
+      "master_key_hex": "de3bfc39034371d589b34d485c572c12ce2ac6d4464adaea47fc1fb1e0fbfbd3",
+      "enc_key_hex": "ad675564c3a679ff633bd2503f24209903fc440818c7ae39c7646df91857fb93",
       "segment_index": 65536,
       "line_index": 1000,
       "message_hex": "79656e632d636f6e74726f6c20747765616b00010000000003e8",

@@ -539,7 +539,12 @@ async fn test_download_index_tampering_zero_output() {
     known.insert("msg-tamper@test".to_string(), genuine_art);
     let addr = spawn_mock_nntp_server(known, None);
 
-    // NZB specifies segmentIndex = 2 (tampered index)
+    // Phase 58 T3: the legacy segmentIndex="2" XML attribute is IGNORED
+    // (bootstrap-only identity), so the wire bootstrap index 1 governs and
+    // the download succeeds — XML indices can no longer be "tampered" data.
+    // The tampering rejection the old test exercised now lives in the wire
+    // path: a tampered Line 1 bootstrap fails AEAD (see the malformed
+    // vector tests in pesto::crypto).
     let segments = format!(
         "<segment bytes=\"{}\" number=\"1\" segmentIndex=\"2\">msg-tamper@test</segment>",
         payload.len()
@@ -550,26 +555,21 @@ async fn test_download_index_tampering_zero_output() {
     let outcome =
         run_download_nzb(&xml, &[ServerTier::solo(server_entry(addr))], dest.path()).await;
 
-    // Must report corruption due to AEAD authentication failure
-    assert_eq!(outcome.corrupt.len(), 1);
-    assert!(outcome.segments.is_empty());
+    // Attribute ignored: clean success with correct plaintext.
+    assert!(outcome.corrupt.is_empty(), "corrupt: {:?}", outcome.corrupt);
+    assert!(
+        outcome.segments.contains("<msg-tamper@test>"),
+        "segments: {:?}; missing: {:?}",
+        outcome.segments,
+        outcome.missing
+    );
+    assert_eq!(
+        std::fs::read(dest.path().join("tamper.bin")).unwrap(),
+        payload
+    );
 
-    // Zero-Output Guarantee:
-    // 1. Destination final file does NOT exist
-    assert!(
-        !dest.path().join("tamper.bin").exists(),
-        "final file must not exist on authentication failure"
-    );
-    // 2. Destination temporary file does NOT exist
-    assert!(
-        !dest.path().join("tamper.bin.tmp").exists(),
-        "temporary file must not exist on authentication failure"
-    );
-    // 3. Cache entry does NOT exist
-    assert!(
-        penne::cache::load(dest.path(), "msg-tamper@test").is_none(),
-        "cache entry must not exist on authentication failure"
-    );
+    // Cached raw wire article present for resume.
+    assert!(penne::cache::load(dest.path(), "msg-tamper@test").is_some());
 }
 
 #[tokio::test]
@@ -731,19 +731,16 @@ async fn test_preflight_rejects_malformed_queue_before_effects() {
     )
     .await;
 
-    // Must fail closed with preflight DUPLICATE_SEGMENT_INDEX
-    assert!(result.is_err());
-    let err_msg = result.unwrap_err().to_string();
-    assert!(
-        err_msg.contains("DUPLICATE_SEGMENT_INDEX"),
-        "error must be DUPLICATE_SEGMENT_INDEX, got: {err_msg}"
-    );
-
-    // Assert zero progress events emitted before error
-    assert!(
-        rx.try_recv().is_err(),
-        "no progress events must be emitted prior to preflight failure"
-    );
+    // Phase 58 T3: per-article-only preflight — duplicate XML-era indices
+    // are no longer rejected (identity is bootstrap-only; the two segments
+    // here would both extract their own index from Line 1 post-fetch, and
+    // release-wide uniqueness is a producer obligation). The preflight
+    // rejects only per-article violations: zero or CR-02-forbidden bytes.
+    // Both queue indices here are 1 (safe), so the run proceeds — the empty
+    // mock server yields missing/corrupt segments instead.
+    let outcome = result.expect("per-article-safe queue must pass preflight");
+    assert!(outcome.segments.is_empty());
+    assert_eq!(outcome.missing.len() + outcome.corrupt.len(), 2);
 
     // Assert zero temporary or final files created
     let entry_count = std::fs::read_dir(dest.path()).unwrap().count();
@@ -752,12 +749,13 @@ async fn test_preflight_rejects_malformed_queue_before_effects() {
         "destination directory must have zero entries"
     );
 
-    // Assert zero NNTP requests made
-    assert_eq!(
-        req_counter.load(Ordering::SeqCst),
-        0,
-        "zero NNTP requests must be made on preflight failure"
+    // Progress events were emitted (Started + per-segment events) — the run
+    // began, because nothing was structurally wrong with the queue.
+    assert!(
+        rx.try_recv().is_ok(),
+        "run must have emitted progress events"
     );
+    let _ = req_counter; // server may or may not have been contacted; not a preflight guarantee anymore
 }
 
 #[tokio::test]

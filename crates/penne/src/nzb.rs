@@ -196,82 +196,62 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_queue_identity_encrypted_fail_closed_checks() {
-        // Valid encrypted queue with sparse/unordered indices
-        let valid_queue = crate::queue::DownloadQueue {
-            files: vec![
-                crate::queue::QueuedFile {
-                    name: "file1.bin".into(),
-                    segments: vec![crate::queue::QueuedSegment {
-                        message_id: "id1@x".into(),
-                        part: 1,
-                        bytes: 100,
-                        segment_index: Some(10),
-                    }],
-                    file_ordinal: None,
-                    total_files: None,
-                },
-                crate::queue::QueuedFile {
-                    name: "file2.bin".into(),
-                    segments: vec![crate::queue::QueuedSegment {
-                        message_id: "id2@x".into(),
-                        part: 1,
-                        bytes: 100,
-                        segment_index: Some(5),
-                    }],
-                    file_ordinal: None,
-                    total_files: None,
-                },
-            ],
+    fn test_validate_queue_identity_encrypted_per_article_checks() {
+        // Phase 58 T3: per-article-only validation — non-zero + CR-02-safe.
+        // Release-wide uniqueness/conflict checks are intentionally absent
+        // (producer obligation; bootstrap indices invisible at queue time).
+        let make_seg = |mid: &str, idx: Option<u32>| crate::queue::QueuedSegment {
+            message_id: mid.into(),
+            part: 1,
+            bytes: 100,
+            segment_index: idx,
         };
-        assert!(crate::download::validate_queue_identity(&valid_queue, true).is_ok());
+        let make_queue = |segs: Vec<crate::queue::QueuedSegment>| crate::queue::DownloadQueue {
+            files: vec![crate::queue::QueuedFile {
+                name: "file1.bin".into(),
+                segments: segs,
+                file_ordinal: None,
+                total_files: None,
+            }],
+        };
 
-        // 1. Missing segment index succeeds in clean NZB 1.1
-        let mut q_missing = valid_queue.clone();
-        q_missing.files[0].segments[0].segment_index = None;
-        assert!(crate::download::validate_queue_identity(&q_missing, true).is_ok());
+        // Sparse/unordered safe indices pass.
+        assert!(crate::download::validate_queue_identity(
+            &make_queue(vec![
+                make_seg("id1@x", Some(10 + 1)),
+                make_seg("id2@x", Some(5))
+            ]),
+            true
+        )
+        .is_ok());
 
-        // 2. Invalid segment index zero
-        let mut q_zero = valid_queue.clone();
-        q_zero.files[0].segments[0].segment_index = Some(0);
-        let err = crate::download::validate_queue_identity(&q_zero, true).unwrap_err();
+        // Missing index passes in clean NZB 1.1 (bootstrap-only identity).
+        assert!(crate::download::validate_queue_identity(
+            &make_queue(vec![make_seg("id1@x", None)]),
+            true
+        )
+        .is_ok());
+
+        // Zero rejected.
+        let err = crate::download::validate_queue_identity(
+            &make_queue(vec![make_seg("id1@x", Some(0))]),
+            true,
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("INVALID_SEGMENT_INDEX_ZERO"));
 
-        // 3. Duplicate segment index across different Message-IDs
-        let mut q_dup = valid_queue.clone();
-        q_dup.files[1].segments[0].segment_index = Some(10);
-        let err = crate::download::validate_queue_identity(&q_dup, true).unwrap_err();
-        assert!(err.to_string().contains("DUPLICATE_SEGMENT_INDEX"));
-
-        // 4. Conflicting index for same Message-ID
-        let q_conflict = crate::queue::DownloadQueue {
-            files: vec![
-                crate::queue::QueuedFile {
-                    name: "file1.bin".into(),
-                    segments: vec![crate::queue::QueuedSegment {
-                        message_id: "same@x".into(),
-                        part: 1,
-                        bytes: 100,
-                        segment_index: Some(1),
-                    }],
-                    file_ordinal: None,
-                    total_files: None,
-                },
-                crate::queue::QueuedFile {
-                    name: "file2.bin".into(),
-                    segments: vec![crate::queue::QueuedSegment {
-                        message_id: "same@x".into(),
-                        part: 2,
-                        bytes: 100,
-                        segment_index: Some(2),
-                    }],
-                    file_ordinal: None,
-                    total_files: None,
-                },
-            ],
-        };
-        let err = crate::download::validate_queue_identity(&q_conflict, true).unwrap_err();
-        assert!(err.to_string().contains("CONFLICTING_MESSAGE_ID_INDEX"));
+        // Forbidden bytes rejected (10, 13, 266, 269).
+        for idx in [10u32, 13, 266, 269] {
+            let err = crate::download::validate_queue_identity(
+                &make_queue(vec![make_seg("id1@x", Some(idx))]),
+                true,
+            )
+            .unwrap_err();
+            assert!(
+                err.to_string().contains("FORBIDDEN_SEGMENT_INDEX_BYTE"),
+                "index {idx} must be forbidden, got: {err}"
+            );
+        }
     }
 
     #[tokio::test]

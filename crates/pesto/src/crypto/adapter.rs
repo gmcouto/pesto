@@ -7,6 +7,7 @@ use std::sync::Arc;
 use super::body;
 use super::control;
 use super::kdf::EncryptionSession;
+use super::{attach_crypto_error_kind, CryptoErrorKind};
 use crate::poster::SegmentIdentity;
 use crate::yenc::{self, DecodedPart, EncodedPart, PartSpec};
 
@@ -153,7 +154,7 @@ pub fn parse_yencryption_line(line: &[u8]) -> Result<YEncryptionParams> {
     for token in tokens.iter().skip(1) {
         if let Some((k, _)) = token.split_once('=') {
             if !seen_keys.insert(k) {
-                bail!("DUPLICATE_PARAMETER: duplicate parameter in =yencryption header");
+                bail!("INVALID_TOKEN_COUNT: duplicate parameter in =yencryption header");
             }
         }
     }
@@ -162,19 +163,20 @@ pub fn parse_yencryption_line(line: &[u8]) -> Result<YEncryptionParams> {
         bail!("MISSING_CIPHER: cipher parameter missing");
     }
 
-    // Token 1 must be cipher=
+    // Token 1 must be cipher=. The canonical validator (v1.2 vectors) raises
+    // UNSUPPORTED_CIPHER for a reordered cipher token and INVALID_TOKEN_COUNT
+    // for a missing one.
     if !tokens[1].starts_with("cipher=") {
         if tokens.iter().skip(1).any(|t| t.starts_with("cipher=")) {
-            bail!("REORDERED_HEADER: cipher parameter out of order");
+            bail!("UNSUPPORTED_CIPHER: cipher parameter out of order");
         } else {
             bail!("INVALID_TOKEN_COUNT: missing cipher parameter");
         }
     }
     let cipher_val = &tokens[1]["cipher=".len()..];
-    if cipher_val.is_empty() {
-        bail!("INVALID_CIPHER: empty cipher parameter");
-    }
-    if cipher_val != "XChaCha20-Poly1305" {
+    // An empty cipher value is UNSUPPORTED_CIPHER (canonical vector
+    // malformed-header-03): there is no cipher to support.
+    if cipher_val.is_empty() || cipher_val != "XChaCha20-Poly1305" {
         bail!("UNSUPPORTED_CIPHER: unsupported cipher {cipher_val}");
     }
 
@@ -185,7 +187,7 @@ pub fn parse_yencryption_line(line: &[u8]) -> Result<YEncryptionParams> {
         );
     }
     if tokens.len() > 5 {
-        bail!("EXTRA_PARAMETER: unexpected additional parameters in =yencryption header");
+        bail!("INVALID_TOKEN_COUNT: unexpected additional parameters in =yencryption header");
     }
 
     // Token 2 must be salt=
@@ -202,6 +204,9 @@ pub fn parse_yencryption_line(line: &[u8]) -> Result<YEncryptionParams> {
             "INVALID_SALT_LENGTH: salt must be exactly 32 hex characters, got {}",
             salt_str.len()
         );
+    }
+    if salt_str.chars().any(|c| matches!(c, 'A'..='F')) {
+        bail!("UPPERCASE_HEX: salt contains uppercase hex characters");
     }
     if salt_str
         .chars()
@@ -259,6 +264,9 @@ pub fn parse_yencryption_line(line: &[u8]) -> Result<YEncryptionParams> {
             "INVALID_TAG_LENGTH: tag must be exactly 32 hex characters, got {}",
             tag_str.len()
         );
+    }
+    if tag_str.chars().any(|c| matches!(c, 'A'..='F')) {
+        bail!("UPPERCASE_HEX: tag contains uppercase hex characters");
     }
     if tag_str
         .chars()
@@ -471,7 +479,8 @@ impl DownloadDecryptionAdapter {
         // Ciphertext CRC check before AEAD decryption
         ensure!(decoded.crc_matches(), "ciphertext CRC mismatch");
 
-        // Authenticate and decrypt body ciphertext with Zero-Output Guarantee
+        // Authenticate and decrypt body ciphertext with Zero-Output Guarantee.
+        // Typed at origin: Poly1305 failure is provider corruption (retriable).
         let nonce = session.derive_body_nonce(segment_index);
         let plaintext = body::decrypt_body(
             &decoded.data,
@@ -479,7 +488,12 @@ impl DownloadDecryptionAdapter {
             session.master_key(),
             &nonce,
         )
-        .map_err(|e| anyhow::anyhow!("AUTHENTICATION_FAILURE: {e}"))?;
+        .map_err(|e| {
+            attach_crypto_error_kind(
+                anyhow::anyhow!("AUTHENTICATION_FAILURE: {e}"),
+                CryptoErrorKind::ProviderFailover,
+            )
+        })?;
 
         // Zero-output guarantee: clear ciphertext CRC metadata and replace data with authenticated plaintext
         decoded.part_crc32 = None;
@@ -501,8 +515,12 @@ impl DownloadDecryptionAdapter {
     ) -> Result<Vec<u8>> {
         let session = self.get_or_create_session(salt)?;
         let nonce = session.derive_body_nonce(segment_index);
-        body::decrypt_body(ciphertext, tag, session.master_key(), &nonce)
-            .map_err(|e| anyhow::anyhow!("AUTHENTICATION_FAILURE: {e}"))
+        body::decrypt_body(ciphertext, tag, session.master_key(), &nonce).map_err(|e| {
+            attach_crypto_error_kind(
+                anyhow::anyhow!("AUTHENTICATION_FAILURE: {e}"),
+                CryptoErrorKind::ProviderFailover,
+            )
+        })
     }
 
     /// Whether this adapter holds any decryption credentials (an explicit password
@@ -538,7 +556,10 @@ impl DownloadDecryptionAdapter {
             return Ok(session);
         }
 
-        bail!("no password or encryption session available to decrypt article");
+        Err(attach_crypto_error_kind(
+            anyhow::anyhow!("no password or encryption session available to decrypt article"),
+            CryptoErrorKind::MetadataValidation,
+        ))
     }
 }
 

@@ -1,3 +1,10 @@
+//! Bootstrap-only segment identity at the penne queue boundary (Phase 58 T3).
+//!
+//! v1.2 Body Std §8 consumer req 3: readers MUST NOT consume `segmentIndex`
+//! XML attributes; if present, they are ignored. Identity derives exclusively
+//! from each article's Line 1 bootstrap bytes post-fetch. Download-time
+//! validation is per-article only.
+
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::PathBuf;
@@ -18,7 +25,11 @@ fn write_temp_nzb(xml: &str) -> NamedTempFile {
 }
 
 #[test]
-fn test_tracer_penne_queue_explicit_identity() {
+fn bootstrap_only_identity_explicit_xml_attributes_are_ignored() {
+    // A legacy NZB carrying segmentIndex XML attributes: the attributes are
+    // ignored — no identity is consumed from them. Identity would come from
+    // each article's Line 1 bootstrap post-fetch (here: 42/43 are NOT
+    // reflected anywhere in the parsed or queued state).
     let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE nzb PUBLIC "-//newzBin//DTD NZB 1.1//EN" "http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd">
 <nzb xmlns="http://www.newzbin.com/DTD/2003/nzb">
@@ -38,43 +49,30 @@ fn test_tracer_penne_queue_explicit_identity() {
     let temp = write_temp_nzb(xml);
     let parsed = load(temp.path()).expect("Penne NZB load must succeed");
     assert!(parsed.meta.yenc_encrypted, "must be marked yenc_encrypted");
+    assert!(
+        parsed.segment_identities.is_none(),
+        "bootstrap-only identity: no segment_identities map at parse time"
+    );
+    for seg in &parsed.segments {
+        assert!(
+            seg.segment_identity.is_none(),
+            "XML attributes must not become identity"
+        );
+    }
 
-    // Cryptographic segment identity in reader must have uncounted (0, 0) geometry
-    let identities = parsed
-        .segment_identities
-        .as_ref()
-        .expect("segment_identities must be present");
-    let id1 = identities
-        .get("<tracer-msg-01@example.com>")
-        .expect("identity for msg 1");
-    assert_eq!(id1.segment_index, 42);
-    assert_eq!(id1.file_ordinal, 0, "file_ordinal must be 0 (uncounted)");
-    assert_eq!(id1.total_files, 0, "total_files must be 0 (uncounted)");
-
-    let id2 = identities
-        .get("<tracer-msg-02@example.com>")
-        .expect("identity for msg 2");
-    assert_eq!(id2.segment_index, 43);
-    assert_eq!(id2.file_ordinal, 0, "file_ordinal must be 0 (uncounted)");
-    assert_eq!(id2.total_files, 0, "total_files must be 0 (uncounted)");
-
-    // Queue build must propagate explicit indices directly
     let queue = build(&parsed);
     assert_eq!(queue.files.len(), 1);
     let queued_file = &queue.files[0];
     assert_eq!(queued_file.segments.len(), 2);
+    for seg in &queued_file.segments {
+        assert_eq!(
+            seg.segment_index, None,
+            "queued segment must carry None index; bootstrap extraction happens post-fetch"
+        );
+    }
 
-    assert_eq!(
-        queued_file.segments[0].message_id,
-        "<tracer-msg-01@example.com>"
-    );
-    assert_eq!(queued_file.segments[0].segment_index, Some(42));
-
-    assert_eq!(
-        queued_file.segments[1].message_id,
-        "<tracer-msg-02@example.com>"
-    );
-    assert_eq!(queued_file.segments[1].segment_index, Some(43));
+    // Per-article-only preflight passes (nothing to validate at queue time).
+    validate_queue_identity(&queue, true).unwrap();
 }
 
 #[test]
@@ -209,31 +207,47 @@ fn test_conformance_vectors_penne_nzb_segment_identity() {
 }
 
 #[test]
-fn test_queue_rejects_conflicting_message_id_indices() {
-    let queue = DownloadQueue {
+fn queue_identity_validation_is_per_article_only() {
+    // Per-article rule: non-zero and CR-02-safe. Release-wide uniqueness is
+    // NOT validated pre-fetch (producer obligation) — duplicate XML-level
+    // indices no longer exist as a concept (attributes are ignored), and
+    // same-message-different-index is unconsumable data.
+    let make_queue = |indices: &[Option<u32>]| DownloadQueue {
         files: vec![QueuedFile {
-            name: "conflict.bin".to_string(),
+            name: "q.bin".to_string(),
             file_ordinal: Some(1),
             total_files: Some(1),
-            segments: vec![
-                QueuedSegment {
-                    message_id: "same-message@test".to_string(),
-                    part: 1,
+            segments: indices
+                .iter()
+                .enumerate()
+                .map(|(i, &idx)| QueuedSegment {
+                    message_id: format!("msg-{i}@test"),
+                    part: i as u32 + 1,
                     bytes: 100,
-                    segment_index: Some(1),
-                },
-                QueuedSegment {
-                    message_id: "same-message@test".to_string(),
-                    part: 2,
-                    bytes: 100,
-                    segment_index: Some(2),
-                },
-            ],
+                    segment_index: idx,
+                })
+                .collect(),
         }],
     };
 
-    let err = validate_queue_identity(&queue, true).unwrap_err();
-    assert!(err.to_string().contains("CONFLICTING_MESSAGE_ID_INDEX"));
+    // Duplicates are not a queue-time error anymore (producer obligation).
+    validate_queue_identity(&make_queue(&[Some(1), Some(1)]), true).unwrap();
+
+    // Non-zero enforced.
+    let err = validate_queue_identity(&make_queue(&[Some(0)]), true).unwrap_err();
+    assert!(err.to_string().contains("INVALID_SEGMENT_INDEX_ZERO"));
+
+    // Forbidden bytes enforced (10, 13, 266, 269).
+    for idx in [10u32, 13, 266, 269] {
+        let err = validate_queue_identity(&make_queue(&[Some(idx)]), true).unwrap_err();
+        assert!(
+            err.to_string().contains("FORBIDDEN_SEGMENT_INDEX_BYTE"),
+            "index {idx} must be forbidden, got: {err}"
+        );
+    }
+
+    // Safe indices pass.
+    validate_queue_identity(&make_queue(&[Some(1), Some(11), Some(14)]), true).unwrap();
 }
 
 #[test]

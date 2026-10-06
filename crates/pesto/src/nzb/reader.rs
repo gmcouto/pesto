@@ -1,57 +1,13 @@
 //! NZB parsing: reconstructing posted segments from NZB 1.1 XML.
 
-use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
 
-use crate::poster::{PostedSegment, SegmentIdentity};
+use crate::poster::PostedSegment;
 
 use super::{NzbMeta, ParsedNzb};
-
-/// Parse a string containing a segmentIndex attribute into a canonical 32-bit unsigned integer.
-///
-/// Enforces Section 8 strict syntax rules:
-/// - non-empty
-/// - strictly ASCII digits `0..=9`
-/// - non-zero
-/// - no leading zeros (unless length is 1 and it's handled, but 0 is forbidden so no leading zeros at all)
-/// - no signs (+, -)
-/// - no whitespace
-/// - bounds: `1..=4294967295`
-pub fn parse_segment_index(val_str: &str) -> Result<u32> {
-    if val_str.is_empty() {
-        bail!("INVALID_SEGMENT_INDEX_EMPTY");
-    }
-    if val_str == "0" {
-        bail!("INVALID_SEGMENT_INDEX_ZERO");
-    }
-    if val_str.starts_with('+') || val_str.starts_with('-') {
-        bail!("INVALID_SEGMENT_INDEX_SIGN");
-    }
-    if val_str != val_str.trim()
-        || val_str
-            .bytes()
-            .any(|b| matches!(b, b' ' | b'\t' | b'\n' | b'\r'))
-    {
-        bail!("INVALID_SEGMENT_INDEX_WHITESPACE");
-    }
-    if val_str.len() > 1 && val_str.starts_with('0') && val_str.bytes().all(|b| b.is_ascii_digit())
-    {
-        bail!("INVALID_SEGMENT_INDEX_LEADING_ZERO");
-    }
-    if !val_str.bytes().all(|b| b.is_ascii_digit()) {
-        bail!("INVALID_SEGMENT_INDEX_NON_DIGIT");
-    }
-    let parsed: u64 = val_str
-        .parse()
-        .map_err(|_| anyhow::anyhow!("INVALID_SEGMENT_INDEX_OVERFLOW"))?;
-    if parsed > u32::MAX as u64 {
-        bail!("INVALID_SEGMENT_INDEX_OVERFLOW");
-    }
-    Ok(parsed as u32)
-}
 
 struct RawSegment {
     file_name: String,
@@ -64,21 +20,25 @@ struct RawSegment {
     message_id: String,
     file_ordinal: u32,
     total_files: u32,
-    raw_segment_index: Option<String>,
 }
 
 /// Parse a `.nzb` document and reconstruct its [`PostedSegment`] list.
 ///
 /// Unencrypted releases and archive-password-only releases parse with `segment_identities: None`.
-/// Encrypted releases (indicated by `<meta type="yenc_encrypted">true</meta>` or explicit
-/// `segmentIndex` attributes with `<meta type="password">`) undergo strict Section 8 validation.
+/// Encrypted releases (indicated by `<meta type="yenc_encrypted">true</meta>`) are marked
+/// `yenc_encrypted`; segment identity is derived exclusively from each article's Line 1
+/// bootstrap bytes at download time (Body Encryption Standard v1.2 §8 consumer req 3:
+/// readers MUST NOT consume legacy segment-index XML attributes — if present, they are ignored).
 pub fn parse(content: &str) -> Result<ParsedNzb> {
     parse_internal(content, false)
 }
 
-/// Parse an encrypted `.nzb` document, strictly enforcing explicit `segmentIndex` on every segment.
+/// Parse an encrypted `.nzb` document.
 ///
-/// Fails closed if any segment lacks `segmentIndex` or carries invalid index formatting.
+/// Requires encryption provenance (`<meta type="yenc_encrypted">true</meta>`).
+/// Segment identity is bootstrap-only: no segment-index XML attribute is
+/// read, validated, or required (v1.2 §8 — readers MUST NOT consume legacy
+/// segment-index attributes; writers MUST NOT emit them).
 pub fn parse_encrypted(content: &str) -> Result<ParsedNzb> {
     parse_internal(content, true)
 }
@@ -183,7 +143,9 @@ fn parse_internal(content: &str, force_encrypted: bool) -> Result<ParsedNzb> {
             } else {
                 format!("<{raw_id}>")
             };
-            let raw_segment_index = xml_attr(t, "segmentIndex");
+            // v1.2 §8: any legacy segment-index XML attribute is IGNORED — not
+            // consumed, not validated. Segment identity derives exclusively
+            // from each article's Line 1 bootstrap bytes at download time.
 
             raw_segments.push(RawSegment {
                 file_name: current_file_name.clone(),
@@ -196,7 +158,6 @@ fn parse_internal(content: &str, force_encrypted: bool) -> Result<ParsedNzb> {
                 message_id,
                 file_ordinal: current_file_ordinal,
                 total_files: current_total_files,
-                raw_segment_index,
             });
         } else if t.starts_with("<meta ") {
             let kind = xml_attr(t, "type").unwrap_or_default();
@@ -220,13 +181,12 @@ fn parse_internal(content: &str, force_encrypted: bool) -> Result<ParsedNzb> {
         }
     }
 
-    let any_segment_has_index = raw_segments.iter().any(|s| s.raw_segment_index.is_some());
-    if force_encrypted && !explicit_yenc_encrypted && !any_segment_has_index {
-        bail!("MISSING_SEGMENT_INDEX: release lacks encryption provenance and segment index");
-    }
-    let is_encrypted = force_encrypted
-        || explicit_yenc_encrypted
-        || (meta.password.is_some() && any_segment_has_index);
+    // Encryption provenance: explicit `yenc_encrypted` meta (v1.2 §8), or —
+    // for `parse_encrypted`'s caller contract — forced. The legacy
+    // `(password && any segment-index attribute)` inference heuristic is
+    // DELETED (Phase 58 T3): XML attributes are never consumed, so they can
+    // never prove encryption.
+    let is_encrypted = force_encrypted || explicit_yenc_encrypted;
 
     if is_encrypted {
         if let Some(ref ver) = meta.yenc_version {
@@ -240,136 +200,46 @@ fn parse_internal(content: &str, force_encrypted: bool) -> Result<ParsedNzb> {
             }
         }
         meta.yenc_encrypted = true;
-
-        if any_segment_has_index {
-            let mut segment_identities = HashMap::new();
-            let mut seen_indices = HashSet::new();
-            let mut seen_message_ids: HashMap<String, u32> = HashMap::new();
-            let mut segments = Vec::with_capacity(raw_segments.len());
-
-            for raw in raw_segments {
-                let seg_idx_str = raw
-                    .raw_segment_index
-                    .as_deref()
-                    .context("MISSING_SEGMENT_INDEX")?;
-                let seg_idx = parse_segment_index(seg_idx_str)?;
-
-                if let Some(&existing_idx) = seen_message_ids.get(&raw.message_id) {
-                    if existing_idx != seg_idx {
-                        bail!("CONFLICTING_MESSAGE_ID_INDEX");
-                    }
-                } else {
-                    seen_message_ids.insert(raw.message_id.clone(), seg_idx);
-                }
-
-                if !seen_indices.insert(seg_idx) {
-                    bail!("DUPLICATE_SEGMENT_INDEX");
-                }
-
-                let identity = SegmentIdentity::explicit(0, 0, raw.part, seg_idx)
-                    .context("failed to construct explicit segment identity")?;
-
-                segment_identities.insert(raw.message_id.clone(), identity);
-
-                segments.push(PostedSegment {
-                    file_name: raw.file_name.clone(),
-                    file_path: Arc::from(Path::new(&raw.file_name)),
-                    subject_name: Arc::from(raw.subject_name.as_str()),
-                    wire_name: Arc::from(""),
-                    wire_yenc_name: Arc::from(""),
-                    file_size: 0,
-                    part: raw.part,
-                    total: raw.total,
-                    message_id: raw.message_id,
-                    bytes: raw.bytes,
-                    from: Arc::from(raw.poster.as_str()),
-                    date: (None, raw.date),
-                    full_crc32: 0,
-                    server_idx: 0,
-                    file_index: raw.file_ordinal,
-                    total_files: raw.total_files,
-                    segment_identity: Some(identity),
-                });
-            }
-
-            segments.sort_by(|a, b| a.file_name.cmp(&b.file_name).then(a.part.cmp(&b.part)));
-
-            Ok(ParsedNzb {
-                poster,
-                groups,
-                segments,
-                meta,
-                segment_identities: Some(segment_identities),
-            })
-        } else {
-            let mut segments = Vec::with_capacity(raw_segments.len());
-            for raw in raw_segments {
-                segments.push(PostedSegment {
-                    file_name: raw.file_name.clone(),
-                    file_path: Arc::from(Path::new(&raw.file_name)),
-                    subject_name: Arc::from(raw.subject_name.as_str()),
-                    wire_name: Arc::from(""),
-                    wire_yenc_name: Arc::from(""),
-                    file_size: 0,
-                    part: raw.part,
-                    total: raw.total,
-                    message_id: raw.message_id,
-                    bytes: raw.bytes,
-                    from: Arc::from(raw.poster.as_str()),
-                    date: (None, raw.date),
-                    full_crc32: 0,
-                    server_idx: 0,
-                    file_index: raw.file_ordinal,
-                    total_files: raw.total_files,
-                    segment_identity: None,
-                });
-            }
-
-            segments.sort_by(|a, b| a.file_name.cmp(&b.file_name).then(a.part.cmp(&b.part)));
-
-            Ok(ParsedNzb {
-                poster,
-                groups,
-                segments,
-                meta,
-                segment_identities: None,
-            })
-        }
-    } else {
-        meta.yenc_encrypted = false;
-        let mut segments = Vec::with_capacity(raw_segments.len());
-        for raw in raw_segments {
-            segments.push(PostedSegment {
-                file_name: raw.file_name.clone(),
-                file_path: Arc::from(Path::new(&raw.file_name)),
-                subject_name: Arc::from(raw.subject_name.as_str()),
-                wire_name: Arc::from(""),
-                wire_yenc_name: Arc::from(""),
-                file_size: 0,
-                part: raw.part,
-                total: raw.total,
-                message_id: raw.message_id,
-                bytes: raw.bytes,
-                from: Arc::from(raw.poster.as_str()),
-                date: (None, raw.date),
-                full_crc32: 0,
-                server_idx: 0,
-                file_index: raw.file_ordinal,
-                total_files: raw.total_files,
-                segment_identity: None,
-            });
-        }
-
-        segments.sort_by(|a, b| a.file_name.cmp(&b.file_name).then(a.part.cmp(&b.part)));
-
-        Ok(ParsedNzb {
-            poster,
-            groups,
-            segments,
-            meta,
-            segment_identities: None,
-        })
     }
+
+    // Bootstrap-only identity (v1.2 §8): no segment identity is constructed
+    // at NZB parse time. Identity comes exclusively from each article's
+    // Line 1 bootstrap bytes after fetch; download-time validation is
+    // per-article only (non-zero, CR-02-safe) — release-wide uniqueness is a
+    // PRODUCER obligation (nth_safe_segment_index mapping), because bootstrap
+    // indices live inside unfetched articles and cannot be validated here.
+    let mut segments = Vec::with_capacity(raw_segments.len());
+    for raw in raw_segments {
+        segments.push(PostedSegment {
+            file_name: raw.file_name.clone(),
+            file_path: Arc::from(Path::new(&raw.file_name)),
+            subject_name: Arc::from(raw.subject_name.as_str()),
+            wire_name: Arc::from(""),
+            wire_yenc_name: Arc::from(""),
+            file_size: 0,
+            part: raw.part,
+            total: raw.total,
+            message_id: raw.message_id,
+            bytes: raw.bytes,
+            from: Arc::from(raw.poster.as_str()),
+            date: (None, raw.date),
+            full_crc32: 0,
+            server_idx: 0,
+            file_index: raw.file_ordinal,
+            total_files: raw.total_files,
+            segment_identity: None,
+        });
+    }
+
+    segments.sort_by(|a, b| a.file_name.cmp(&b.file_name).then(a.part.cmp(&b.part)));
+
+    Ok(ParsedNzb {
+        poster,
+        groups,
+        segments,
+        meta,
+        segment_identities: None,
+    })
 }
 
 /// Extract the value of `name="..."` from an XML tag string.

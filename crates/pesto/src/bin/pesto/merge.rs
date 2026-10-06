@@ -78,7 +78,7 @@ pub(super) fn run_merge_season(
         let mut all_groups: Vec<String> = Vec::new();
         let mut any_encrypted = false;
         let mut shared_password: Option<String> = None;
-        let mut seen_indices = std::collections::HashSet::new();
+        let mut seen_message_ids = std::collections::HashSet::new();
 
         for src in &sources {
             let content = std::fs::read_to_string(src)
@@ -104,12 +104,13 @@ pub(super) fn run_merge_season(
                 }
 
                 for seg in &parsed.segments {
-                    if let Some(ref id) = seg.segment_identity {
-                        if !seen_indices.insert(id.segment_index) {
-                            anyhow::bail!(
-                                "cannot merge encrypted NZBs with overlapping segment indices"
-                            );
-                        }
+                    // Bootstrap-only identity (v1.2 §8): XML segment-index
+                    // attributes are never consumed, so index overlap cannot
+                    // be detected at merge time — the only detectable merge
+                    // conflict is the same Message-ID appearing in two
+                    // sources (a genuine duplicate-article corruption).
+                    if !seen_message_ids.insert(seg.message_id.clone()) {
+                        anyhow::bail!("cannot merge encrypted NZBs with duplicate Message-IDs");
                     }
                 }
             }

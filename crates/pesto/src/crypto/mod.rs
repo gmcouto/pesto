@@ -38,3 +38,57 @@ mod tests;
 
 pub use adapter::{DownloadDecryptionAdapter, UploadEncryptionAdapter};
 pub use kdf::EncryptionSession;
+
+/// Typed two-tier error classification (yEnc Body Encryption Standard §5
+/// Two-Tier model; Control Std §8). Constructed AT THE CRYPTO ORIGIN and
+/// attached to the `anyhow::Error` via the downcastable
+/// [`CryptoErrorKindEnvelope`]; consumers (penne's failover router) recover
+/// the kind by downcasting — the type is defined HERE in pesto because penne
+/// depends on pesto, never the reverse.
+///
+/// - [`CryptoErrorKind::MetadataValidation`] — structural: the failure would
+///   reproduce identically against every server (missing password,
+///   unsupported mode/version). Job-level failure, no provider rotation.
+/// - [`CryptoErrorKind::ProviderFailover`] — retriable: the fetched copy is
+///   corrupt/truncated/tampered; an alternate server may have an intact copy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CryptoErrorKind {
+    MetadataValidation,
+    ProviderFailover,
+}
+
+/// Downcastable `anyhow` wrapper carrying the origin-constructed
+/// [`CryptoErrorKind`] on the error chain. Attach with
+/// [`attach_crypto_error_kind`]; recover with [`crypto_error_kind_of`].
+#[derive(Debug)]
+pub struct CryptoErrorKindEnvelope {
+    pub kind: CryptoErrorKind,
+}
+
+impl std::fmt::Display for CryptoErrorKindEnvelope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.kind {
+            CryptoErrorKind::MetadataValidation => write!(f, "METADATA_VALIDATION"),
+            CryptoErrorKind::ProviderFailover => write!(f, "PROVIDER_FAILOVER"),
+        }
+    }
+}
+
+impl std::error::Error for CryptoErrorKindEnvelope {}
+
+/// Attach `kind` to `err` at the crypto origin so downstream routers can
+/// downcast it. The envelope becomes the error-chain ROOT (via
+/// `Error::new(...).context(err)`), so human-readable `Display` still shows
+/// the original message tokens while `crypto_error_kind_of` recovers the
+/// kind anywhere on the chain. Never embed password/key/nonce material.
+pub fn attach_crypto_error_kind(err: anyhow::Error, kind: CryptoErrorKind) -> anyhow::Error {
+    anyhow::Error::new(CryptoErrorKindEnvelope { kind }).context(err)
+}
+
+/// Recover the origin-attached [`CryptoErrorKind`] from an error chain, if
+/// any. `None` = unclassified (caller default routing applies).
+pub fn crypto_error_kind_of(err: &anyhow::Error) -> Option<CryptoErrorKind> {
+    err.chain()
+        .find_map(|c| c.downcast_ref::<CryptoErrorKindEnvelope>())
+        .map(|env| env.kind)
+}

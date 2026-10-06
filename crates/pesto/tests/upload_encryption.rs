@@ -346,11 +346,15 @@ fn test_cli_merge_encrypted_nzbs_preserves_encryption() {
 
 #[test]
 fn test_cli_merge_encrypted_nzbs_rejects_conflicts() {
+    // Phase 58 T3: XML segmentIndex attributes are never consumed, so index
+    // overlap is undetectable at merge time (bootstrap-only identity). The
+    // remaining merge conflict is duplicate Message-IDs — same corruption
+    // class, still structurally rejectable.
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path().join("merge_dir");
     std::fs::create_dir(&dir).unwrap();
 
-    let xml1 = r#"<?xml version="1.0" encoding="UTF-8"?>
+    let xml1 = r##"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE nzb PUBLIC "-//newzBin//DTD NZB 1.1//EN" "http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd">
 <nzb xmlns="http://www.newzbin.com/DTD/2003/nzb">
   <head>
@@ -360,25 +364,13 @@ fn test_cli_merge_encrypted_nzbs_rejects_conflicts() {
   <file poster="poster@example.com" date="1774300000" subject="Show.S01E01">
     <groups><group>alt.binaries.test</group></groups>
     <segments>
-      <segment bytes="750000" number="1" segmentIndex="1">art1@example.com</segment>
+      <segment bytes="750000" number="1">art1@example.com</segment>
     </segments>
   </file>
-</nzb>"#;
+</nzb>"##;
 
-    let xml2 = r#"<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE nzb PUBLIC "-//newzBin//DTD NZB 1.1//EN" "http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd">
-<nzb xmlns="http://www.newzbin.com/DTD/2003/nzb">
-  <head>
-    <meta type="password">sharedpass</meta>
-    <meta type="yenc_encrypted">true</meta>
-  </head>
-  <file poster="poster@example.com" date="1774300000" subject="Show.S01E02">
-    <groups><group>alt.binaries.test</group></groups>
-    <segments>
-      <segment bytes="750000" number="1" segmentIndex="1">art2@example.com</segment>
-    </segments>
-  </file>
-</nzb>"#;
+    // Same Message-ID as xml1 — the detectable conflict.
+    let xml2 = xml1.replace("Show.S01E01", "Show.S01E02");
 
     std::fs::write(dir.join("Show.S01E01.nzb"), xml1).unwrap();
     std::fs::write(dir.join("Show.S01E02.nzb"), xml2).unwrap();
@@ -395,7 +387,7 @@ fn test_cli_merge_encrypted_nzbs_rejects_conflicts() {
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("cannot merge encrypted NZBs with overlapping segment indices"),
+        stderr.contains("cannot merge encrypted NZBs with duplicate Message-IDs"),
         "stderr must contain expected rejection: {stderr}"
     );
 }

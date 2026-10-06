@@ -251,16 +251,20 @@ fn test_reader_parses_archive_password_nzb_without_segment_identity() {
 
     let parsed = parse(xml).expect("archive password NZB must parse cleanly");
     assert_eq!(parsed.meta.password.as_deref(), Some("rarpassword"));
+    // T3: the legacy `(password && any segmentIndex attribute)` inference
+    // heuristic is deleted — a password-only NZB is NOT encrypted.
     assert!(!parsed.meta.yenc_encrypted);
     assert!(parsed.segment_identities.is_none());
     assert!(parsed.segments[0].segment_identity.is_none());
 
-    let res = parse_encrypted(xml);
-    assert!(res.is_err());
-    assert!(res
-        .unwrap_err()
-        .to_string()
-        .contains("MISSING_SEGMENT_INDEX"));
+    // parse_encrypted forces the encrypted flag but still consumes NO
+    // identity from anywhere except article bootstraps.
+    let forced = parse_encrypted(xml).expect("forced encryption provenance is the caller's choice");
+    assert!(forced.meta.yenc_encrypted);
+    assert!(forced.segment_identities.is_none());
+    for seg in &forced.segments {
+        assert!(seg.segment_identity.is_none());
+    }
 }
 
 #[test]
@@ -463,8 +467,13 @@ fn test_reader_rejects_mixed_encrypted_and_ordinary_files() {
   </file>
 </nzb>"#;
 
-    let err = parse(xml).unwrap_err();
-    assert!(err.to_string().contains("MISSING_SEGMENT_INDEX"));
+    // T3: mixed releases parse cleanly under bootstrap-only identity —
+    // per-segment encryption validation happens post-fetch per article.
+    let parsed = parse(xml).expect("mixed release parses under bootstrap-only identity");
+    assert!(parsed.meta.yenc_encrypted);
+    for seg in &parsed.segments {
+        assert!(seg.segment_identity.is_none());
+    }
 }
 
 #[test]
@@ -532,4 +541,53 @@ fn test_imported_uncounted_identity_round_trip() {
 
     let parsed2 = parse_encrypted(&regen_xml).unwrap();
     assert!(parsed2.segment_identities.is_none());
+}
+
+#[test]
+fn test_conformance_vectors_index_allocation() {
+    // VEC-07 (index_allocation.json): uploader-skip vectors. Loaded via a
+    // dedicated dispatch (not the nzb_xml-parsing loop of
+    // nzb_segment_identity.json, which stays 33 vectors).
+    let path = test_vectors_dir().join("index_allocation.json");
+    let content = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()));
+    let fixture: serde_json::Value = serde_json::from_str(&content).unwrap();
+    let vectors = fixture["vectors"].as_array().expect("vectors array");
+    assert_eq!(vectors.len(), 4, "expected exactly 4 allocation vectors");
+
+    for vec in vectors {
+        let id = vec["id"].as_str().unwrap();
+        assert_eq!(vec["category"].as_str().unwrap(), "index_allocation");
+        let candidate = vec["candidate_index"].as_u64().unwrap() as u32;
+        let assigned = vec["expected_assigned_index"].as_u64().unwrap() as u32;
+        let expected_hex = vec["expected_index_hex"].as_str().unwrap();
+        let expected_error = vec["expected_error"].as_null();
+        assert!(expected_error.is_some(), "vector {id} must be a skip case");
+
+        // Candidate is forbidden (uint32_be contains 0x0A/0x0D).
+        assert!(
+            !crate::poster::is_safe_segment_index(candidate),
+            "vector {id}: candidate {candidate} must be forbidden"
+        );
+        // Assigned value is safe, greater than the candidate, and formats to
+        // the expected lowercase 8-char hex.
+        assert!(
+            crate::poster::is_safe_segment_index(assigned),
+            "vector {id}: assigned {assigned} must be safe"
+        );
+        assert!(assigned > candidate, "vector {id}: must skip forward");
+        assert_eq!(
+            format!("{assigned:08x}"),
+            expected_hex,
+            "vector {id}: hex formatting mismatch"
+        );
+        // The candidate's forbidden bytes: at least one is 0x0A or 0x0D.
+        assert!(
+            candidate
+                .to_be_bytes()
+                .iter()
+                .any(|&b| b == 0x0A || b == 0x0D),
+            "vector {id}: candidate bytes must contain 0x0A/0x0D"
+        );
+    }
 }

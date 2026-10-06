@@ -52,7 +52,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use pesto::config::ServerEntry;
-use pesto::crypto::DownloadDecryptionAdapter;
+use pesto::crypto::{crypto_error_kind_of, CryptoErrorKind, DownloadDecryptionAdapter};
 use pesto::yenc::decode_part;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::task::JoinSet;
@@ -183,30 +183,25 @@ pub async fn download_queue(
 
 /// Preflight validation for queue segment identities before any download side effects.
 ///
-/// When legacy segment indices are present, validates range and uniqueness.
-/// Succeeds when segments lack segment_index (clean standard NZB 1.1 releases).
+/// PER-ARTICLE ONLY (Phase 58 T3 design decision): any queue-time segment
+/// index must be non-zero and CR-02-safe (no big-endian byte equal to
+/// `0x0A`/`0x0D`). Release-wide bootstrap-index uniqueness is intentionally
+/// NOT validated pre-fetch: bootstrap indices live inside unfetched articles,
+/// so nothing at NZB parse time can see them — release-wide uniqueness is a
+/// PRODUCER obligation (enforced by `pesto`'s `nth_safe_segment_index`
+/// mapping) plus the per-article reject at bootstrap extraction. With
+/// bootstrap-only identity (v1.2 §8: readers MUST NOT consume `segmentIndex`
+/// XML attributes), clean NZBs queue with `segment_index = None` everywhere
+/// and this validation is a no-op pass-through.
 pub fn validate_queue_identity(queue: &DownloadQueue, encrypted: bool) -> Result<()> {
     if !encrypted {
         return Ok(());
     }
-    let mut by_message_id = HashMap::<&str, u32>::new();
-    let mut by_index = HashMap::<u32, &str>::new();
     for segment in queue.files.iter().flat_map(|file| &file.segments) {
         if let Some(index) = segment.segment_index {
+            use pesto::poster::is_safe_segment_index;
             anyhow::ensure!(index > 0, "INVALID_SEGMENT_INDEX_ZERO");
-            if let Some(&existing) = by_message_id.get(segment.message_id.as_str()) {
-                anyhow::ensure!(existing == index, "CONFLICTING_MESSAGE_ID_INDEX");
-            } else {
-                by_message_id.insert(segment.message_id.as_str(), index);
-            }
-            if let Some(&existing_mid) = by_index.get(&index) {
-                anyhow::ensure!(
-                    existing_mid == segment.message_id.as_str(),
-                    "DUPLICATE_SEGMENT_INDEX"
-                );
-            } else {
-                by_index.insert(index, segment.message_id.as_str());
-            }
+            anyhow::ensure!(is_safe_segment_index(index), "FORBIDDEN_SEGMENT_INDEX_BYTE");
         }
     }
     Ok(())
@@ -656,12 +651,29 @@ async fn worker_loop(
                 fetched.push(item);
             }
             Err(e) => {
+                // Failover routing (Two-Tier model, Body Std §5): a
+                // pesto-origin `CryptoErrorKind::MetadataValidation` is
+                // STRUCTURAL — it would reproduce identically against every
+                // server, so there is no point rotating providers. Anything
+                // else (including the typed `ProviderFailover` tier and
+                // unclassified decode errors) is retriable per-server
+                // corruption. The kind is attached at the crypto origin and
+                // recovered here by downcast — penne never re-derives it from
+                // message strings.
+                let is_metadata_failure =
+                    crypto_error_kind_of(&e) == Some(CryptoErrorKind::MetadataValidation);
                 tracing::warn!(
                     message_id = %item.message_id,
                     file = %item.file_name,
                     part = item.part,
                     "article decode/decryption failed: {e}"
                 );
+                if is_metadata_failure {
+                    // Structural failure: abort the run — no server can
+                    // satisfy this request. Surface the typed classification
+                    // to the caller.
+                    return Err(e);
+                }
                 if is_last_server {
                     emit(&ctx.progress, || ProgressEvent::SegmentCorrupt {
                         file_name: item.file_name.clone(),

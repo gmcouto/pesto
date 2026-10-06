@@ -39,8 +39,9 @@ use identity::{
 };
 mod outcome;
 pub use outcome::{
-    nzb_write_decision, reconstruct_identities, should_write_season_nzb, FailedTask,
-    FileIdentityInput, NzbWriteDecision, PostOutcome, PostedSegment, SegmentIdentity,
+    is_safe_segment_index, nth_safe_segment_index, nzb_write_decision, reconstruct_identities,
+    should_write_season_nzb, FailedTask, FileIdentityInput, NzbWriteDecision, PostOutcome,
+    PostedSegment, SegmentIdentity,
 };
 mod options;
 mod orchestrator;

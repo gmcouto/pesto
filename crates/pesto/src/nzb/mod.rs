@@ -21,5 +21,5 @@ pub use model::{
     format_tmdb_ref, parse_imdb_ref, parse_mal_ref, parse_tmdb_ref, parse_tvdb_ref, NzbMeta,
     ParsedNzb, TmdbKind, TvdbKind,
 };
-pub use reader::{parse, parse_encrypted, parse_file_counter, parse_segment_index};
+pub use reader::{parse, parse_encrypted, parse_file_counter};
 pub use writer::{generate, wire_subject, wire_subjects};

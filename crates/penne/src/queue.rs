@@ -50,23 +50,27 @@ pub struct DownloadQueue {
 /// copied into the queue before sanitization can obscure the original
 /// Message-IDs.
 pub fn build(parsed: &ParsedNzb) -> DownloadQueue {
-    let identities = parsed.segment_identities.as_ref();
+    // Phase 58 T3: identity is bootstrap-only — no segment_identities map
+    // exists at parse time. File ordinals come from the subject's `[N/M]`
+    // counter (parsed into `file_index`/`total_files`), independent of
+    // encryption identity.
     let mut files: Vec<QueuedFile> = Vec::new();
     for seg in &parsed.segments {
         let name = sanitize_file_name(&seg.file_name);
-        let identity = identities.and_then(|m| m.get(&seg.message_id));
         let queued_seg = QueuedSegment {
             message_id: seg.message_id.clone(),
             part: seg.part,
             bytes: seg.bytes,
-            segment_index: identity.map(|id| id.segment_index),
+            // Bootstrap-only identity: the index is extracted from Line 1
+            // post-fetch; nothing at queue time.
+            segment_index: None,
         };
-        let file_ordinal = if identities.is_some() && seg.file_index > 0 {
+        let file_ordinal = if seg.file_index > 0 {
             Some(seg.file_index)
         } else {
             None
         };
-        let total_files = if identities.is_some() && seg.total_files > 0 {
+        let total_files = if seg.total_files > 0 {
             Some(seg.total_files)
         } else {
             None
@@ -430,12 +434,12 @@ mod tests {
         // Files are sorted by name in parsed: f1.bin then f2.bin.
         let f1 = queue.files.iter().find(|f| f.name == "f1.bin").unwrap();
         assert_eq!(f1.file_ordinal, Some(1));
-        assert_eq!(f1.segments[0].segment_index, Some(1));
-        assert_eq!(f1.segments[1].segment_index, Some(2));
+        assert_eq!(f1.segments[0].segment_index, None);
+        assert_eq!(f1.segments[1].segment_index, None);
 
         let f2 = queue.files.iter().find(|f| f.name == "f2.bin").unwrap();
         assert_eq!(f2.file_ordinal, Some(2));
-        assert_eq!(f2.segments[0].segment_index, Some(3));
+        assert_eq!(f2.segments[0].segment_index, None);
     }
 
     #[test]
@@ -507,8 +511,9 @@ mod tests {
 
         let queue = build(&parsed);
         assert_eq!(queue.files.len(), 1);
-        assert_eq!(queue.files[0].file_ordinal, None);
-        assert_eq!(queue.files[0].total_files, None);
+        // Subject-derived [1/1] counter is preserved regardless of identity.
+        assert_eq!(queue.files[0].file_ordinal, Some(1));
+        assert_eq!(queue.files[0].total_files, Some(1));
         assert_eq!(queue.files[0].segments.len(), 2);
         // Declared part 3 must NEVER be compacted to 2!
         assert_eq!(queue.files[0].segments[0].part, 1);
@@ -543,10 +548,10 @@ mod tests {
         assert_eq!(queue.files.len(), 2);
         assert_eq!(queue.files[0].file_ordinal, Some(1));
         assert_eq!(queue.files[0].segments.len(), 1);
-        assert_eq!(queue.files[0].segments[0].segment_index, Some(1));
+        assert_eq!(queue.files[0].segments[0].segment_index, None);
 
         assert_eq!(queue.files[1].file_ordinal, Some(2));
         assert_eq!(queue.files[1].segments.len(), 1);
-        assert_eq!(queue.files[1].segments[0].segment_index, Some(2));
+        assert_eq!(queue.files[1].segments[0].segment_index, None);
     }
 }
