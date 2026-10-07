@@ -154,7 +154,7 @@ pub(super) fn run_merge_season(
             tags: nzb_tags.clone(),
             yenc_encrypted: any_encrypted,
             yenc_version: if any_encrypted {
-                Some("1.0".to_string())
+                Some(pesto::nzb::YENC_SPEC_VERSION.to_string())
             } else {
                 None
             },

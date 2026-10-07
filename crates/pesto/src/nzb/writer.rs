@@ -9,7 +9,7 @@ use crate::article::default_subject;
 use crate::config::ObfuscateMode;
 use crate::poster::PostedSegment;
 
-use super::{escape, NzbMeta};
+use super::{escape, NzbMeta, YENC_SPEC_VERSION};
 
 /// Validate segment groups before NZB serialization.
 ///
@@ -258,7 +258,7 @@ pub fn generate(
 
     if is_encrypted {
         metas.push(("yenc_encrypted", "true"));
-        metas.push(("yenc_version", "1.1"));
+        metas.push(("yenc_version", YENC_SPEC_VERSION));
         metas.push(("yenc_cipher", "XChaCha20-Poly1305"));
     }
 

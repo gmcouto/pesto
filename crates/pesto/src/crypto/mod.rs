@@ -21,12 +21,17 @@
 //!
 //! # Operational Constraints
 //!
-//! - **Season Consolidation:** Multi-session season consolidation into a single NZB is unsupported
-//!   under encryption because each upload session uses an independent random salt and a distinct
-//!   global `segmentIndex` space. Combining multiple sessions violates segment index uniqueness.
-//! - **Status:** The protocol is currently experimental. All KDF parameters, tweak/nonce derivation
-//!   rules, control-line formats, and test vectors are frozen for this release. An independent formal
-//!   cryptographic review is recommended before stabilization.
+//! - **Bootstrap-only identity (v1.2):** Per-segment identity (salt +
+//!   globally unique `segmentIndex`) is carried exclusively in the 20-byte
+//!   bootstrap prefix of encrypted control Line 1 and the `=yencryption`
+//!   line — never in NZB XML attributes. Because each upload session uses
+//!   an independent random salt and a distinct global `segmentIndex` space,
+//!   merging NZBs from multiple sessions under one password is not
+//!   supported for encrypted uploads.
+//! - **Status:** The protocol is currently experimental (spec v1.2). All KDF
+//!   parameters, tweak/nonce derivation rules, control-line formats, and test
+//!   vectors are frozen for this release. An independent formal cryptographic
+//!   review is recommended before stabilization.
 
 pub mod adapter;
 pub mod body;

@@ -423,6 +423,14 @@ impl DownloadDecryptionAdapter {
             }
             return yenc::decode_part(body);
         }
+        // IN-03: a uu-encoded article (starts with "begin <mode> <name>") is
+        // not an encrypted segment — name the actual condition instead of the
+        // misleading LINE_TRUNCATED-style bootstrap error.
+        if body.starts_with(b"begin ") && self.has_decryption_credentials() {
+            bail!(
+                "UU_ENCODED_ARTICLE: unencrypted uu-encoded article received where an encrypted segment was expected"
+            );
+        }
 
         let first_line_end =
             if !body.starts_with(b"=y") && body.len() >= control::BOOTSTRAP_PREFIX_LEN {

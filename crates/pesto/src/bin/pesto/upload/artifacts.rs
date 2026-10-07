@@ -76,7 +76,10 @@ pub(crate) async fn write(request: ArtifactRequest<'_>) -> Result<Option<PathBuf
         mal_id: config.mal_id.clone(),
         tags: nzb_tags,
         yenc_encrypted: config.encrypt_password.is_some(),
-        yenc_version: config.encrypt_password.as_ref().map(|_| "1.0".to_string()),
+        yenc_version: config
+            .encrypt_password
+            .as_ref()
+            .map(|_| pesto::nzb::YENC_SPEC_VERSION.to_string()),
         yenc_cipher: config
             .encrypt_password
             .as_ref()

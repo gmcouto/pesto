@@ -290,12 +290,18 @@ fn test_nzb_writer_emits_segment_indices() {
 
     assert!(!xml.contains("segmentIndex="));
     assert!(xml.contains("<meta type=\"yenc_encrypted\">true</meta>"));
-    assert!(xml.contains("<meta type=\"yenc_version\">1.1</meta>"));
+    assert!(xml.contains(&format!(
+        "<meta type=\"yenc_version\">{}</meta>",
+        super::YENC_SPEC_VERSION
+    )));
     assert!(xml.contains("<meta type=\"yenc_cipher\">XChaCha20-Poly1305</meta>"));
 
     let parsed = parse_encrypted(&xml).unwrap();
     assert_eq!(parsed.segments.len(), 2);
-    assert_eq!(parsed.meta.yenc_version.as_deref(), Some("1.1"));
+    assert_eq!(
+        parsed.meta.yenc_version.as_deref(),
+        Some(super::YENC_SPEC_VERSION)
+    );
     assert_eq!(
         parsed.meta.yenc_cipher.as_deref(),
         Some("XChaCha20-Poly1305")
@@ -351,6 +357,25 @@ fn test_reader_rejects_unsupported_yenc_version_and_cipher() {
     assert_eq!(
         parsed.meta.yenc_cipher.as_deref(),
         Some("XChaCha20-Poly1305")
+    );
+
+    // v1.2 (current spec version) is also accepted
+    let v12_xml = base_xml
+        .replace(
+            "VERSION_TAG",
+            &format!(
+                "<meta type=\"yenc_version\">{}</meta>",
+                super::YENC_SPEC_VERSION
+            ),
+        )
+        .replace(
+            "CIPHER_TAG",
+            "<meta type=\"yenc_cipher\">XChaCha20-Poly1305</meta>",
+        );
+    let parsed = parse_encrypted(&v12_xml).unwrap();
+    assert_eq!(
+        parsed.meta.yenc_version.as_deref(),
+        Some(super::YENC_SPEC_VERSION)
     );
 }
 

@@ -7,7 +7,7 @@ use anyhow::{bail, Context, Result};
 
 use crate::poster::PostedSegment;
 
-use super::{NzbMeta, ParsedNzb};
+use super::{NzbMeta, ParsedNzb, YENC_SPEC_VERSION};
 
 struct RawSegment {
     file_name: String,
@@ -190,7 +190,7 @@ fn parse_internal(content: &str, force_encrypted: bool) -> Result<ParsedNzb> {
 
     if is_encrypted {
         if let Some(ref ver) = meta.yenc_version {
-            if ver != "1.0" && ver != "1.1" {
+            if ver != "1.0" && ver != "1.1" && ver != YENC_SPEC_VERSION {
                 bail!("unsupported yenc_version in nzb: {ver}");
             }
         }
