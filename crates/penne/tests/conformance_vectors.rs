@@ -30,14 +30,20 @@ fn load(name: &str) -> serde_json::Value {
     let path = fixture_dir().join(name);
     let raw = std::fs::read(&path)
         .unwrap_or_else(|e| panic!("vendored fixture missing: {}: {e}", path.display()));
-    serde_json::from_slice(&raw).unwrap_or_else(|e| panic!("invalid JSON in {}: {e}", path.display()))
+    serde_json::from_slice(&raw)
+        .unwrap_or_else(|e| panic!("invalid JSON in {}: {e}", path.display()))
 }
 
 #[test]
 fn manifest_sha256_sync() {
     let manifest = load("manifest.json");
-    let files = manifest["files"].as_object().expect("manifest.files object");
-    assert_eq!(manifest["standard_version"], "1.2", "fixture set must be v1.2");
+    let files = manifest["files"]
+        .as_object()
+        .expect("manifest.files object");
+    assert_eq!(
+        manifest["standard_version"], "1.2",
+        "fixture set must be v1.2"
+    );
     assert_eq!(files.len(), 7, "v1.2 canonical set has 7 vector files");
     for (name, entry) in files {
         let expected = entry["sha256"].as_str().expect("sha256 string");
@@ -73,7 +79,12 @@ fn index_allocation_skip_rules() {
             "{}: assigned {assigned} must be permitted",
             v["id"].as_str().unwrap_or("?")
         );
-        assert_eq!(assigned, next_permitted(candidate), "{}", v["id"].as_str().unwrap_or("?"));
+        assert_eq!(
+            assigned,
+            next_permitted(candidate),
+            "{}",
+            v["id"].as_str().unwrap_or("?")
+        );
         assert_eq!(
             format!("{:08x}", assigned),
             v["expected_index_hex"].as_str().expect("index hex"),
@@ -106,8 +117,14 @@ fn malformed_vectors_shapes_and_families() {
     assert_eq!(vectors.len(), 46, "v1.2 malformed set has 46 vectors");
     for v in vectors {
         let id = v["id"].as_str().expect("vector id");
-        assert!(!v["expected_error"].as_str().unwrap_or_default().is_empty(), "{id}: expected_error");
-        assert_eq!(v["zero_output_required"], true, "{id}: zero-output guarantee");
+        assert!(
+            !v["expected_error"].as_str().unwrap_or_default().is_empty(),
+            "{id}: expected_error"
+        );
+        assert_eq!(
+            v["zero_output_required"], true,
+            "{id}: zero-output guarantee"
+        );
         let stage = v["expected_rejection_stage"].as_str().expect("stage");
         assert!(
             stage == "PROVIDER_FAILOVER" || stage == "METADATA_VALIDATION",
@@ -136,27 +153,42 @@ fn malformed_vectors_shapes_and_families() {
             || v.get("tampered_salt_hex").is_some()
             || v.get("password").is_some()
             || v.get("wrong_password").is_some();
-        assert!(has_line, "{}: control_syntax vector missing line material", v["id"].as_str().unwrap_or("?"));
+        assert!(
+            has_line,
+            "{}: control_syntax vector missing line material",
+            v["id"].as_str().unwrap_or("?")
+        );
     }
 
     // Auth-failure vectors must be marked zero-output (no plaintext or
     // ciphertext may be released when Poly1305 verification fails).
     for v in vectors.iter().filter(|v| v["category"] == "auth_failure") {
         assert_eq!(
-            v["expected_error"], "AUTHENTICATION_FAILURE",
+            v["expected_error"],
+            "AUTHENTICATION_FAILURE",
             "{}",
             v["id"].as_str().unwrap_or("?")
         );
     }
 
     // Index-allocation forbidden-byte cases in the control-syntax family.
-    for v in vectors.iter().filter(|v| {
-        v["expected_error"] == "FORBIDDEN_SEGMENT_INDEX_BYTE"
-    }) {
+    for v in vectors
+        .iter()
+        .filter(|v| v["expected_error"] == "FORBIDDEN_SEGMENT_INDEX_BYTE")
+    {
         let line1 = hex_to_bytes(v["line1_hex"].as_str().expect("line1_hex"));
-        assert_eq!(line1.len(), 22, "{}: bootstrap line must be 22 bytes", v["id"].as_str().unwrap_or("?"));
+        assert_eq!(
+            line1.len(),
+            22,
+            "{}: bootstrap line must be 22 bytes",
+            v["id"].as_str().unwrap_or("?")
+        );
         let index = u32::from_be_bytes([line1[16], line1[17], line1[18], line1[19]]);
-        assert!(forbidden(index), "{}: index {index} should be forbidden", v["id"].as_str().unwrap_or("?"));
+        assert!(
+            forbidden(index),
+            "{}: index {index} should be forbidden",
+            v["id"].as_str().unwrap_or("?")
+        );
     }
 }
 
@@ -177,7 +209,9 @@ fn placement_vectors_pin_line2() {
     // Multi-part: header must come before the data lines, so after-data (line 4) is invalid.
     assert_eq!(placements[1]["line_index"], 4);
     assert_eq!(placements[1]["multipart"], true);
-    assert!(placements.iter().all(|v| v["expected_error"] == "MISPLACED_ENCRYPTION_HEADER"));
+    assert!(placements
+        .iter()
+        .all(|v| v["expected_error"] == "MISPLACED_ENCRYPTION_HEADER"));
 }
 
 /// Sanity anchor independent of the malformed set: every body vector's
@@ -189,16 +223,27 @@ fn placement_vectors_pin_line2() {
 fn body_vectors_plaintext_round_trips_through_yenc() {
     let doc = load("body_encryption.json");
     let vectors = doc["vectors"].as_array().expect("vectors array");
-    assert!(!vectors.is_empty(), "body_encryption fixture must not be empty");
+    assert!(
+        !vectors.is_empty(),
+        "body_encryption fixture must not be empty"
+    );
     for v in vectors {
         let id = v["id"].as_str().unwrap_or("?");
         let plaintext = hex_to_bytes(v["plaintext_hex"].as_str().expect("plaintext_hex"));
-        assert_eq!(plaintext.len() as u64, v["plaintext_length"].as_u64().unwrap_or(0), "{id}");
+        assert_eq!(
+            plaintext.len() as u64,
+            v["plaintext_length"].as_u64().unwrap_or(0),
+            "{id}"
+        );
         let part = pesto::yenc::decode_part(
             &pesto::yenc::encode_part(
                 id,
                 plaintext.len() as u64,
-                pesto::yenc::PartSpec { number: 1, total: 1, offset: 0 },
+                pesto::yenc::PartSpec {
+                    number: 1,
+                    total: 1,
+                    offset: 0,
+                },
                 &plaintext,
                 pesto::yenc::DEFAULT_LINE_LENGTH,
                 None,
@@ -206,7 +251,10 @@ fn body_vectors_plaintext_round_trips_through_yenc() {
             .body,
         )
         .unwrap_or_else(|e| panic!("{id}: yEnc round-trip failed: {e}"));
-        assert_eq!(part.data, plaintext, "{id}: yEnc round-trip must be lossless");
+        assert_eq!(
+            part.data, plaintext,
+            "{id}: yEnc round-trip must be lossless"
+        );
         assert!(part.crc_matches(), "{id}: CRC must match after round-trip");
     }
 }

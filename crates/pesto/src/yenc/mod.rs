@@ -12,9 +12,13 @@ mod tables;
 #[cfg(target_arch = "aarch64")]
 pub mod aarch64;
 pub mod decode;
+pub mod encrypt;
 pub mod scalar;
 #[cfg(target_arch = "x86_64")]
 pub mod x86;
+
+#[cfg(test)]
+mod encrypt_tests;
 
 #[cfg(test)]
 mod tests;
