@@ -77,7 +77,12 @@ pub(super) fn run_merge_season(
         let mut poster = String::new();
         let mut all_groups: Vec<String> = Vec::new();
         let mut any_encrypted = false;
+        let mut encrypted_source_count = 0usize;
         let mut shared_password: Option<String> = None;
+        // WR-04-R4: archive (RAR/7z extraction) passwords of unencrypted
+        // sources must survive the merge, mirroring how the encrypted path
+        // preserves its shared password.
+        let mut shared_archive_password: Option<String> = None;
         let mut seen_message_ids = std::collections::HashSet::new();
 
         for src in &sources {
@@ -91,6 +96,7 @@ pub(super) fn run_merge_season(
 
             if is_this_encrypted {
                 any_encrypted = true;
+                encrypted_source_count += 1;
                 if let Some(ref pwd) = parsed.meta.password {
                     if let Some(ref existing) = shared_password {
                         if existing != pwd {
@@ -113,7 +119,28 @@ pub(super) fn run_merge_season(
                         anyhow::bail!("cannot merge encrypted NZBs with duplicate Message-IDs");
                     }
                 }
+            } else if let Some(ref pwd) = parsed.meta.password {
+                // WR-04-R4: keep the archive password of unencrypted sources.
+                if let Some(ref existing) = shared_archive_password {
+                    anyhow::ensure!(
+                        existing == pwd,
+                        "cannot merge NZBs with conflicting archive passwords"
+                    );
+                } else {
+                    shared_archive_password = Some(pwd.clone());
+                }
             }
+
+            // WR-03-R4: identity for encrypted uploads is bootstrap-only
+            // (salt + segment index live in the wire bytes, see
+            // crypto/mod.rs) — NZBs produced by different upload sessions
+            // cannot be merged, because their segment-index spaces may
+            // collide invisibly at XML level.
+            anyhow::ensure!(
+                encrypted_source_count <= 1,
+                "refusing to merge encrypted NZBs from multiple upload sessions \
+                 (unsupported: bootstrap-only identity, segment-index spaces may collide)"
+            );
 
             let ep_name = src
                 .file_stem()
@@ -145,7 +172,13 @@ pub(super) fn run_merge_season(
             name: display_name
                 .map(str::to_string)
                 .or_else(|| Some(key.clone())),
-            password: if any_encrypted { shared_password } else { None },
+            // WR-04-R4: preserve the archive password when merging
+            // unencrypted NZBs; the encrypted path uses shared_password.
+            password: if any_encrypted {
+                shared_password
+            } else {
+                shared_archive_password
+            },
             category: None,
             tmdb_id: None,
             imdb_id: None,

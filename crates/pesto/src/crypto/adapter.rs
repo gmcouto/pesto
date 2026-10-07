@@ -547,7 +547,15 @@ impl DownloadDecryptionAdapter {
     }
 
     fn get_or_create_session(&self, salt: [u8; 16]) -> Result<Arc<EncryptionSession>> {
-        let mut guard = self.cached_sessions.lock().unwrap();
+        // IN-02-R4: same poisoned-tolerant policy as `has_decryption_credentials`
+        // above — a poisoned mutex in the download hot path fails closed as a
+        // mapped crypto error instead of panicking.
+        let mut guard = self.cached_sessions.lock().map_err(|_| {
+            attach_crypto_error_kind(
+                anyhow::anyhow!("session cache lock poisoned"),
+                CryptoErrorKind::MetadataValidation,
+            )
+        })?;
         if let Some(session) = guard.0.get(&salt) {
             return Ok(session.clone());
         }

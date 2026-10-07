@@ -459,9 +459,14 @@ pub async fn run_upload(
             // list — see the analogous comment on the history record above.
             group: outcome.groups.first().cloned().unwrap_or_default(),
             groups: outcome.groups.join(":"),
+            // WR-02-R4: same fallback chain as the NZB meta emission
+            // (nzb_password → encrypt_password → compress_password, see
+            // artifacts.rs effective-password resolution) so hooks receive the
+            // password the NZB actually advertises for encrypted uploads.
             password: config
                 .nzb_password
                 .as_deref()
+                .or(config.encrypt_password.as_deref())
                 .or(config.compress_password.as_deref())
                 .unwrap_or("")
                 .to_string(),
