@@ -12,7 +12,7 @@ use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::XChaCha20Poly1305;
 
 use super::error::EncryptionError;
-use super::header::{ENCRIPTION_LINE_LEN, SALT_HEX_LEN, TAG_HEX_LEN};
+use super::header::{ENCRYPTION_LINE_LEN, SALT_HEX_LEN, TAG_HEX_LEN};
 use super::header::{INDEX_HEX_LEN, SEGMENT_INDEX_MAX, SEGMENT_INDEX_MIN};
 use super::index::index_is_forbidden;
 use super::keys::{body_nonce, SessionKey, SALT_LEN};
@@ -87,7 +87,7 @@ pub fn build_yencryption_line(
     segment_index: u32,
     tag: &[u8; 16],
 ) -> Result<String, EncryptionError> {
-    let mut line = String::with_capacity(ENCRIPTION_LINE_LEN);
+    let mut line = String::with_capacity(ENCRYPTION_LINE_LEN);
     line.push_str("=yencryption cipher=XChaCha20-Poly1305 salt=");
     push_hex_lower(&mut line, salt);
     line.push_str(" index=");
@@ -95,7 +95,7 @@ pub fn build_yencryption_line(
     line.push_str(&index_hex);
     line.push_str(" tag=");
     push_hex_lower(&mut line, tag);
-    debug_assert_eq!(line.len(), ENCRIPTION_LINE_LEN);
+    debug_assert_eq!(line.len(), ENCRYPTION_LINE_LEN);
     Ok(line)
 }
 
@@ -199,7 +199,7 @@ pub fn parse_yencryption_line(line: &str) -> Result<EncryptionHeader, Encryption
     // Body standard §5 step 2: content is exactly 128 bytes. All preceding
     // field checks already pin each fixed-width token, so reaching this with
     // the wrong total means an unclassifiable extension defect.
-    if line.len() != ENCRIPTION_LINE_LEN {
+    if line.len() != ENCRYPTION_LINE_LEN {
         return Err(EncryptionError::LineTruncated);
     }
     Ok(EncryptionHeader {
@@ -218,7 +218,7 @@ mod tests {
         let salt = [0x4bu8; SALT_LEN];
         let tag = [0xabu8; 16];
         let line = build_yencryption_line(&salt, 1, &tag).unwrap();
-        assert_eq!(line.len(), ENCRIPTION_LINE_LEN);
+        assert_eq!(line.len(), ENCRYPTION_LINE_LEN);
         let parsed = parse_yencryption_line(&line).unwrap();
         assert_eq!(parsed.salt, salt);
         assert_eq!(parsed.segment_index, 1);

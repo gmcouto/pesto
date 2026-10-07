@@ -2,7 +2,7 @@
 //! v1.2 §3) and the Line-1 article bootstrap (control standard v1.2 §2/§5).
 
 /// Length of the `=yencryption` line content in ASCII bytes (no terminator).
-pub const ENCRIPTION_LINE_LEN: usize = 128;
+pub const ENCRYPTION_LINE_LEN: usize = 128;
 
 /// Hex length of the 16-byte salt parameter.
 pub const SALT_HEX_LEN: usize = 32;

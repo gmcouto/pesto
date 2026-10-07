@@ -46,7 +46,7 @@ pub use control::{
 };
 pub use error::EncryptionError;
 pub use header::{
-    BOOTSTRAP_LEN, ENCRIPTION_LINE_LEN, INDEX_HEX_LEN, LINE1_MIN_LEN, SALT_HEX_LEN,
+    BOOTSTRAP_LEN, ENCRYPTION_LINE_LEN, INDEX_HEX_LEN, LINE1_MIN_LEN, SALT_HEX_LEN,
     SEGMENT_INDEX_MAX, SEGMENT_INDEX_MIN, TAG_HEX_LEN,
 };
 pub use index::{index_is_forbidden, next_permitted_index, SegmentIndexAllocator};
