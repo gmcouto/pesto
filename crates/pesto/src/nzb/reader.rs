@@ -88,6 +88,10 @@ pub fn parse(content: &str) -> anyhow::Result<ParsedNzb> {
                 // produced by a live upload, which is the only place a
                 // post-check repost can use it.
                 file_path: Arc::from(Path::new(&current_file_name)),
+                // In-band segment identity: a parsed NZB carries no
+                // segmentIndex attribute (by design it rides in the
+                // article's first bytes), so parsed segments have none.
+                segment_index: None,
                 subject_name: Arc::from(current_subject_name.as_str()),
                 // Not recoverable from an .nzb (only `subject_name`, always
                 // the real name, is written) — harmless for the same reason
@@ -123,6 +127,7 @@ pub fn parse(content: &str) -> anyhow::Result<ParsedNzb> {
                 "title" => meta.name = Some(value),
                 "password" => meta.password = Some(value),
                 "category" => meta.category = Some(value),
+                "encryption" => meta.encryption = Some(value),
                 "tag" => meta.tags.push(value),
                 _ => {}
             }

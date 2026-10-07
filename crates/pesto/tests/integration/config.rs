@@ -3,6 +3,7 @@ use super::*;
 /// Build a minimal Config pointing at the given mock server address.
 pub(super) fn make_config(port: u16) -> Config {
     Config {
+        encrypt_password: None,
         host: "127.0.0.1".to_string(),
         port,
         ssl: false,

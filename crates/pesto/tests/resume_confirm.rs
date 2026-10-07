@@ -169,6 +169,7 @@ async fn spawn_mock(
 
 fn test_config(port: u16, check: bool) -> Config {
     Config {
+        encrypt_password: None,
         host: "127.0.0.1".to_string(),
         port,
         ssl: false,

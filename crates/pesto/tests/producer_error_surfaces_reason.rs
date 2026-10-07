@@ -27,6 +27,7 @@ async fn producer_error_is_reported_via_failure_reason_not_a_bare_cancellation()
     std::fs::write(&input, vec![0u8; FILE_SIZE]).unwrap();
 
     let config = Config {
+        encrypt_password: None,
         host: "unused".to_string(),
         port: 563,
         ssl: false,

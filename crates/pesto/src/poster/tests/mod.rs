@@ -1,3 +1,5 @@
+mod encryption;
+
 use super::*;
 use crate::config::{Config, FileConfig, Overrides};
 use crate::walk::InputFile;

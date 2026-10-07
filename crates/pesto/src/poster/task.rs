@@ -77,6 +77,12 @@ pub(super) struct PostTask {
     /// same read the article body comes from), so no separate whole-file
     /// pre-pass is needed before posting can start.
     pub(super) file_crc32: Option<u32>,
+    /// Globally unique release-wide segmentIndex (standards v1.2, VEC-07);
+    /// allocated in strict producer order, never from worker completion
+    /// order. `None` on an unencrypted run — an encrypted run always has
+    /// one, and both the `=yencryption` line and the FF1 control-line
+    /// tweaks derive from it.
+    pub(super) segment_index: Option<u32>,
 }
 
 /// Encoded article ready for NNTP (nyuu `Post` after `generate`).

@@ -313,6 +313,12 @@ pub async fn run_upload(
                 tvdb_id: config.tvdb_id.clone(),
                 mal_id: config.mal_id.clone(),
                 tags: config.nzb_tags.clone(),
+                // Combined wire mode marker; presence in the NZB is the
+                // downloaders' fast-detection tag (see writer/generate docs).
+                encryption: config
+                    .encrypt_password
+                    .as_ref()
+                    .map(|_| crate::nzb::ENCRYPTION_WIRE_MODE.to_string()),
             };
             crate::memory::set_phase(crate::memory::Phase::Nzb);
             let xml = crate::nzb::generate(

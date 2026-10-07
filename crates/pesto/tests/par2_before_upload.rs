@@ -110,6 +110,7 @@ fn content(seed: u8, len: usize) -> Vec<u8> {
 /// for (see ROADMAP.md / issue #68).
 fn config(addr: SocketAddr, par2_before_upload: bool) -> Config {
     Config {
+        encrypt_password: None,
         host: "127.0.0.1".to_string(),
         port: addr.port(),
         ssl: false,

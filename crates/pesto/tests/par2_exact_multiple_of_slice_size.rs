@@ -118,6 +118,7 @@ async fn file_size_exact_multiple_of_par2_slice_size_does_not_panic() {
     std::fs::write(&input, content(0, ARTICLE_SIZE * ARTICLES)).unwrap();
 
     let config = Config {
+        encrypt_password: None,
         host: "127.0.0.1".to_string(),
         port: addr.port(),
         ssl: false,

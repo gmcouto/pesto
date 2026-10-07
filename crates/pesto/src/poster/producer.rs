@@ -483,7 +483,7 @@ pub(super) async fn producer(
                                     offset,
                                     buf,
                                     file_crc32,
-                                    &shared.config,
+                                    &shared,
                                 ))
                                 .await
                                 .is_err()

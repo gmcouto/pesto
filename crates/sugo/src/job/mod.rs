@@ -301,6 +301,7 @@ mod tests {
             server_idx: 0,
             file_index: 0,
             total_files: 0,
+            segment_index: None,
         }];
         pesto::nzb::generate(
             &groups,

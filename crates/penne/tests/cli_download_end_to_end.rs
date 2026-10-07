@@ -120,6 +120,7 @@ fn segment(file_name: &str, part: u32, total: u32, message_id: &str, size: u64) 
         server_idx: 0,
         file_index: 0,
         total_files: 0,
+        segment_index: None,
     }
 }
 

@@ -167,6 +167,7 @@ async fn check_fast_reposts_an_isolated_miss_instead_of_waiting_out_patient_retr
     std::fs::write(&input, vec![7u8; SEGMENTS * 1000]).unwrap();
 
     let config = Config {
+        encrypt_password: None,
         host: addr.ip().to_string(),
         port: addr.port(),
         ssl: false,

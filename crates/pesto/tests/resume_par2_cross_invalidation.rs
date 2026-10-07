@@ -76,6 +76,7 @@ async fn handle_connection(stream: TcpStream, posts: Arc<AtomicUsize>) {
 
 fn test_config(port: u16) -> Config {
     Config {
+        encrypt_password: None,
         host: "127.0.0.1".to_string(),
         port,
         ssl: false,

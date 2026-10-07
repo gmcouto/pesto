@@ -53,6 +53,17 @@ impl EncryptionSession {
         }
     }
 
+    /// Rebuild a session from recorded resume identity: same salt → same
+    /// Argon2id key; allocator continues from the persisted next candidate.
+    pub fn from_salt_and_allocator(password: &[u8], salt: [u8; SALT_LEN], next_index: u32) -> Self {
+        let key = derive_session_key(password, &salt);
+        Self {
+            salt,
+            key,
+            allocator: SegmentIndexAllocator::new(next_index),
+        }
+    }
+
     /// Encrypt one segment body and produce the canonical `=yencryption`
     /// line content for it.
     pub fn encrypt_segment(

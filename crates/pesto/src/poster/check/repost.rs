@@ -117,6 +117,7 @@ pub(super) async fn repost_one(
                         from: Arc::from(from.as_str()),
                         date: date.clone(),
                         full_crc32: seg.full_crc32,
+                        segment_index: seg.segment_index,
                         server_idx: slot.server_idx(),
                         file_index: seg.file_index,
                         total_files: seg.total_files,

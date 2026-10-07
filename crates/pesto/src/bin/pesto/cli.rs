@@ -310,6 +310,15 @@ pub(super) struct Cli {
     #[arg(long, value_name = "PASS")]
     nzb_password: Option<String>,
 
+    /// Encrypt every posted article with the yEnc body + control-line
+    /// encryption standards v1.2 (combined wire mode; there is no body-only
+    /// or control-line-only mode). The value is the encryption password:
+    /// written to `<meta type="password">` in the generated `.nzb` (unless
+    /// `--nzb-password` overrides it) so downloaders can derive the key.
+    /// The password itself is never logged [config: posting.encrypt_password].
+    #[arg(long, value_name = "PASS")]
+    encrypt_password: Option<String>,
+
     /// Category written to `<meta type="category">` in the `.nzb`
     /// [config: output.nzb_category].
     #[arg(long, value_name = "CAT")]
@@ -725,6 +734,7 @@ impl Cli {
                 })
             }),
             nzb_password: self.nzb_password.clone(),
+            encrypt_password: self.encrypt_password.clone(),
             nzb_category: self.nzb_category.clone(),
             nzb_tags: self.nzb_tag.clone(),
             tmdb: self.tmdb.clone(),

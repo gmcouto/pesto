@@ -10,6 +10,7 @@ use pesto::walk::expand_inputs;
 /// with the given obfuscation mode and no PAR2.
 fn dry_run_config(obfuscate: ObfuscateMode) -> Config {
     Config {
+        encrypt_password: None,
         host: "unused".to_string(),
         port: 563,
         ssl: false,

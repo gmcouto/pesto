@@ -113,6 +113,7 @@ fn handle_connection(stream: TcpStream, stat_count: Arc<AtomicUsize>, articles: 
 
 fn config(addr: SocketAddr, obfuscate: ObfuscateMode) -> Config {
     Config {
+        encrypt_password: None,
         host: addr.ip().to_string(),
         port: addr.port(),
         ssl: false,

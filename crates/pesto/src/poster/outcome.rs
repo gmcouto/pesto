@@ -73,6 +73,10 @@ pub struct PostedSegment {
     /// alone, long after `Shared` is gone.
     pub file_index: u32,
     pub total_files: u32,
+    /// Globally unique release-wide segmentIndex (standards v1.2, VEC-07).
+    /// Written into the NZB so downloaders can match segments to wire
+    /// identity deterministically; `None` on an unencrypted run.
+    pub segment_index: Option<u32>,
 }
 
 /// A segment that failed to post during the upload run. Carries enough
@@ -116,6 +120,13 @@ pub struct FailedTask {
     /// end-of-run retry can rebuild the identical subject.
     pub file_index: u32,
     pub total_files: u32,
+    /// See `PostedSegment::segment_index` — carried through so a repost
+    /// re-encrypts with the identical segmentIndex.
+    pub segment_index: Option<u32>,
+    /// The per-upload Alphabet salt the in-run attempt encrypted under —
+    /// persisted so the end-of-run retry rebuilds the identical session key
+    /// and reproduces decryptable ciphertext.
+    pub encryption_salt: [u8; 16],
 }
 
 /// The result of a posting run.

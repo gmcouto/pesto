@@ -21,3 +21,10 @@ pub use model::{
 };
 pub use reader::parse;
 pub use writer::{generate, wire_subject, wire_subjects};
+
+/// The only yEnc encryption wire mode the v1.2 standards define: body and
+/// control-line encryption together. Emitted as
+/// `<meta type="encryption">combined</meta>` when the uploader ran with
+/// `--encrypt-password`, and hard-validated by downloaders (any other value
+/// is a structural error, never a silent fallback to ordinary yEnc).
+pub const ENCRYPTION_WIRE_MODE: &str = "combined";

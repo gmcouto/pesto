@@ -117,6 +117,7 @@ fn handle_connection(
 
 fn test_config(addr: SocketAddr) -> Config {
     Config {
+        encrypt_password: None,
         host: addr.ip().to_string(),
         port: addr.port(),
         ssl: false,

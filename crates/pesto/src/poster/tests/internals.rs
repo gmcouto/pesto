@@ -77,6 +77,7 @@ fn minimal_shared(article_size: usize) -> Arc<Shared> {
         run_id: 0,
         total_files: 0,
         check_tx: Mutex::new(None),
+        encryption: None,
     })
 }
 
@@ -127,6 +128,7 @@ fn record_failure_appends_description() {
         from: String::new(),
         date: (None, None),
         file_crc32: None,
+        segment_index: None,
     };
     record_failure(&shared, &task.meta, &task, "<mid@host>".into(), "timeout");
     let failures = shared.failures.lock().unwrap();

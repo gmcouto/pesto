@@ -93,6 +93,7 @@ pub(super) fn commit_result(
             server_idx,
             file_index: task.meta.file_index,
             total_files: shared.total_files,
+            segment_index: task.segment_index,
         };
         shared.results.lock().unwrap().push(seg.clone());
         if let Some(tx) = shared.check_tx.lock().unwrap().as_ref() {
@@ -196,6 +197,12 @@ pub(super) fn record_failure(
         full_crc32: task.file_crc32.unwrap_or(0),
         file_index: meta.file_index,
         total_files: shared.total_files,
+        segment_index: task.segment_index,
+        encryption_salt: shared
+            .encryption
+            .as_ref()
+            .map(|e| e.lock().unwrap().salt)
+            .unwrap_or([0; 16]),
     });
 }
 
@@ -225,6 +232,9 @@ pub async fn repost_failed_tasks(
     let article_size = config.article_size as u64;
     let max_retries = config.retries.max(1);
     let mut recovered: Vec<PostedSegment> = Vec::new();
+    // Per-task encryption outputs: (segment_index, tag) for the =yencryption
+    // line built after the yEnc block exists.
+    let mut encrypt_tags: Vec<(u32, [u8; 16])> = Vec::new();
 
     for (i, task) in failed.iter().enumerate() {
         if cancel.is_some_and(|f| f.load(Ordering::Relaxed)) {
@@ -262,7 +272,29 @@ pub async fn repost_failed_tasks(
             offset,
         };
         let file_crc32 = (task.part == task.total).then_some(task.full_crc32);
-        let encoded = yenc::encode_part(
+        // Repost identity: encrypt with the SAME segmentIndex + salt as the
+        // in-run attempt (deterministic retry identity). A regenerated salt
+        // or index would produce ciphertext that fails Poly1305 against the
+        // recorded bootstrap on every downloader.
+        let buf = match (&config.encrypt_password, task.segment_index) {
+            (Some(pw), Some(segment_index)) => {
+                let key = yenc::encrypt::session_key_from(pw.as_bytes(), &task.encryption_salt);
+                match yenc::encrypt::encrypt_body(&key, segment_index, &buf) {
+                    Ok((ciphertext, tag)) => {
+                        // Remember the tag so the =yencryption line can be
+                        // built after the yEnc block exists.
+                        encrypt_tags.push((segment_index, tag));
+                        ciphertext
+                    }
+                    Err(e) => {
+                        warn!(file = %task.file_name, "retry: encryption failed: {e}");
+                        continue;
+                    }
+                }
+            }
+            _ => buf,
+        };
+        let mut encoded = yenc::encode_part(
             &task.yenc_name,
             task.file_size,
             spec,
@@ -290,6 +322,32 @@ pub async fn repost_failed_tasks(
             no_archive: config.no_archive,
         };
         let headers = article.build_headers();
+        // Build the =yencryption line + FF1-encrypt the control lines for
+        // the repost (same salt/index identity as the in-run attempt).
+        if let Some(&(segment_index, tag)) = encrypt_tags.last() {
+            let key = yenc::encrypt::session_key_from(
+                config
+                    .encrypt_password
+                    .as_deref()
+                    .unwrap_or_default()
+                    .as_bytes(),
+                &task.encryption_salt,
+            );
+            match super::worker::encrypt_article_for_repost(
+                &key,
+                segment_index,
+                &task.encryption_salt,
+                tag,
+                task.total,
+                std::mem::take(&mut encoded.body),
+            ) {
+                Ok(wire_body) => encoded.body = wire_body,
+                Err(e) => {
+                    warn!(file = %task.file_name, "retry: encryption failed: {e}");
+                    continue;
+                }
+            }
+        }
         let wire_bytes = (headers.len() + encoded.body.len()) as u64;
 
         let mut ok = false;
@@ -349,6 +407,7 @@ pub async fn repost_failed_tasks(
                 message_id,
                 bytes: wire_bytes,
                 server_idx: slot.server_idx(),
+                segment_index: task.segment_index,
                 from: Arc::from(task.from.as_str()),
                 date: task.date.clone(),
                 full_crc32: task.full_crc32,
@@ -405,6 +464,14 @@ pub(super) fn persist_resume_state(
             || has_inconclusive
             || (cancelled && has_progress);
         if incomplete {
+            // Sync the encryption allocator before saving so the next run
+            // continues the release-wide segmentIndex sequence exactly where
+            // this one stopped (deterministic retry identity). The salt is
+            // set once at session creation; keep it as-is here.
+            if let Some(enc) = &shared.encryption {
+                let next = enc.lock().unwrap().allocator.peek_next();
+                resume.lock().unwrap().sync_encryption_allocator(next);
+            }
             let _ = resume.lock().unwrap().save(rp);
         } else {
             let _ = std::fs::remove_file(rp);

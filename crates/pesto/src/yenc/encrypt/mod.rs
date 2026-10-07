@@ -42,7 +42,7 @@ pub use body::{
 };
 pub use control::{
     build_bootstrap, decrypt_control_line, decrypt_line1, encrypt_line1, extract_bootstrap,
-    Bootstrap,
+    ff1_decrypt_line, ff1_encrypt_line, Bootstrap,
 };
 pub use error::EncryptionError;
 pub use header::{

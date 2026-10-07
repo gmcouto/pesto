@@ -415,6 +415,13 @@ pub struct PostingSection {
     /// streaming/overlapped pipeline. Default: false. See `ROADMAP.md`,
     /// GitHub issue #68.
     pub par2_before_upload: Option<bool>,
+    /// yEnc body + control-line encryption password (standards v1.2). When
+    /// set, every posted article is encrypted in combined wire mode (body
+    /// XChaCha20-Poly1305 + FF1 control lines) — never body-only or
+    /// control-line-only (wire-mode decision D002). The password is a
+    /// secret: it is never logged, never written to resume/spool state, and
+    /// only reaches the wire via the derived-key salt/index bootstrap.
+    pub encrypt_password: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -618,6 +625,13 @@ pub struct Overrides {
     pub check_recover_percent: Option<u8>,
     pub check_recover_max: Option<usize>,
     pub pipeline_depth: Option<usize>,
+    /// yEnc body + control-line encryption password (standards v1.2). When
+    /// set, every posted article is encrypted in combined wire mode (body
+    /// XChaCha20-Poly1305 + FF1 control lines) — never body-only or
+    /// control-line-only (wire-mode decision D002). The password is a
+    /// secret: it is never logged, never written to resume/spool state, and
+    /// only reaches the wire via the derived-key salt/index bootstrap.
+    pub encrypt_password: Option<String>,
 }
 
 /// Fully resolved, validated configuration.
@@ -723,6 +737,10 @@ pub struct Config {
     pub pipeline_depth: usize,
     /// Keepalive interval in seconds; 0 = disabled. See [`DEFAULT_KEEPALIVE_SECS`].
     pub keepalive_interval: u64,
+    /// yEnc encryption password, resolved from [`PostingSection::encrypt_password`].
+    /// `None` disables encryption entirely (ordinary yEnc upload, byte-identical
+    /// to the pre-encryption baseline). See [`PostingSection::encrypt_password`].
+    pub encrypt_password: Option<String>,
 }
 
 impl Config {

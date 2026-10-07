@@ -74,6 +74,10 @@ pub(crate) async fn write(request: ArtifactRequest<'_>) -> Result<Option<PathBuf
         }),
         mal_id: config.mal_id.clone(),
         tags: nzb_tags,
+        encryption: config
+            .encrypt_password
+            .as_ref()
+            .map(|_| pesto::nzb::ENCRYPTION_WIRE_MODE.to_string()),
     };
     let xml = pesto::nzb::generate(
         &outcome.groups,

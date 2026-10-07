@@ -115,6 +115,7 @@ async fn last_segment_of_a_multipart_file_carries_the_whole_file_crc32() {
     std::fs::write(&input, content(0)).unwrap();
 
     let config = Config {
+        encrypt_password: None,
         host: "127.0.0.1".to_string(),
         port: addr.port(),
         ssl: false,

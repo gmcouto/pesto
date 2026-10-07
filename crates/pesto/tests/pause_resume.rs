@@ -85,6 +85,7 @@ const ARTICLE_SIZE: usize = 4096;
 
 fn test_config(port: u16, connections: usize) -> Config {
     Config {
+        encrypt_password: None,
         host: "127.0.0.1".to_string(),
         port,
         ssl: false,

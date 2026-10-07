@@ -87,6 +87,7 @@ async fn posts_every_segment_to_a_mock_server() {
     std::fs::write(&path, vec![0xABu8; 250]).unwrap();
 
     let config = Config {
+        encrypt_password: None,
         host: "127.0.0.1".to_string(),
         port: addr.port(),
         ssl: false,

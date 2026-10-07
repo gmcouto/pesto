@@ -97,6 +97,7 @@ fn content(seed: u8, len: usize) -> Vec<u8> {
 fn par2_config(port: u16) -> Config {
     const ARTICLE_SIZE: usize = 65536;
     Config {
+        encrypt_password: None,
         host: "127.0.0.1".to_string(),
         port,
         ssl: false,

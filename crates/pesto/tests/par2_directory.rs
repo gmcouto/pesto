@@ -39,6 +39,7 @@ async fn par2_zero_byte_file_verifies() {
     std::fs::write(show.join("ccc.bin"), content(1)).unwrap();
 
     let config = Config {
+        encrypt_password: None,
         host: "unused".to_string(),
         port: 563,
         ssl: false,
@@ -185,6 +186,7 @@ async fn par2_only_directory_repair_recreates_tree() {
     }
 
     let config = Config {
+        encrypt_password: None,
         host: "unused".to_string(),
         port: 563,
         ssl: false,

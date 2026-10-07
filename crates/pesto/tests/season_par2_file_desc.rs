@@ -39,6 +39,7 @@ fn content(seed: u8, len: usize) -> Vec<u8> {
 
 fn season_config(par2_slice_size: usize) -> Config {
     Config {
+        encrypt_password: None,
         host: "unused".to_string(),
         port: 563,
         ssl: false,

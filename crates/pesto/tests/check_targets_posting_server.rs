@@ -142,6 +142,7 @@ async fn check_stats_the_server_the_article_was_actually_posted_to() {
     std::fs::write(&input, vec![7u8; 10_000]).unwrap();
 
     let config = Config {
+        encrypt_password: None,
         // Primary: unreachable, and given zero upload connections so the
         // real upload never even attempts it — only the check queue's old
         // `worker_idx % servers.len()` guess would ever reach it.

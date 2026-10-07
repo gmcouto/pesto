@@ -130,7 +130,7 @@ async fn run(options: RunOptions<'_>) -> Result<PostOutcome> {
         events,
         cancelled: Arc::new(AtomicBool::new(false)),
         paused: Arc::new(AtomicBool::new(false)),
-        resume: resume_arc,
+        resume: resume_arc.clone(),
         resume_path: resume_path_owned,
         spool_dir: spool_dir_owned,
         pool: Arc::new(Mutex::new(initial_pool)),
@@ -142,6 +142,37 @@ async fn run(options: RunOptions<'_>) -> Result<PostOutcome> {
         run_id,
         total_files,
         check_tx: Mutex::new(None),
+        encryption: {
+            let pw = config.encrypt_password.as_ref();
+            match pw {
+                Some(pw) => {
+                    // On a --resume run with recorded encryption identity,
+                    // rebuild the SAME session (same salt → same Argon2id
+                    // key) and continue the allocator where it stopped.
+                    // A fresh run generates a new Alphabet salt.
+                    let (recorded_salt, next_index) = resume_arc
+                        .as_ref()
+                        .map(|r| r.lock().unwrap().encryption_identity())
+                        .unwrap_or((None, None));
+                    let session = if let (Some(salt), Some(next)) = (recorded_salt, next_index) {
+                        crate::yenc::encrypt::EncryptionSession::from_salt_and_allocator(
+                            pw.as_bytes(),
+                            salt,
+                            next,
+                        )
+                    } else {
+                        crate::yenc::encrypt::EncryptionSession::new(pw.as_bytes())
+                    };
+                    if let Some(r) = &resume_arc {
+                        r.lock()
+                            .unwrap()
+                            .set_encryption_identity(session.salt, session.allocator.peek_next());
+                    }
+                    Some(Mutex::new(session))
+                }
+                None => None,
+            }
+        },
     });
 
     // Announce the work plan: one `FileEntry` per source file, with the

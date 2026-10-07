@@ -66,6 +66,7 @@ mod tests {
                 server_idx: 0,
                 file_index: 0,
                 total_files: 0,
+                segment_index: None,
             },
             pesto::poster::PostedSegment {
                 file_name: "a.bin".into(),
@@ -84,6 +85,7 @@ mod tests {
                 server_idx: 0,
                 file_index: 0,
                 total_files: 0,
+                segment_index: None,
             },
         ];
         let xml = pesto::nzb::generate(

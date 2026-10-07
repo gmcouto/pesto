@@ -15,6 +15,7 @@ use pesto::walk::expand_inputs;
 
 fn dry_run_config(file_counter: bool, par2_recovery_count: Option<usize>) -> Config {
     Config {
+        encrypt_password: None,
         host: "unused".to_string(),
         port: 563,
         ssl: false,

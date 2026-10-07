@@ -44,6 +44,13 @@ impl SegmentIndexAllocator {
         }
     }
 
+    /// The next candidate that would be handed out (no allocation).
+    /// Persisted with resume state so an interrupted run continues the
+    /// release-wide sequence instead of restarting it.
+    pub fn peek_next(&self) -> u32 {
+        self.next
+    }
+
     /// Allocate the next permitted index, skipping forbidden candidates.
     pub fn allocate(&mut self) -> Result<u32, EncryptionError> {
         if self.next == u32::MAX && index_is_forbidden(u32::MAX) {

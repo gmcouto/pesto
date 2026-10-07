@@ -54,6 +54,11 @@ pub fn generate(
         ("title", meta.name.as_deref()),
         ("password", meta.password.as_deref()),
         ("category", meta.category.as_deref()),
+        // yEnc encryption wire mode. Written only when the uploader ran with
+        // encryption enabled; downloaders treat this as the fast-detection
+        // tag for encrypted segments (body standard v1.2, NZB metadata
+        // section).
+        ("encryption", meta.encryption.as_deref()),
     ]
     .into_iter()
     .filter_map(|(k, v)| v.map(|s| (k, s)))
@@ -102,7 +107,7 @@ pub fn generate(
             .iter()
             .take_while(|s| &s.file_name == name)
             .count();
-        write_file(&mut out, groups, &segments[i..i + count], _obfuscate);
+        write_file(&mut out, groups, &segments[i..i + count], meta, _obfuscate);
         i += count;
     }
 
@@ -166,10 +171,24 @@ pub(super) fn write_file(
     out: &mut String,
     groups: &[String],
     segs: &[PostedSegment],
+    meta: &NzbMeta,
     _obfuscate: ObfuscateMode,
 ) {
     let first = &segs[0];
-    let file_counter = (first.total_files > 0).then_some((first.file_index, first.total_files));
+    // The `[file number/total files]` subject prefix is REQUIRED for
+    // encrypted uploads (body standard v1.2): it pins the release-wide file
+    // ordinal that downloaders combine with the in-band segmentIndex. When
+    // encryption is active the prefix is emitted even if the user didn't
+    // opt into `--file-counter`; `file_index`/`total_files` are denormalized
+    // onto every `PostedSegment` precisely so the writer can do this.
+    let file_counter = if meta.encryption.is_some() {
+        Some((
+            first.file_index.max(1),
+            first.total_files.max(first.file_index.max(1)),
+        ))
+    } else {
+        (first.total_files > 0).then_some((first.file_index, first.total_files))
+    };
     // `light` deliberately makes the NZB's subject search token identical to
     // the actual wire Subject. Parsed NZBs have no wire identity, so retain
     // their recorded subject name instead of inventing one.

@@ -210,9 +210,33 @@ pub struct ResumeState {
     files: HashMap<String, FileFingerprint>,
     /// Key: `"{file_name}\0{part}"`.
     segments: HashMap<String, SegmentRecord>,
+    /// yEnc encryption session identity: the per-upload random Alphabet salt
+    /// and the next-to-allocate segmentIndex candidate. Persisted so a
+    /// `--resume` run rebuilds the identical session key (Argon2id over the
+    /// same salt) and continues the monotonic VEC-07 allocator exactly where
+    /// the interrupted run stopped — never regenerating salt or reusing
+    /// indices, which would make already-posted articles undecryptable.
+    encryption_salt: Option<[u8; 16]>,
+    next_segment_index: Option<u32>,
 }
 
 impl ResumeState {
+    /// yEnc encryption identity accessors for the poster orchestration.
+    pub fn encryption_identity(&self) -> (Option<[u8; 16]>, Option<u32>) {
+        (self.encryption_salt, self.next_segment_index)
+    }
+
+    pub fn set_encryption_identity(&mut self, salt: [u8; 16], next_index: u32) {
+        self.encryption_salt = Some(salt);
+        self.next_segment_index = Some(next_index);
+    }
+
+    /// Mirror a session's current allocator state into the resume record
+    /// (called by the persist path just before `save`).
+    pub fn sync_encryption_allocator(&mut self, next_index: u32) {
+        self.next_segment_index = Some(next_index);
+    }
+
     fn key(file_name: &str, part: u32) -> String {
         format!("{file_name}\0{part}")
     }

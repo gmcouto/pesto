@@ -75,6 +75,11 @@ pub(super) fn run_merge_season(
 
         let mut combined_segments: Vec<pesto::poster::PostedSegment> = Vec::new();
         let mut poster = String::new();
+        // Wire mode carried through from the merged inputs. A merged release
+        // mixes encrypted and unencrypted sources only if the inputs were
+        // inconsistent; the first value wins and later conflicts are
+        // reported rather than silently dropped.
+        let mut meta_encryption: Option<String> = None;
         let mut all_groups: Vec<String> = Vec::new();
 
         for src in &sources {
@@ -104,6 +109,14 @@ pub(super) fn run_merge_season(
                     all_groups.push(g);
                 }
             }
+            if meta_encryption.is_none() {
+                meta_encryption = parsed.meta.encryption;
+            } else if parsed.meta.encryption.is_some() && parsed.meta.encryption != meta_encryption
+            {
+                eprintln!(
+                    "  ! conflicting <meta type=\"encryption\"> values across merged inputs; keeping the first"
+                );
+            }
             combined_segments.extend(parsed.segments);
         }
 
@@ -120,6 +133,10 @@ pub(super) fn run_merge_season(
             tvdb_id: None,
             mal_id: None,
             tags: nzb_tags.clone(),
+            // `pesto --merge` only rewrites NZB metadata from already-posted
+            // articles; it does not encrypt, so there is no wire mode to
+            // declare — carry the parsed value through untouched instead.
+            encryption: meta_encryption,
         };
         // Segments here come from `nzb::parse`, which always leaves
         // `wire_name` empty (see its doc comment) — there is no live wire

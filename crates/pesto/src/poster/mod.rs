@@ -441,7 +441,7 @@ async fn post_data_files(
                     offset,
                     buf,
                     file_crc32,
-                    &shared.config,
+                    shared,
                 ))
                 .await
                 .is_err()
@@ -551,7 +551,7 @@ async fn push_par2_file(
                 offset,
                 buf,
                 file_crc32,
-                &shared.config,
+                shared,
             ))
             .await
             .is_err()
@@ -571,8 +571,9 @@ fn make_task(
     offset: u64,
     data: Vec<u8>,
     file_crc32: Option<u32>,
-    config: &Config,
+    shared: &Shared,
 ) -> PostTask {
+    let config = &shared.config;
     let (subject_name, yenc_name, from, date) = match config.obfuscate {
         ObfuscateMode::Full => (
             obfuscated_name(),
@@ -600,6 +601,24 @@ fn make_task(
             )
         }
     };
+    // The globally unique segmentIndex is allocated HERE, at prepare/produce
+    // time in strict producer order — never from worker completion order,
+    // which races and would make encrypted articles undecryptable after a
+    // retry (project hard constraint: deterministic retry identity). The
+    // allocator is release-wide and monotonic (VEC-07 skip rules apply).
+    let segment_index = match shared.encryption.as_ref() {
+        Some(session) => match session.lock().unwrap().allocator.allocate() {
+            Ok(idx) => Some(idx),
+            Err(e) => {
+                // Index space exhausted mid-run: fail this task's encoding
+                // path. The worker surfaces it through normal failure
+                // reporting.
+                tracing::error!(error = %e, "segmentIndex allocation failed");
+                None
+            }
+        },
+        None => None,
+    };
     PostTask {
         meta,
         part,
@@ -611,6 +630,7 @@ fn make_task(
         from,
         date,
         file_crc32,
+        segment_index,
     }
 }
 

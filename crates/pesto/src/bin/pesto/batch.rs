@@ -417,6 +417,10 @@ pub(super) async fn run_batch(
                 }),
                 mal_id: config.mal_id.clone(),
                 tags: nzb_tags,
+                encryption: config
+                    .encrypt_password
+                    .as_ref()
+                    .map(|_| pesto::nzb::ENCRYPTION_WIRE_MODE.to_string()),
             };
             let xml =
                 pesto::nzb::generate(&all_groups, &season_segments, &nzb_meta, config.obfuscate);

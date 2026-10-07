@@ -29,6 +29,12 @@ pub struct NzbMeta {
     pub mal_id: Option<String>,
     /// Arbitrary tags emitted as multiple `<meta type="tag">` elements.
     pub tags: Vec<String>,
+    /// yEnc encryption wire mode (`<meta type="encryption">`). The only
+    /// value the v1.2 standards define is `combined` (body + control-line
+    /// encryption together); downloaders hard-error on any other value
+    /// rather than silently falling back to ordinary yEnc. `None` for an
+    /// ordinary unencrypted upload.
+    pub encryption: Option<String>,
 }
 
 /// Media type of a [`parse_tmdb_ref`] result.

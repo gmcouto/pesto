@@ -2,6 +2,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::config::ObfuscateMode;
+use crate::nzb::ENCRYPTION_WIRE_MODE;
 use crate::poster::PostedSegment;
 
 use super::*;
@@ -24,6 +25,7 @@ fn seg(name: &str, part: u32, total: u32, id: &str) -> PostedSegment {
         server_idx: 0,
         file_index: 0,
         total_files: 0,
+        segment_index: None,
     }
 }
 
@@ -212,6 +214,7 @@ fn file_element_never_carries_a_name_attribute() {
         server_idx: 0,
         file_index: 0,
         total_files: 0,
+        segment_index: None,
     };
     let xml = generate(
         &["alt.test".into()],
@@ -249,6 +252,7 @@ fn meta_fields_emitted_in_head() {
         tvdb_id: Some("series/321".into()),
         mal_id: Some("654".into()),
         tags: Vec::new(),
+        encryption: None,
     };
     let xml = generate(&["alt.test".into()], &[], &meta, ObfuscateMode::None);
     assert!(xml.contains("<meta type=\"title\">My Upload</meta>"));
@@ -440,6 +444,7 @@ fn only_password_meta_emits_head_without_name_or_category() {
         tvdb_id: None,
         mal_id: None,
         tags: Vec::new(),
+        encryption: None,
     };
     let xml = generate(&["alt.test".into()], &[], &meta, ObfuscateMode::None);
     assert!(xml.contains("<meta type=\"password\">hunter2</meta>"));
@@ -466,6 +471,7 @@ fn parse_round_trips_generate() {
         tvdb_id: None,
         mal_id: None,
         tags: vec!["hd".into(), "2024".into()],
+        encryption: None,
     };
     let xml = generate(&groups, &segs, &meta, ObfuscateMode::None);
     let parsed = parse(&xml).expect("parse must succeed");
@@ -660,4 +666,96 @@ fn wire_subjects_returns_one_entry_per_file() {
 #[test]
 fn wire_subjects_empty_when_no_segments() {
     assert_eq!(wire_subjects(&[]), Vec::<(String, String)>::new());
+}
+
+// ── yEnc encryption meta + subject prefix (S02-T02) ───────────────────────
+
+#[test]
+fn encryption_meta_round_trips_through_parse() {
+    let meta = NzbMeta {
+        encryption: Some(ENCRYPTION_WIRE_MODE.to_string()),
+        password: Some("test123".to_string()),
+        ..Default::default()
+    };
+    let xml = generate(&["alt.test".into()], &[], &meta, ObfuscateMode::None);
+    assert!(xml.contains("<meta type=\"encryption\">combined</meta>"));
+    assert!(xml.contains("<meta type=\"password\">test123</meta>"));
+
+    let parsed = parse(&xml).expect("parse must succeed");
+    assert_eq!(parsed.meta.encryption.as_deref(), Some("combined"));
+    assert_eq!(parsed.meta.password.as_deref(), Some("test123"));
+}
+
+#[test]
+fn unencrypted_nzb_omits_encryption_meta() {
+    let xml = generate(&["alt.test".into()], &[], &no_meta(), ObfuscateMode::None);
+    assert!(!xml.contains("type=\"encryption\""));
+    let parsed = parse(&xml).expect("parse must succeed");
+    assert!(parsed.meta.encryption.is_none());
+}
+
+#[test]
+fn encrypted_uploads_force_subject_file_counter_prefix() {
+    // The [file number/total files] prefix is REQUIRED for encrypted
+    // uploads even when --file-counter is off: file_index/total_files are
+    // denormalized onto PostedSegment, so an encrypted run sets them
+    // release-wide and the writer must emit the prefix.
+    let mk = |file_index: u32, total_files: u32| PostedSegment {
+        file_name: "f.bin".into(),
+        file_path: Arc::from(Path::new("f.bin")),
+        subject_name: Arc::from("f.bin"),
+        wire_name: Arc::from("f.bin"),
+        wire_yenc_name: Arc::from("f.bin"),
+        file_size: 1000,
+        part: 1,
+        total: 1,
+        message_id: "<id@x>".into(),
+        bytes: 500,
+        from: Arc::from("poster <p@x>"),
+        date: (None, None),
+        full_crc32: 0,
+        server_idx: 0,
+        file_index,
+        total_files,
+        segment_index: Some(1),
+    };
+    // Encrypted run: file_counter forced on (file_index=2 of 3).
+    let enc_meta = NzbMeta {
+        encryption: Some(ENCRYPTION_WIRE_MODE.to_string()),
+        ..Default::default()
+    };
+    let xml = generate(
+        &["alt.test".into()],
+        &[mk(2, 3)],
+        &enc_meta,
+        ObfuscateMode::None,
+    );
+    assert!(
+        xml.contains("subject=\"[2/3] - "),
+        "encrypted NZB subject must carry the [N/M] prefix: {xml}"
+    );
+
+    // Unencrypted run without --file-counter: no prefix (baseline preserved).
+    let plain_xml = generate(
+        &["alt.test".into()],
+        &[mk(0, 0)],
+        &no_meta(),
+        ObfuscateMode::None,
+    );
+    assert!(!plain_xml.contains("subject=\"[0/0] - \""));
+    assert!(plain_xml.contains("subject=\"&quot;f.bin&quot; yEnc (1/1)\""));
+
+    // Encrypted run with the flag also on: prefix comes from the denorm
+    // fields exactly as --file-counter would emit it.
+    let counter_on = NzbMeta {
+        encryption: Some(ENCRYPTION_WIRE_MODE.to_string()),
+        ..Default::default()
+    };
+    let xml2 = generate(
+        &["alt.test".into()],
+        &[mk(7, 9)],
+        &counter_on,
+        ObfuscateMode::None,
+    );
+    assert!(xml2.contains("subject=\"[7/9] - "));
 }

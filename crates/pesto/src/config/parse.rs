@@ -46,6 +46,7 @@ const FIELD_SECTIONS: &[(&str, &str)] = &[
     ("check_recover_percent", "[posting]"),
     ("check_recover_max", "[posting]"),
     ("pipeline_depth", "[posting]"),
+    ("encrypt_password", "[posting]"),
     ("par2_memory_limit", "[posting]"),
     ("memory_limit", "[posting]"),
     ("par2_temp_dir", "[posting]"),
@@ -526,6 +527,7 @@ impl Config {
                 .or(file.posting.pipeline_depth)
                 .unwrap_or(DEFAULT_PIPELINE_DEPTH),
             keepalive_interval: file.server.keepalive.unwrap_or(DEFAULT_KEEPALIVE_SECS),
+            encrypt_password: cli.encrypt_password.or(file.posting.encrypt_password),
         })
     }
 }

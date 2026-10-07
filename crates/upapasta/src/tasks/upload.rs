@@ -312,6 +312,10 @@ pub(crate) fn handle_upload_trigger(app: &mut App, tx: mpsc::UnboundedSender<App
                                 }),
                                 mal_id: config.mal_id.clone(),
                                 tags: config.nzb_tags.clone(),
+                                encryption: config
+                                    .encrypt_password
+                                    .as_ref()
+                                    .map(|_| pesto::nzb::ENCRYPTION_WIRE_MODE.to_string()),
                             };
                             let xml = pesto::nzb::generate(
                                 &config.groups,
@@ -467,6 +471,7 @@ pub(crate) fn build_dry_run_config() -> Config {
         check_recover_max: 0,
         pipeline_depth: 0,
         keepalive_interval: 60,
+        encrypt_password: None,
     }
 }
 

@@ -29,6 +29,7 @@ async fn tiny_global_memory_limit_rejects_an_oversized_par2_memory_limit() {
     std::fs::write(&input, vec![0u8; 500_000]).unwrap();
 
     let config = Config {
+        encrypt_password: None,
         host: "unused".to_string(),
         port: 563,
         ssl: false,

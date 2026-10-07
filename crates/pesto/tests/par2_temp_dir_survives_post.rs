@@ -107,6 +107,7 @@ async fn par2_temp_dir_is_not_deleted_by_post_files() {
     std::fs::write(&input, content(0)).unwrap();
 
     let mut config = Config {
+        encrypt_password: None,
         host: "127.0.0.1".to_string(),
         port: addr.port(),
         ssl: false,

@@ -80,6 +80,12 @@ pub(super) struct Shared {
     /// after a 240. Taken (dropped) before `finish_and_drain` so the
     /// feeder observes end-of-stream.
     pub(super) check_tx: Mutex<Option<tokio::sync::mpsc::UnboundedSender<PostedSegment>>>,
+    /// yEnc encryption session, `None` when the run is unencrypted. Owns the
+    /// per-upload random Alphabet salt + Argon2id-derived session key and
+    /// the release-wide monotonic segmentIndex allocator (VEC-07). The
+    /// password itself is never stored here — it is consumed by
+    /// `EncryptionSession::new` before `Shared` exists.
+    pub(super) encryption: Option<Mutex<crate::yenc::encrypt::EncryptionSession>>,
 }
 
 impl Shared {

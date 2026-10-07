@@ -349,6 +349,7 @@ async fn full_shared_obfuscation_par2_set_shares_prefix_with_content() {
     std::fs::write(&input, content(0, ARTICLE_SIZE * ARTICLES)).unwrap();
 
     let config = Config {
+        encrypt_password: None,
         host: "127.0.0.1".to_string(),
         port: addr.port(),
         ssl: false,
@@ -552,6 +553,7 @@ async fn light_obfuscation_par2_set_shares_prefix_and_matches_subject_exactly() 
     std::fs::write(&input, content(0, ARTICLE_SIZE * ARTICLES)).unwrap();
 
     let config = Config {
+        encrypt_password: None,
         host: "127.0.0.1".to_string(),
         port: addr.port(),
         ssl: false,

@@ -3,6 +3,7 @@ use super::*;
 /// A config that processes files without touching the network.
 pub(super) fn dry_run_config(obfuscate: ObfuscateMode) -> Config {
     Config {
+        encrypt_password: None,
         host: "unused".to_string(),
         port: 563,
         ssl: false,
