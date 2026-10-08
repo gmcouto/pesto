@@ -28,7 +28,7 @@ use super::{escape, NzbMeta, YENC_SPEC_VERSION};
 ///   - All identity-bearing files agree on `total_files`.
 ///   - `file_ordinal` is in `1..=total_files` and unique per file name.
 ///   - Global segment indices across all files are unique and non-overlapping.
-fn validate_segments(segments: &[PostedSegment]) -> Result<()> {
+fn validate_segments(segments: &[PostedSegment], is_encrypted: bool) -> Result<()> {
     if segments.is_empty() {
         return Ok(());
     }
@@ -102,7 +102,7 @@ fn validate_segments(segments: &[PostedSegment]) -> Result<()> {
             );
         }
 
-        if first_has_identity {
+        if is_encrypted && first_has_identity {
             ensure!(
                 seen_parts.len() == first.total as usize,
                 "incomplete segment set for identity-bearing file `{}`: found {} parts, expected declared total {}",
@@ -231,7 +231,7 @@ pub fn generate(
     meta: &NzbMeta,
     _obfuscate: ObfuscateMode,
 ) -> Result<String> {
-    validate_segments(segments)?;
+    validate_segments(segments, meta.yenc_encrypted)?;
 
     let mut out = String::new();
 

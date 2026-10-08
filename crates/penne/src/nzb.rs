@@ -6,7 +6,7 @@
 
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use pesto::nzb::ParsedNzb;
 
 /// Read and parse a `.nzb` file from disk.
@@ -41,6 +41,9 @@ pub fn download_decryptor(
         .password
         .as_deref()
         .context("encrypted NZB is missing password metadata")?;
+    if password.trim().is_empty() {
+        bail!("encrypted NZB password is empty or whitespace-only");
+    }
     Ok(Some(std::sync::Arc::new(
         pesto::crypto::DownloadDecryptionAdapter::with_password(password),
     )))
@@ -167,6 +170,14 @@ mod tests {
         };
         let decryptor = download_decryptor(&meta_encrypted).unwrap();
         assert!(decryptor.is_some());
+
+        // 4. Encrypted metadata with whitespace-only password errors fail-closed
+        let meta_whitespace_pwd = pesto::nzb::NzbMeta {
+            yenc_encrypted: true,
+            password: Some("   ".into()),
+            ..Default::default()
+        };
+        assert!(download_decryptor(&meta_whitespace_pwd).is_err());
     }
 
     #[test]

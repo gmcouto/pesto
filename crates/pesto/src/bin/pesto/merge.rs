@@ -76,14 +76,9 @@ pub(super) fn run_merge_season(
         let mut combined_segments: Vec<pesto::poster::PostedSegment> = Vec::new();
         let mut poster = String::new();
         let mut all_groups: Vec<String> = Vec::new();
-        let mut any_encrypted = false;
-        let mut encrypted_source_count = 0usize;
-        let mut shared_password: Option<String> = None;
         // WR-04-R4: archive (RAR/7z extraction) passwords of unencrypted
-        // sources must survive the merge, mirroring how the encrypted path
-        // preserves its shared password.
+        // sources must survive the merge.
         let mut shared_archive_password: Option<String> = None;
-        let mut seen_message_ids = std::collections::HashSet::new();
 
         for src in &sources {
             let content = std::fs::read_to_string(src)
@@ -95,31 +90,13 @@ pub(super) fn run_merge_season(
                 || parsed.segments.iter().any(|s| s.segment_identity.is_some());
 
             if is_this_encrypted {
-                any_encrypted = true;
-                encrypted_source_count += 1;
-                if let Some(ref pwd) = parsed.meta.password {
-                    if let Some(ref existing) = shared_password {
-                        if existing != pwd {
-                            anyhow::bail!("cannot merge encrypted NZBs with conflicting passwords");
-                        }
-                    } else {
-                        shared_password = Some(pwd.clone());
-                    }
-                } else if shared_password.is_some() {
-                    anyhow::bail!("cannot merge encrypted NZBs with conflicting passwords");
-                }
+                anyhow::bail!(
+                    "cannot merge encrypted NZB `{}`: merging encrypted NZBs is not supported",
+                    src.display()
+                );
+            }
 
-                for seg in &parsed.segments {
-                    // Bootstrap-only identity (v1.2 §8): XML segment-index
-                    // attributes are never consumed, so index overlap cannot
-                    // be detected at merge time — the only detectable merge
-                    // conflict is the same Message-ID appearing in two
-                    // sources (a genuine duplicate-article corruption).
-                    if !seen_message_ids.insert(seg.message_id.clone()) {
-                        anyhow::bail!("cannot merge encrypted NZBs with duplicate Message-IDs");
-                    }
-                }
-            } else if let Some(ref pwd) = parsed.meta.password {
+            if let Some(ref pwd) = parsed.meta.password {
                 // WR-04-R4: keep the archive password of unencrypted sources.
                 if let Some(ref existing) = shared_archive_password {
                     anyhow::ensure!(
@@ -130,17 +107,6 @@ pub(super) fn run_merge_season(
                     shared_archive_password = Some(pwd.clone());
                 }
             }
-
-            // WR-03-R4: identity for encrypted uploads is bootstrap-only
-            // (salt + segment index live in the wire bytes, see
-            // crypto/mod.rs) — NZBs produced by different upload sessions
-            // cannot be merged, because their segment-index spaces may
-            // collide invisibly at XML level.
-            anyhow::ensure!(
-                encrypted_source_count <= 1,
-                "refusing to merge encrypted NZBs from multiple upload sessions \
-                 (unsupported: bootstrap-only identity, segment-index spaces may collide)"
-            );
 
             let ep_name = src
                 .file_stem()
@@ -172,30 +138,16 @@ pub(super) fn run_merge_season(
             name: display_name
                 .map(str::to_string)
                 .or_else(|| Some(key.clone())),
-            // WR-04-R4: preserve the archive password when merging
-            // unencrypted NZBs; the encrypted path uses shared_password.
-            password: if any_encrypted {
-                shared_password
-            } else {
-                shared_archive_password
-            },
+            password: shared_archive_password,
             category: None,
             tmdb_id: None,
             imdb_id: None,
             tvdb_id: None,
             mal_id: None,
             tags: nzb_tags.clone(),
-            yenc_encrypted: any_encrypted,
-            yenc_version: if any_encrypted {
-                Some(pesto::nzb::YENC_SPEC_VERSION.to_string())
-            } else {
-                None
-            },
-            yenc_cipher: if any_encrypted {
-                Some("XChaCha20-Poly1305".to_string())
-            } else {
-                None
-            },
+            yenc_encrypted: false,
+            yenc_version: None,
+            yenc_cipher: None,
         };
         // Segments here come from `nzb::parse`, which always leaves
         // `wire_name` empty (see its doc comment) — there is no live wire

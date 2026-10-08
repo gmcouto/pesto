@@ -265,11 +265,20 @@ pub fn decrypt_yenc_control_lines(
         return Ok(Vec::new());
     }
 
-    let n = lines.len();
+    let mut trailing_count = 0;
+    while trailing_count < lines.len() && lines[lines.len() - 1 - trailing_count].content.is_empty() {
+        trailing_count += 1;
+    }
+    let (active_lines, trailing_blanks) = lines.split_at(lines.len() - trailing_count);
+    if active_lines.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let n = active_lines.len();
     let mut out = Vec::with_capacity(yenc_block.len().saturating_sub(BOOTSTRAP_PREFIX_LEN));
 
     // Process line 1
-    let line1 = &lines[0];
+    let line1 = &active_lines[0];
     let (salt, line1_segment_index) = extract_bootstrap_from_line1(line1.content)?;
     if salt != session.salt() {
         bail!("salt mismatch: line 1 salt does not match session salt");
@@ -303,7 +312,7 @@ pub fn decrypt_yenc_control_lines(
     //   (neither the expected `=ypart`/`=yencryption`) is a corruption
     //   case — fail closed.
     let mut in_header = true;
-    for (i, line) in lines.iter().enumerate().take(n.saturating_sub(1)).skip(1) {
+    for (i, line) in active_lines.iter().enumerate().take(n.saturating_sub(1)).skip(1) {
         let line_index = (i + 1) as u32;
         if in_header {
             let tweak = session.derive_control_tweak(segment_index, line_index);
@@ -354,7 +363,7 @@ pub fn decrypt_yenc_control_lines(
 
     // Process line N (footer) if N > 1
     if n > 1 {
-        let footer = &lines[n - 1];
+        let footer = &active_lines[n - 1];
         let line_index = n as u32;
         let tweak = session.derive_control_tweak(segment_index, line_index);
         let pt_footer = ff1_decrypt_line(session.control_key(), &tweak, footer.content)?;
@@ -365,5 +374,29 @@ pub fn decrypt_yenc_control_lines(
         out.extend_from_slice(footer.ending);
     }
 
+    for blank in trailing_blanks {
+        out.extend_from_slice(blank.content);
+        out.extend_from_slice(blank.ending);
+    }
+
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_decrypt_with_trailing_blank_lines() {
+        let salt = *b"K7mX9pL2qR8vN4wZ";
+        let session = EncryptionSession::new("test123", salt).unwrap();
+        let segment_index = 1;
+        let block = b"=ybegin line=128 size=4 name=test.bin\r\n=yencryption cipher=XChaCha20-Poly1305 salt=4b376d5839704c32715238764e34775a index=00000001 tag=0cd77ce245a654463f90b945b1d22d5b\r\ndata\r\n=yend size=4 pcrc32=12345678\r\n";
+        let encrypted = encrypt_yenc_control_lines(&session, segment_index, block).unwrap();
+        let mut with_trailing = encrypted.clone();
+        with_trailing.extend_from_slice(b"\r\n\r\n");
+        let decrypted = decrypt_yenc_control_lines(&session, segment_index, &with_trailing).unwrap();
+        assert!(decrypted.starts_with(b"=ybegin"));
+        assert!(decrypted.ends_with(b"\r\n\r\n"));
+    }
 }
