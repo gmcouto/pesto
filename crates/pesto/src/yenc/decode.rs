@@ -79,7 +79,11 @@ pub fn decode_part(body: &[u8]) -> Result<DecodedPart> {
     let ybegin = parse_ybegin(lines[ybegin_idx])?;
 
     let mut idx = ybegin_idx + 1;
-    let (begin, end) = if ybegin.total > 1 {
+    let (begin, end) = if ybegin.total > 1
+        || lines
+            .get(idx)
+            .is_some_and(|l| l.starts_with(b"=ypart"))
+    {
         let line = *lines
             .get(idx)
             .context("multi-part article is missing its =ypart line")?;
