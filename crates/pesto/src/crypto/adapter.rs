@@ -472,7 +472,7 @@ impl DownloadDecryptionAdapter {
         // Dual-Bootstrap Agreement
         ensure!(
             yenc_params.salt == session.salt(),
-            "SALT_MISMATCH: salt mismatch between control line 1 and =yencryption header"
+            "DUAL_SALT_MISMATCH: salt mismatch between control line 1 and =yencryption header"
         );
         ensure!(
             yenc_params.segment_index == segment_index,
