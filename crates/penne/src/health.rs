@@ -119,9 +119,9 @@ mod tests {
     use crate::queue::{QueuedFile, QueuedSegment};
 
     fn file_with_segments(name: &str, sizes: &[u64]) -> QueuedFile {
-        QueuedFile {
-            name: name.to_string(),
-            segments: sizes
+        QueuedFile::new(
+            name,
+            sizes
                 .iter()
                 .enumerate()
                 .map(|(i, &bytes)| QueuedSegment {
@@ -130,7 +130,7 @@ mod tests {
                     bytes,
                 })
                 .collect(),
-        }
+        )
     }
 
     #[test]

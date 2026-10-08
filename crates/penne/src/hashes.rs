@@ -199,15 +199,17 @@ mod tests {
         let queue = files
             .iter()
             .enumerate()
-            .map(|(i, (name, data))| QueuedFile {
-                name: name.to_string(),
-                segments: (0..data.len().div_ceil(64))
-                    .map(|part| QueuedSegment {
-                        message_id: i.to_string(),
-                        part: part as u32 + 1,
-                        bytes: 64,
-                    })
-                    .collect(),
+            .map(|(i, (name, data))| {
+                QueuedFile::new(
+                    name.to_string(),
+                    (0..data.len().div_ceil(64))
+                        .map(|part| QueuedSegment {
+                            message_id: i.to_string(),
+                            part: part as u32 + 1,
+                            bytes: 64,
+                        })
+                        .collect(),
+                )
             })
             .collect();
         Remote::new(

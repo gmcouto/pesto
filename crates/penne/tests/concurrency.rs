@@ -175,10 +175,7 @@ async fn multiple_connections_to_one_server_run_concurrently() {
     let (addr, _in_flight, peak) = spawn_slow_server(known, DELAY);
 
     let queue = DownloadQueue {
-        files: vec![QueuedFile {
-            name: "movie.bin".to_string(),
-            segments,
-        }],
+        files: vec![QueuedFile::new("movie.bin".to_string(), segments)],
     };
     let server = ServerEntry {
         host: addr.ip().to_string(),
@@ -272,10 +269,7 @@ async fn two_pooled_servers_are_drained_concurrently_as_one_tier() {
     let addr_b = spawn_slow_server_sharing(known, DELAY, in_flight, peak.clone());
 
     let queue = DownloadQueue {
-        files: vec![QueuedFile {
-            name: "movie.bin".to_string(),
-            segments,
-        }],
+        files: vec![QueuedFile::new("movie.bin".to_string(), segments)],
     };
     let member = |addr: SocketAddr| ServerEntry {
         host: addr.ip().to_string(),
@@ -338,10 +332,7 @@ async fn progress_events_arrive_while_the_download_is_still_running() {
     let (addr, _in_flight, _peak) = spawn_slow_server(known, DELAY);
 
     let queue = DownloadQueue {
-        files: vec![QueuedFile {
-            name: "movie.bin".to_string(),
-            segments,
-        }],
+        files: vec![QueuedFile::new("movie.bin".to_string(), segments)],
     };
     let server = ServerEntry {
         host: addr.ip().to_string(),
@@ -417,10 +408,7 @@ async fn missing_progress_events_arrive_while_the_download_is_still_running() {
         });
     }
     let queue = DownloadQueue {
-        files: vec![QueuedFile {
-            name: "movie.bin".to_string(),
-            segments,
-        }],
+        files: vec![QueuedFile::new("movie.bin".to_string(), segments)],
     };
     let server = ServerEntry {
         host: addr.ip().to_string(),
@@ -501,18 +489,15 @@ async fn a_file_that_finishes_early_is_assembled_before_the_rest_of_the_queue() 
 
     let queue = DownloadQueue {
         files: vec![
-            QueuedFile {
-                name: "fast.bin".to_string(),
-                segments: vec![QueuedSegment {
+            QueuedFile::new(
+                "fast.bin".to_string(),
+                vec![QueuedSegment {
                     message_id: "fast0@test".to_string(),
                     part: 1,
                     bytes: 5,
                 }],
-            },
-            QueuedFile {
-                name: "slow.bin".to_string(),
-                segments: slow_segments,
-            },
+            ),
+            QueuedFile::new("slow.bin".to_string(), slow_segments),
         ],
     };
     let server = ServerEntry {

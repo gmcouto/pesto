@@ -20,6 +20,21 @@ pub struct QueuedSegment {
 pub struct QueuedFile {
     pub name: String,
     pub segments: Vec<QueuedSegment>,
+    pub password: Option<String>,
+    pub encrypted: bool,
+    pub encryption: Option<String>,
+}
+
+impl QueuedFile {
+    pub fn new(name: impl Into<String>, segments: Vec<QueuedSegment>) -> Self {
+        Self {
+            name: name.into(),
+            segments,
+            password: None,
+            encrypted: false,
+            encryption: None,
+        }
+    }
 }
 
 /// The full set of files/segments to download for one `.nzb`.
@@ -37,6 +52,9 @@ pub struct DownloadQueue {
 /// eventually gets joined straight onto a destination directory
 /// (`assemble::StreamingAssembly::new`).
 pub fn build(parsed: &ParsedNzb) -> DownloadQueue {
+    let encrypted = parsed.meta.encryption.as_deref() == Some("combined");
+    let encryption = parsed.meta.encryption.clone();
+    let password = parsed.meta.password.clone();
     let mut files: Vec<QueuedFile> = Vec::new();
     for seg in &parsed.segments {
         let name = sanitize_file_name(&seg.file_name);
@@ -53,6 +71,9 @@ pub fn build(parsed: &ParsedNzb) -> DownloadQueue {
                     part: seg.part,
                     bytes: seg.bytes,
                 }],
+                password: password.clone(),
+                encrypted,
+                encryption: encryption.clone(),
             }),
         }
     }
@@ -89,6 +110,9 @@ pub fn sample(queue: &DownloadQueue, per_file: usize) -> DownloadQueue {
                 segments: distributed_indices(f.segments.len(), per_file)
                     .map(|i| f.segments[i].clone())
                     .collect(),
+                password: f.password.clone(),
+                encrypted: f.encrypted,
+                encryption: f.encryption.clone(),
             })
             .collect(),
     }

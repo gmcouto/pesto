@@ -62,9 +62,9 @@ mod tests {
 
     fn queue_with_bytes(sizes: &[u64]) -> DownloadQueue {
         DownloadQueue {
-            files: vec![QueuedFile {
-                name: "f.bin".to_string(),
-                segments: sizes
+            files: vec![QueuedFile::new(
+                "f.bin",
+                sizes
                     .iter()
                     .enumerate()
                     .map(|(i, &bytes)| QueuedSegment {
@@ -73,21 +73,21 @@ mod tests {
                         bytes,
                     })
                     .collect(),
-            }],
+            )],
         }
     }
 
     #[test]
     fn required_bytes_sums_every_segment_across_every_file() {
         let mut queue = queue_with_bytes(&[100, 200]);
-        queue.files.push(QueuedFile {
-            name: "g.bin".to_string(),
-            segments: vec![QueuedSegment {
+        queue.files.push(QueuedFile::new(
+            "g.bin",
+            vec![QueuedSegment {
                 message_id: "id-g@test".to_string(),
                 part: 1,
                 bytes: 50,
             }],
-        });
+        ));
         assert_eq!(required_bytes(&queue), 350);
     }
 

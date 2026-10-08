@@ -121,10 +121,7 @@ async fn multiple_connections_to_one_server_run_concurrently() {
     let (addr, _in_flight, peak) = spawn_slow_server(known, DELAY);
 
     let queue = DownloadQueue {
-        files: vec![QueuedFile {
-            name: "movie.bin".to_string(),
-            segments,
-        }],
+        files: vec![QueuedFile::new("movie.bin".to_string(), segments)],
     };
     let server = ServerEntry {
         host: addr.ip().to_string(),

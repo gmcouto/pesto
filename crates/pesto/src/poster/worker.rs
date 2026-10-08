@@ -244,19 +244,38 @@ async fn prepare_ready(shared: &Arc<Shared>, mut task: PostTask) -> Option<Ready
         if let (Some(line), Some(segment_index)) = (&encrypted_header, task.segment_index) {
             if let Some(master) = shared.encryption.as_ref() {
                 let session = master.lock().unwrap();
-                match encrypt_control_lines(
-                    &session.key,
-                    segment_index,
-                    &session.salt,
-                    encoded.body.clone(),
-                ) {
+                let insert_at = if task.total > 1 { 2 } else { 1 };
+                let mut with_header = Vec::with_capacity(encoded.body.len() + line.len() + 2);
+                let mut line_no = 0usize;
+                let mut search = 0usize;
+                let mut inserted = false;
+                while search < encoded.body.len() {
+                    let nl = encoded.body[search..].iter().position(|&b| b == b'\n');
+                    let end = match nl {
+                        Some(p) => search + p + 1,
+                        None => encoded.body.len(),
+                    };
+                    if line_no == insert_at && !inserted {
+                        with_header.extend_from_slice(line.as_bytes());
+                        with_header.extend_from_slice(b"\r\n");
+                        inserted = true;
+                    }
+                    with_header.extend_from_slice(&encoded.body[search..end]);
+                    search = end;
+                    line_no += 1;
+                }
+                if !inserted {
+                    with_header.extend_from_slice(line.as_bytes());
+                    with_header.extend_from_slice(b"\r\n");
+                }
+                match encrypt_control_lines(&session.key, segment_index, &session.salt, with_header)
+                {
                     Ok(wire_body) => encoded.body = wire_body,
                     Err(e) => {
                         tracing::error!(error = %e, part = task.part, "control-line encryption failed");
                         return None;
                     }
                 }
-                let _ = line; // header text already encoded inside the block via =yencryption
             }
         }
         let message_id = generate_message_id(shared.config.message_id_domain.as_deref());

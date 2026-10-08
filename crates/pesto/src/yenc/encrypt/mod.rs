@@ -41,8 +41,8 @@ pub use body::{
     build_yencryption_line, decrypt_body, encrypt_body, parse_yencryption_line, EncryptionHeader,
 };
 pub use control::{
-    build_bootstrap, decrypt_control_line, decrypt_line1, encrypt_line1, extract_bootstrap,
-    ff1_decrypt_line, ff1_encrypt_line, Bootstrap,
+    build_bootstrap, decrypt_control_line, decrypt_line1, encrypt_control_line, encrypt_line1,
+    extract_bootstrap, ff1_decrypt_line, ff1_encrypt_line, Bootstrap,
 };
 pub use error::EncryptionError;
 pub use header::{

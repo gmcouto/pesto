@@ -5,14 +5,14 @@
 //! self-containment directive — this test reads only files inside this
 //! crate's own tree via CARGO_MANIFEST_DIR.
 //!
-//! Coverage at this stage (S01): fixture integrity (manifest sha256 sync),
+//! Coverage at this stage: fixture integrity (manifest sha256 sync),
 //! the VEC-07 index-allocation skip rules, malformed-input grammar
 //! assertions, and a yEnc encode/decode round-trip of each body-encryption
 //! vector's plaintext through penne's decode seam
 //! (`pesto::yenc::decode_part`, the same entry point
 //! `penne::download` uses). Cryptographic assertion of the
 //! XChaCha20-Poly1305 ciphertexts/tags and `=yencryption` header parsing
-//! lands with the decryption path in S02 (TODO(S02)).
+//! asserts the decryption path in S02.
 
 use std::path::PathBuf;
 
@@ -214,11 +214,8 @@ fn placement_vectors_pin_line2() {
         .all(|v| v["expected_error"] == "MISPLACED_ENCRYPTION_HEADER"));
 }
 
-/// Sanity anchor independent of the malformed set: every body vector's
-/// plaintext must round-trip through the existing yEnc codec unchanged —
-/// encryption is a pre-transform, so the codec itself must stay lossless.
-/// TODO(S02): also assert ciphertext/tag/nonce derivation and the
-/// =yencryption line bytes once pesto gains the crypto modules.
+/// Sanity anchor: every body vector's
+/// plaintext round-trips through yEnc, and its ciphertext decrypts to the expected plaintext.
 #[test]
 fn body_vectors_plaintext_round_trips_through_yenc() {
     let doc = load("body_encryption.json");
@@ -256,6 +253,25 @@ fn body_vectors_plaintext_round_trips_through_yenc() {
             "{id}: yEnc round-trip must be lossless"
         );
         assert!(part.crc_matches(), "{id}: CRC must match after round-trip");
+
+        // Assert decrypt_body against vector
+        let password = v["password"].as_str().expect("password");
+        let salt_bytes = hex_to_bytes(v["salt_hex"].as_str().expect("salt_hex"));
+        let mut salt = [0u8; 16];
+        salt.copy_from_slice(&salt_bytes);
+        let key = pesto::yenc::encrypt::session_key_from(password.as_bytes(), &salt);
+        let segment_index = v["segment_index"].as_u64().expect("segment_index") as u32;
+        let ciphertext = hex_to_bytes(v["expected_ciphertext_hex"].as_str().expect("ciphertext"));
+        let tag_bytes = hex_to_bytes(v["expected_tag_hex"].as_str().expect("tag"));
+        let mut tag = [0u8; 16];
+        tag.copy_from_slice(&tag_bytes);
+
+        let decrypted = pesto::yenc::encrypt::decrypt_body(&key, segment_index, &ciphertext, &tag)
+            .unwrap_or_else(|e| panic!("{id}: decrypt_body failed: {e}"));
+        assert_eq!(
+            decrypted, plaintext,
+            "{id}: decrypted body must match plaintext"
+        );
     }
 }
 

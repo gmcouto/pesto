@@ -337,9 +337,9 @@ mod tests {
     }
 
     fn queued_file(name: &str, parts: &[u32]) -> QueuedFile {
-        QueuedFile {
-            name: name.to_string(),
-            segments: parts
+        QueuedFile::new(
+            name,
+            parts
                 .iter()
                 .map(|&p| QueuedSegment {
                     message_id: format!("id{p}@test"),
@@ -347,7 +347,7 @@ mod tests {
                     bytes: 0,
                 })
                 .collect(),
-        }
+        )
     }
 
     #[tokio::test]

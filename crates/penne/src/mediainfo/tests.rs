@@ -43,15 +43,17 @@ fn remote(data: Vec<Vec<u8>>, names: &[&str], chunk: usize) -> Remote<MockSource
     let files = names
         .iter()
         .enumerate()
-        .map(|(f, name)| QueuedFile {
-            name: name.to_string(),
-            segments: (0..data[f].len().div_ceil(chunk))
-                .map(|i| QueuedSegment {
-                    message_id: format!("{f}:{i}"),
-                    part: i as u32 + 1,
-                    bytes: chunk as u64,
-                })
-                .collect(),
+        .map(|(f, name)| {
+            QueuedFile::new(
+                name.to_string(),
+                (0..data[f].len().div_ceil(chunk))
+                    .map(|i| QueuedSegment {
+                        message_id: format!("{f}:{i}"),
+                        part: i as u32 + 1,
+                        bytes: chunk as u64,
+                    })
+                    .collect(),
+            )
         })
         .collect();
     Remote::new(

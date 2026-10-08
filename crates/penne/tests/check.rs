@@ -200,17 +200,18 @@ fn queue_with(files: &[(&str, &[&str])]) -> DownloadQueue {
     DownloadQueue {
         files: files
             .iter()
-            .map(|(name, ids)| QueuedFile {
-                name: name.to_string(),
-                segments: ids
-                    .iter()
-                    .enumerate()
-                    .map(|(i, id)| QueuedSegment {
-                        message_id: id.to_string(),
-                        part: (i + 1) as u32,
-                        bytes: 4,
-                    })
-                    .collect(),
+            .map(|(name, ids)| {
+                QueuedFile::new(
+                    name.to_string(),
+                    ids.iter()
+                        .enumerate()
+                        .map(|(i, id)| QueuedSegment {
+                            message_id: id.to_string(),
+                            part: (i + 1) as u32,
+                            bytes: 4,
+                        })
+                        .collect(),
+                )
             })
             .collect(),
     }
@@ -455,10 +456,9 @@ async fn progress_events_arrive_while_the_check_is_still_running() {
     let addr = spawn_fake_server_with_delay(known, DELAY);
 
     let queue = DownloadQueue {
-        files: vec![QueuedFile {
-            name: "movie.bin".to_string(),
-            segments: ids
-                .iter()
+        files: vec![QueuedFile::new(
+            "movie.bin".to_string(),
+            ids.iter()
                 .enumerate()
                 .map(|(i, id)| QueuedSegment {
                     message_id: id.clone(),
@@ -466,7 +466,7 @@ async fn progress_events_arrive_while_the_check_is_still_running() {
                     bytes: 4,
                 })
                 .collect(),
-        }],
+        )],
     };
     let mut server = server_entry(addr);
     server.connections = CONNECTIONS;
@@ -526,10 +526,9 @@ async fn missing_progress_events_arrive_while_the_check_is_still_running() {
     let addr = spawn_fake_server_with_delay(known, DELAY);
 
     let queue = DownloadQueue {
-        files: vec![QueuedFile {
-            name: "movie.bin".to_string(),
-            segments: ids
-                .iter()
+        files: vec![QueuedFile::new(
+            "movie.bin".to_string(),
+            ids.iter()
                 .enumerate()
                 .map(|(i, id)| QueuedSegment {
                     message_id: id.clone(),
@@ -537,7 +536,7 @@ async fn missing_progress_events_arrive_while_the_check_is_still_running() {
                     bytes: 4,
                 })
                 .collect(),
-        }],
+        )],
     };
     let mut server = server_entry(addr);
     server.connections = CONNECTIONS;

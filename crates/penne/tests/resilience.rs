@@ -48,14 +48,14 @@ fn server_entry(addr: SocketAddr) -> ServerEntry {
 
 fn queue_with_one_segment(message_id: &str) -> DownloadQueue {
     DownloadQueue {
-        files: vec![QueuedFile {
-            name: "movie.bin".to_string(),
-            segments: vec![QueuedSegment {
+        files: vec![QueuedFile::new(
+            "movie.bin".to_string(),
+            vec![QueuedSegment {
                 message_id: message_id.to_string(),
                 part: 1,
                 bytes: 4,
             }],
-        }],
+        )],
     }
 }
 

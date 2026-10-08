@@ -165,6 +165,19 @@ pub fn decrypt_line1(
     Ok((restored, bootstrap))
 }
 
+/// Encrypt a non-Line-1 control line (header or footer) with its physical
+/// lineIndex.
+pub fn encrypt_control_line(
+    master_key: &SessionKey,
+    segment_index: u32,
+    line_index: u32,
+    line_content: &[u8],
+) -> Result<Vec<u8>, EncryptionError> {
+    let enc_key = control_enc_key(master_key);
+    let tweak = control_tweak(master_key, segment_index, line_index);
+    ff1_encrypt_line(&enc_key, &tweak, line_content)
+}
+
 /// Decrypt a non-Line-1 control line (header or footer) with its physical
 /// lineIndex. The caller verifies the restored content starts with `=y` /
 /// `=yend` as appropriate (control standard §5 steps 4/6).

@@ -379,13 +379,15 @@ mod tests {
         DownloadQueue {
             files: names
                 .iter()
-                .map(|n| QueuedFile {
-                    name: n.to_string(),
-                    segments: vec![QueuedSegment {
-                        message_id: format!("<{n}@x>"),
-                        part: 1,
-                        bytes: 10,
-                    }],
+                .map(|n| {
+                    QueuedFile::new(
+                        n.to_string(),
+                        vec![QueuedSegment {
+                            message_id: format!("<{n}@x>"),
+                            part: 1,
+                            bytes: 10,
+                        }],
+                    )
                 })
                 .collect(),
         }

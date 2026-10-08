@@ -133,14 +133,14 @@ fn server_entry(addr: SocketAddr) -> ServerEntry {
 
 fn queue_with_one_segment(message_id: &str) -> DownloadQueue {
     DownloadQueue {
-        files: vec![QueuedFile {
-            name: "movie.bin".to_string(),
-            segments: vec![QueuedSegment {
+        files: vec![QueuedFile::new(
+            "movie.bin".to_string(),
+            vec![QueuedSegment {
                 message_id: message_id.to_string(),
                 part: 1,
                 bytes: 4,
             }],
-        }],
+        )],
     }
 }
 
@@ -267,4 +267,213 @@ async fn records_missing_when_no_server_has_it() {
     assert_eq!(outcome.missing.len(), 1);
     assert_eq!(outcome.missing[0].message_id, "ghost@test");
     assert_eq!(outcome.missing[0].file_name, "movie.bin");
+}
+
+fn encrypted_yenc_body(
+    name: &str,
+    data: &[u8],
+    password: &str,
+    salt: &[u8; 16],
+    segment_index: u32,
+    custom_yenc_line: Option<&str>,
+) -> Vec<u8> {
+    use pesto::yenc::encrypt::*;
+    let session =
+        EncryptionSession::from_salt_and_allocator(password.as_bytes(), *salt, segment_index);
+    let (ciphertext, tag) = session.encrypt_segment(segment_index, data).unwrap();
+    let header_line = custom_yenc_line
+        .map(String::from)
+        .unwrap_or_else(|| session.yencryption_line(segment_index, &tag).unwrap());
+
+    let encoded = encode_part(
+        name,
+        data.len() as u64,
+        PartSpec {
+            number: 1,
+            total: 1,
+            offset: 0,
+        },
+        &ciphertext,
+        128,
+        None,
+    );
+
+    // Insert header_line at physical line 2
+    let mut with_header = Vec::new();
+    let mut lines = encoded.body.split(|&b| b == b'\n');
+    let line1 = lines.next().unwrap();
+    with_header.extend_from_slice(line1);
+    with_header.push(b'\n');
+    with_header.extend_from_slice(header_line.as_bytes());
+    with_header.extend_from_slice(b"\r\n");
+    for line in lines {
+        with_header.extend_from_slice(line);
+        with_header.push(b'\n');
+    }
+
+    // FF1-encrypt control lines
+    let mut out = Vec::new();
+    let mut line_index = 1u32;
+    for line in with_header.split(|&b| b == b'\n') {
+        let trimmed = line.strip_suffix(b"\r").unwrap_or(line);
+        if trimmed.is_empty() {
+            continue;
+        }
+        if line_index == 1 {
+            let enc = encrypt_line1(&session.key, segment_index, salt, trimmed).unwrap();
+            out.extend_from_slice(&enc);
+            out.extend_from_slice(b"\r\n");
+        } else if trimmed.starts_with(b"=y") {
+            let enc_key = control_enc_key(&session.key);
+            let tweak = control_tweak(&session.key, segment_index, line_index);
+            let enc = ff1_encrypt_line(&enc_key, &tweak, trimmed).unwrap();
+            out.extend_from_slice(&enc);
+            out.extend_from_slice(b"\r\n");
+        } else {
+            out.extend_from_slice(trimmed);
+            out.extend_from_slice(b"\r\n");
+        }
+        line_index += 1;
+    }
+    out
+}
+
+#[tokio::test]
+async fn encrypted_article_round_trips_byte_identical() {
+    let data = b"Hello, encrypted Usenet world! 12345".to_vec();
+    let password = "my-secret-password";
+    let salt: [u8; 16] = *b"K7mX9pL2qR8vN4wZ";
+    let segment_index = 1u32;
+    let enc_body = encrypted_yenc_body("movie.bin", &data, password, &salt, segment_index, None);
+
+    let mut known = HashMap::new();
+    known.insert("enc1@test", enc_body);
+    let server = spawn_fake_server(known);
+
+    let mut queue = queue_with_one_segment("enc1@test");
+    queue.files[0].encrypted = true;
+    queue.files[0].encryption = Some("combined".to_string());
+    queue.files[0].password = Some(password.to_string());
+
+    let servers = vec![ServerTier::solo(server_entry(server))];
+    let dir = tempfile::tempdir().unwrap();
+
+    let outcome = download_queue(&queue, &servers, dir.path(), 0, None)
+        .await
+        .unwrap();
+
+    assert!(outcome.missing.is_empty());
+    assert!(outcome.corrupt.is_empty());
+    assert_eq!(outcome.segments.len(), 1);
+
+    let written = tokio::fs::read(dir.path().join("movie.bin")).await.unwrap();
+    assert_eq!(written, data);
+}
+
+#[tokio::test]
+async fn wrong_password_causes_segment_corrupt_and_zero_plaintext() {
+    let data = b"Top secret data".to_vec();
+    let password = "correct-password";
+    let salt: [u8; 16] = *b"K7mX9pL2qR8vN4wZ";
+    let segment_index = 1u32;
+    let enc_body = encrypted_yenc_body("movie.bin", &data, password, &salt, segment_index, None);
+
+    let mut known = HashMap::new();
+    known.insert("enc1@test", enc_body);
+    let server = spawn_fake_server(known);
+
+    let mut queue = queue_with_one_segment("enc1@test");
+    queue.files[0].encrypted = true;
+    queue.files[0].encryption = Some("combined".to_string());
+    queue.files[0].password = Some("wrong-password".to_string());
+
+    let servers = vec![ServerTier::solo(server_entry(server))];
+    let dir = tempfile::tempdir().unwrap();
+
+    let outcome = download_queue(&queue, &servers, dir.path(), 0, None)
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.corrupt.len(), 1);
+    assert_eq!(outcome.corrupt[0].message_id, "enc1@test");
+    assert!(outcome.segments.is_empty());
+    // Zero plaintext bytes written
+    assert!(!dir.path().join("movie.bin").exists());
+}
+
+#[tokio::test]
+async fn wrong_password_fails_over_to_backup_server() {
+    let data = b"Data with server failover".to_vec();
+    let password = "correct-password";
+    let salt: [u8; 16] = *b"K7mX9pL2qR8vN4wZ";
+    let segment_index = 1u32;
+    let enc_body = encrypted_yenc_body("movie.bin", &data, password, &salt, segment_index, None);
+
+    // Primary serves a corrupted article
+    let mut primary_known = HashMap::new();
+    primary_known.insert("enc1@test", b"GARBAGE_DATA_CORRUPT_ARTICLE\r\n".to_vec());
+    let primary = spawn_fake_server(primary_known);
+
+    // Backup serves the valid encrypted article
+    let mut backup_known = HashMap::new();
+    backup_known.insert("enc1@test", enc_body);
+    let backup = spawn_fake_server(backup_known);
+
+    let mut queue = queue_with_one_segment("enc1@test");
+    queue.files[0].encrypted = true;
+    queue.files[0].encryption = Some("combined".to_string());
+    queue.files[0].password = Some(password.to_string());
+
+    let servers = vec![
+        ServerTier::solo(server_entry(primary)),
+        ServerTier::solo(server_entry(backup)),
+    ];
+    let dir = tempfile::tempdir().unwrap();
+
+    let outcome = download_queue(&queue, &servers, dir.path(), 0, None)
+        .await
+        .unwrap();
+
+    assert!(outcome.missing.is_empty());
+    assert!(outcome.corrupt.is_empty());
+    assert_eq!(outcome.segments.len(), 1);
+
+    let written = tokio::fs::read(dir.path().join("movie.bin")).await.unwrap();
+    assert_eq!(written, data);
+}
+
+#[tokio::test]
+async fn malformed_yencryption_is_hard_error() {
+    let data = b"Data with bad header".to_vec();
+    let password = "test-password";
+    let salt: [u8; 16] = *b"K7mX9pL2qR8vN4wZ";
+    let segment_index = 1u32;
+    // Malformed header with invalid cipher
+    let bad_header = "=yencryption cipher=AES-256-GCM salt=4b376d5839704c32715238764e34775a index=00000001 tag=0123456789abcdef0123456789abcdef";
+    let enc_body = encrypted_yenc_body(
+        "movie.bin",
+        &data,
+        password,
+        &salt,
+        segment_index,
+        Some(bad_header),
+    );
+
+    let mut known = HashMap::new();
+    known.insert("enc1@test", enc_body);
+    let server = spawn_fake_server(known);
+
+    let mut queue = queue_with_one_segment("enc1@test");
+    queue.files[0].encrypted = true;
+    queue.files[0].encryption = Some("combined".to_string());
+    queue.files[0].password = Some(password.to_string());
+
+    let servers = vec![ServerTier::solo(server_entry(server))];
+    let dir = tempfile::tempdir().unwrap();
+
+    let res = download_queue(&queue, &servers, dir.path(), 0, None).await;
+    assert!(
+        res.is_err(),
+        "malformed =yencryption must result in hard error"
+    );
 }
