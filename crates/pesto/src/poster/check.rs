@@ -744,7 +744,7 @@ mod recovery;
 mod repost;
 
 pub(crate) use recovery::recover_missing;
-use repost::{is_post_refusal, repost_one};
+pub(crate) use repost::{is_post_refusal, repost_one};
 
 #[cfg(test)]
 mod tests;

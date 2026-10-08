@@ -15,7 +15,7 @@ use crate::yenc;
 
 use super::outcome::PostedSegment;
 use super::persisted_identity;
-use super::result::commit_result;
+use super::result::{commit_result, record_failure};
 use super::shared::Shared;
 use super::task::{PostTask, ReadyArticle, TaskDispatcher};
 /// Per-worker token-bucket rate limiter.
@@ -77,7 +77,10 @@ pub(super) async fn encode_worker(
 
 /// Resume skip / spool / yEnc. `None` means the segment is already done
 /// (skipped or re-queued for STAT of a stored id).
-async fn prepare_ready(shared: &Arc<Shared>, mut task: PostTask) -> Option<ReadyArticle> {
+pub(super) async fn prepare_ready(
+    shared: &Arc<Shared>,
+    mut task: PostTask,
+) -> Option<ReadyArticle> {
     if let Some(resume) = &shared.resume {
         let existing = resume
             .lock()
@@ -334,12 +337,23 @@ async fn prepare_ready(shared: &Arc<Shared>, mut task: PostTask) -> Option<Ready
             ) {
                 Ok(enc) => enc,
                 Err(e) => {
+                    let err_msg = format!("failed to encrypt article segment: {e}");
                     warn!(
                         file = %task.meta.real_name,
                         part = task.part,
                         error = %e,
                         "failed to encrypt article segment"
                     );
+                    let message_id =
+                        generate_message_id(shared.config.message_id_domain.as_deref());
+                    record_failure(shared, &task.meta, &task, message_id, &err_msg);
+                    let raw_bytes = task.data.len() as u64;
+                    shared.release_buffer(task.data);
+                    shared.emit(ProgressEvent::SegmentDone {
+                        file: task.meta.real_name.clone(),
+                        bytes: raw_bytes,
+                        ok: false,
+                    });
                     shared.release_encode_buf(encode_buf);
                     return None;
                 }

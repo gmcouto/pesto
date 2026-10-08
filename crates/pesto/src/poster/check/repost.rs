@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use anyhow::Context;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tracing::warn;
 
@@ -14,7 +15,7 @@ use super::PostedSegment;
 /// Re-read `seg`'s slice from disk, re-encode it, and post it under a fresh
 /// Message-ID. Deliberately never reuses `seg.message_id` — see the module
 /// doc comment for why reposting under a cursed ID is unsafe.
-pub(super) async fn repost_one(
+pub(crate) async fn repost_one(
     config: &Config,
     slot: &mut ConnectionSlot,
     seg: &PostedSegment,
@@ -66,7 +67,7 @@ pub(super) async fn repost_one(
         let mut enc_buf = Vec::new();
         let identity = seg
             .segment_identity
-            .expect("identity must be present for live upload");
+            .context("missing segment identity for encrypted repost")?;
         adapter.encode_article(
             &wire_yenc,
             seg.file_size,
@@ -183,7 +184,7 @@ fn nntp_error_code(err: &anyhow::Error) -> Option<u16> {
 /// True when a repost failed because the server refused the article (441 or
 /// other 4xx except the AUTH 48x class). Connect/timeout/5xx/AUTH 480–489
 /// are Inconclusive.
-pub(super) fn is_post_refusal(err: &anyhow::Error) -> bool {
+pub(crate) fn is_post_refusal(err: &anyhow::Error) -> bool {
     let s = err.to_string();
     if s.contains("authentication rejected by server") {
         return false;

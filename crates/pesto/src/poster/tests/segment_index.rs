@@ -611,3 +611,126 @@ fn failed_task_preserves_immutable_segment_identity() {
     assert_eq!(failed.segment_identity.part_number, 2);
     assert_eq!(failed.segment_identity.segment_index, 99);
 }
+
+fn encrypted_shared(article_size: usize) -> Arc<Shared> {
+    let mut config = dry_run_config();
+    config.article_size = article_size;
+    let post_group = pick_post_group(&config.groups);
+    let session = Arc::new(crate::crypto::EncryptionSession::new("testpass", [1u8; 16]).unwrap());
+    let adapter = Arc::new(crate::crypto::UploadEncryptionAdapter::new(session));
+    Arc::new(Shared {
+        config,
+        servers: Arc::new(vec![]),
+        results: Arc::new(Mutex::new(Vec::new())),
+        failures: Mutex::new(Vec::new()),
+        failed_tasks: Mutex::new(Vec::new()),
+        events: None,
+        cancelled: Arc::new(AtomicBool::new(false)),
+        paused: Arc::new(AtomicBool::new(false)),
+        resume: None,
+        resume_path: None,
+        spool_dir: None,
+        pool: Arc::new(Mutex::new(Vec::new())),
+        encode_pool: Arc::new(Mutex::new(Vec::new())),
+        total_retries: std::sync::atomic::AtomicUsize::new(0),
+        post_group,
+        release_prefix: None,
+        release_from: None,
+        run_id: 0,
+        total_files: 1,
+        release_layout: Arc::new(prepare::ReleaseLayout::from_parts(1, &[(1, 1)]).unwrap()),
+        encryption_adapter: Some(adapter),
+        check_tx: Mutex::new(None),
+    })
+}
+
+#[tokio::test]
+async fn prepare_ready_records_failure_on_encryption_error() {
+    let shared = encrypted_shared(1024);
+    let path = std::path::PathBuf::from("test.bin");
+    let meta = meta_with_name(&path, "test.bin");
+    let id = SegmentIdentity::checked(0, 1, 1, 1).unwrap();
+    let task = PostTask {
+        meta: Arc::new(meta),
+        part: 1,
+        total: 1,
+        offset: 0,
+        data: vec![1, 2, 3],
+        segment_identity: id,
+        subject_name: "test.bin".into(),
+        yenc_name: "bad\0name".into(),
+        from: "tester <t@example.com>".into(),
+        date: (None, None),
+        file_crc32: None,
+    };
+    let ready = super::super::worker::prepare_ready(&shared, task).await;
+    assert!(ready.is_none());
+    let failures = shared.failures.lock().unwrap();
+    assert_eq!(failures.len(), 1);
+    assert!(failures[0].contains("failed to encrypt article segment"));
+    let failed_tasks = shared.failed_tasks.lock().unwrap();
+    assert_eq!(failed_tasks.len(), 1);
+    assert_eq!(failed_tasks[0].part, 1);
+    assert_eq!(failed_tasks[0].segment_identity, id);
+}
+
+#[tokio::test]
+async fn repost_one_missing_segment_identity_returns_error_instead_of_panicking() {
+    let tmp = TempDir::new().unwrap();
+    let file_path = tmp.path().join("dummy.bin");
+    tokio::fs::write(&file_path, b"hello world 1234567890")
+        .await
+        .unwrap();
+
+    let mut config = dry_run_config();
+    config.article_size = 100;
+    let server_entry = crate::config::ServerEntry {
+        host: "127.0.0.1".into(),
+        port: 1119,
+        ssl: false,
+        connections: 1,
+        username: None,
+        password: None,
+        retry_delay: 1,
+        timeout: 10,
+        proxy: None,
+    };
+    let mut slots =
+        crate::nntp::pool::ConnectionPool::build(Arc::new(vec![server_entry]), 1).into_slots();
+    let mut slot = slots.pop().unwrap();
+
+    let seg = PostedSegment {
+        file_name: "dummy.bin".into(),
+        file_path: Arc::from(file_path.as_path()),
+        subject_name: Arc::from("dummy.bin"),
+        wire_name: Arc::from("dummy.bin"),
+        wire_yenc_name: Arc::from("dummy.bin"),
+        file_size: 20,
+        part: 1,
+        total: 1,
+        message_id: "<orig@msg>".into(),
+        bytes: 100,
+        from: Arc::from("test <t@x>"),
+        date: (None, None),
+        full_crc32: 0,
+        server_idx: 0,
+        file_index: 1,
+        total_files: 1,
+        segment_identity: None,
+    };
+
+    let session = Arc::new(crate::crypto::EncryptionSession::new("testpass", [1u8; 16]).unwrap());
+    let adapter = crate::crypto::UploadEncryptionAdapter::new(session);
+    let res = super::super::check::repost_one(
+        &config,
+        &mut slot,
+        &seg,
+        &["alt.test".into()],
+        Some(&adapter),
+    )
+    .await;
+
+    assert!(res.is_err());
+    let err_str = res.unwrap_err().to_string();
+    assert!(err_str.contains("missing segment identity for encrypted repost"));
+}
