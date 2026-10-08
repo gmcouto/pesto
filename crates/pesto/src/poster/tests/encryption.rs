@@ -220,3 +220,45 @@ fn control_lines_encrypt_and_decrypt_round_trip() {
             .unwrap();
     assert!(restored_n.starts_with(b"=yend"));
 }
+
+#[test]
+fn unencrypted_run_produces_byte_identical_output_to_baseline() {
+    // Toggle off (no password): the encryption branch in the worker must be a
+    // no-op and the article body must be exactly what pre-T02 pesto produced
+    // — ordinary yEnc through `encode_part_into`, unmodified.
+    let shared = minimal_shared_with(config_with_encryption(None));
+    assert!(shared.encryption.is_none());
+
+    let plaintext: &[u8] = b"the quick brown fox jumps over the lazy dog";
+    let line_len = 16; // fixed small wrap to exercise line-splitting
+    let encoded = yenc::encode_part(
+        "baseline.bin",
+        plaintext.len() as u64,
+        yenc::PartSpec {
+            number: 1,
+            total: 1,
+            offset: 0,
+        },
+        plaintext,
+        line_len,
+        None,
+    );
+
+    // Golden bytes pinned independently of the Rust encoder: derived from the
+    // yEnc draft 1.3 wire format (bytes shifted +42, NUL/LF/CR/'=' escaped as
+    // `=` + value+64, CRLF framing at the fixed 16-byte wrap, `=yend crc32=`
+    // single-part trailer). A change in the unencrypted output is a wire
+    // regression, not something to re-pin casually.
+    const GOLDEN: &[u8] = b"=ybegin line=16 size=43 name=baseline.bin\x0d\x0a\x9e\x92\x8fJ\x9b\x9f\x93\x8d\x95J\x8c\x9c\x99\xa1\x98J\x0d\x0a\x90\x99\xa2J\x94\x9f\x97\x9a\x9dJ\x99\xa0\x8f\x9cJ\x9e\x0d\x0a\x92\x8fJ\x96\x8b\xa4\xa3J\x8e\x99\x91\x0d\x0a=yend size=43 crc32=ce0c5114\x0d\x0a";
+
+    assert_eq!(
+        encoded.body.as_slice(),
+        GOLDEN,
+        "unencrypted (toggle off) article body drifted from the pre-T02 baseline wire format"
+    );
+
+    // And it must decode back to the exact plaintext.
+    let decoded = yenc::decode_part(&encoded.body).unwrap();
+    assert_eq!(decoded.data, plaintext);
+    assert!(decoded.crc_matches());
+}
