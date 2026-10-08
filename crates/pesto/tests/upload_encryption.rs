@@ -278,7 +278,7 @@ fn test_cli_season_consolidation_rejects_encryption() {
 }
 
 #[test]
-fn test_cli_merge_encrypted_nzbs_preserves_encryption() {
+fn test_cli_merge_encrypted_nzbs_rejects_multi_session() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path().join("merge_dir");
     std::fs::create_dir(&dir).unwrap();
@@ -325,23 +325,12 @@ fn test_cli_merge_encrypted_nzbs_preserves_encryption() {
         .output()
         .expect("failed to run pesto");
 
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        output.status.success(),
-        "pesto merge failed: {}",
-        String::from_utf8_lossy(&output.stderr)
+        stderr.contains("refusing to merge encrypted NZBs from multiple upload sessions"),
+        "stderr must contain expected rejection: {stderr}"
     );
-
-    let merged_path = dir.join("Show.S01.nzb");
-    assert!(merged_path.exists());
-    let merged_content = std::fs::read_to_string(&merged_path).unwrap();
-    let parsed = pesto::nzb::parse_encrypted(&merged_content)
-        .expect("merged nzb must be valid encrypted nzb");
-    assert!(parsed.meta.yenc_encrypted);
-    assert_eq!(parsed.meta.password.as_deref(), Some("sharedpass"));
-    assert_eq!(parsed.segments.len(), 2);
-    assert!(parsed.segment_identities.is_none());
-    assert!(!merged_content.contains("segmentIndex="));
-    assert!(merged_content.contains("<meta type=\"yenc_encrypted\">true</meta>"));
 }
 
 #[test]
