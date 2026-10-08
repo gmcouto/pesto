@@ -59,7 +59,8 @@ pub(crate) async fn write(request: ArtifactRequest<'_>) -> Result<Option<PathBuf
         password: config
             .nzb_password
             .clone()
-            .or_else(|| effective_password.map(str::to_string)),
+            .or_else(|| effective_password.map(str::to_string))
+            .or_else(|| config.encrypt_password.clone()),
         category: config.nzb_category.clone(),
         tmdb_id: config.tmdb_id.clone(),
         imdb_id: config.imdb_id.clone(),
