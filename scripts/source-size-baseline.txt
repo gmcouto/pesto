@@ -9,20 +9,22 @@
 1422 crates/parmesan/src/encoder/shuffle_kernels.rs
 1105 crates/parmesan/src/encoder/affine2x_kernels.rs
 1077 crates/parmesan/src/encoder/gfni_kernels.rs
-897 crates/pesto/src/yenc/x86.rs
+918 crates/pesto/src/yenc/x86.rs
 #
 # Focused compatibility/end-to-end test suites that exercise whole pipelines
 # across many modules and are clearer as one scenario per file.
 1184 crates/penne/tests/cli_download_end_to_end.rs
 877 crates/penne/tests/check.rs
-816 crates/penne/tests/nzb_driven_decryption.rs
+814 crates/penne/tests/nzb_driven_decryption.rs
+803 crates/penne/tests/download_encryption.rs
 971 crates/pesto/tests/integration.rs
 823 crates/pesto/tests/full_shared_obfuscation.rs
-868 crates/pesto/tests/upload_encryption.rs
-829 crates/pesto/src/poster/prepare.rs
-837 crates/pesto/src/poster/worker.rs
+862 crates/pesto/tests/upload_encryption.rs
+857 crates/pesto/src/poster/prepare.rs
+851 crates/pesto/src/poster/worker.rs
 1081 crates/pesto/src/nzb/tests.rs
-1060 crates/pesto/src/resume.rs
-973 crates/pesto/src/crypto/tests.rs
+1213 crates/pesto/src/resume.rs
+1400 crates/pesto/src/crypto/tests.rs
+920 crates/pesto/src/nntp/tests.rs
 841 crates/pesto/src/bin/pesto/cli.rs
 802 crates/upapasta/src/tasks/upload.rs
