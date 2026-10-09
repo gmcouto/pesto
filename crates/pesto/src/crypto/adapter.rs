@@ -470,22 +470,35 @@ impl DownloadDecryptionAdapter {
         let (yenc_params, clean_yenc) = extract_and_remove_yencryption(&restored_yenc)?;
 
         // Dual-Bootstrap Agreement
-        ensure!(
-            yenc_params.salt == session.salt(),
-            "DUAL_SALT_MISMATCH: salt mismatch between control line 1 and =yencryption header"
-        );
-        ensure!(
-            yenc_params.segment_index == segment_index,
-            "DUAL_INDEX_MISMATCH: segmentIndex mismatch between control line 1 ({}) and =yencryption header ({})",
-            segment_index,
-            yenc_params.segment_index
-        );
+        if yenc_params.salt != session.salt() {
+            bail!(attach_crypto_error_kind(
+                anyhow::anyhow!(
+                    "DUAL_SALT_MISMATCH: salt mismatch between control line 1 and =yencryption header"
+                ),
+                CryptoErrorKind::ProviderFailover,
+            ));
+        }
+        if yenc_params.segment_index != segment_index {
+            bail!(attach_crypto_error_kind(
+                anyhow::anyhow!(
+                    "DUAL_INDEX_MISMATCH: segmentIndex mismatch between control line 1 ({}) and =yencryption header ({})",
+                    segment_index,
+                    yenc_params.segment_index
+                ),
+                CryptoErrorKind::ProviderFailover,
+            ));
+        }
 
         // Decode yEnc ciphertext
         let mut decoded = yenc::decode_part(&clean_yenc)?;
 
         // Ciphertext CRC check before AEAD decryption
-        ensure!(decoded.crc_matches(), "ciphertext CRC mismatch");
+        if !decoded.crc_matches() {
+            bail!(attach_crypto_error_kind(
+                anyhow::anyhow!("ciphertext CRC mismatch"),
+                CryptoErrorKind::ProviderFailover,
+            ));
+        }
 
         // Authenticate and decrypt body ciphertext with Zero-Output Guarantee.
         // Typed at origin: Poly1305 failure is provider corruption (retriable).
