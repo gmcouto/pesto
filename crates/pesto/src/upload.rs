@@ -281,11 +281,13 @@ pub async fn run_upload(
 
     // POST failures and Inconclusive always refuse the NZB.
     // `--allow-incomplete-nzb` unblocks only MissingConfirmed.
+    // Encrypted uploads strictly refuse incomplete NZBs (validate_segments in writer.rs).
+    let allow_incomplete = config.allow_incomplete_nzb && config.encrypt_password.is_none();
     let write_blocked = crate::poster::nzb_write_decision(
         has_post_failures,
         has_confirmed_missing,
         has_inconclusive,
-        config.allow_incomplete_nzb,
+        allow_incomplete,
     ) == crate::poster::NzbWriteDecision::Refuse;
 
     // ── Write NZB ────────────────────────────────────────────────────────────

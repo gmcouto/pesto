@@ -31,18 +31,21 @@ pub fn validate_groups(groups: &[String]) -> Result<()> {
 
 /// Validate encryption password configuration.
 ///
-/// - Rejects empty password strings.
+/// - Rejects empty or whitespace-only password strings.
 /// - Rejects conflicting passwords if both `encrypt_password` and `nzb_password` are specified and differ.
 pub fn validate_encryption(
     encrypt_password: Option<&str>,
     nzb_password: Option<&str>,
 ) -> Result<()> {
     if let Some(pw) = encrypt_password {
-        if pw.is_empty() {
+        if pw.trim().is_empty() {
             bail!("encryption password cannot be empty");
         }
         if let Some(nzb_pw) = nzb_password {
-            if !nzb_pw.is_empty() && nzb_pw != pw {
+            if nzb_pw.trim().is_empty() {
+                bail!("nzb password cannot be empty");
+            }
+            if nzb_pw != pw {
                 bail!("conflicting passwords: --encrypt-password and --nzb-password cannot differ");
             }
         }
@@ -57,6 +60,13 @@ mod tests {
     #[test]
     fn encryption_validation_empty_password_rejected() {
         assert!(validate_encryption(Some(""), None).is_err());
+    }
+
+    #[test]
+    fn encryption_validation_whitespace_only_password_rejected() {
+        assert!(validate_encryption(Some("   "), None).is_err());
+        assert!(validate_encryption(Some("\t\n"), None).is_err());
+        assert!(validate_encryption(Some("secret"), Some("   ")).is_err());
     }
 
     #[test]

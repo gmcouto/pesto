@@ -328,7 +328,7 @@ fn test_cli_merge_encrypted_nzbs_rejects_multi_session() {
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("refusing to merge encrypted NZBs from multiple upload sessions"),
+        stderr.contains("merging encrypted NZBs is not supported"),
         "stderr must contain expected rejection: {stderr}"
     );
 }
@@ -376,7 +376,7 @@ fn test_cli_merge_encrypted_nzbs_rejects_conflicts() {
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("cannot merge encrypted NZBs with duplicate Message-IDs"),
+        stderr.contains("merging encrypted NZBs is not supported"),
         "stderr must contain expected rejection: {stderr}"
     );
 }
