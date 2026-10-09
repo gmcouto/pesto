@@ -1046,7 +1046,10 @@ fn generate_rejects_incomplete_segment_set_for_identity_bearing_file() {
     s1.file_index = 1;
     s1.total_files = 1;
     s1.segment_identity = SegmentIdentity::checked(0, 1, 1, 1);
-    let m = NzbMeta { yenc_encrypted: true, ..no_meta() };
+    let m = NzbMeta {
+        yenc_encrypted: true,
+        ..no_meta()
+    };
     let res = generate(&["alt.test".into()], &[s1], &m, ObfuscateMode::None);
     assert!(res.is_err());
     let err = res.unwrap_err().to_string();

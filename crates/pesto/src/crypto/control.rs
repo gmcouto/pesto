@@ -266,7 +266,8 @@ pub fn decrypt_yenc_control_lines(
     }
 
     let mut trailing_count = 0;
-    while trailing_count < lines.len() && lines[lines.len() - 1 - trailing_count].content.is_empty() {
+    while trailing_count < lines.len() && lines[lines.len() - 1 - trailing_count].content.is_empty()
+    {
         trailing_count += 1;
     }
     let (active_lines, trailing_blanks) = lines.split_at(lines.len() - trailing_count);
@@ -312,7 +313,12 @@ pub fn decrypt_yenc_control_lines(
     //   (neither the expected `=ypart`/`=yencryption`) is a corruption
     //   case — fail closed.
     let mut in_header = true;
-    for (i, line) in active_lines.iter().enumerate().take(n.saturating_sub(1)).skip(1) {
+    for (i, line) in active_lines
+        .iter()
+        .enumerate()
+        .take(n.saturating_sub(1))
+        .skip(1)
+    {
         let line_index = (i + 1) as u32;
         if in_header {
             let tweak = session.derive_control_tweak(segment_index, line_index);
@@ -395,7 +401,8 @@ mod tests {
         let encrypted = encrypt_yenc_control_lines(&session, segment_index, block).unwrap();
         let mut with_trailing = encrypted.clone();
         with_trailing.extend_from_slice(b"\r\n\r\n");
-        let decrypted = decrypt_yenc_control_lines(&session, segment_index, &with_trailing).unwrap();
+        let decrypted =
+            decrypt_yenc_control_lines(&session, segment_index, &with_trailing).unwrap();
         assert!(decrypted.starts_with(b"=ybegin"));
         assert!(decrypted.ends_with(b"\r\n\r\n"));
     }
