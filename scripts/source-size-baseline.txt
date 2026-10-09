@@ -22,7 +22,7 @@
 862 crates/pesto/tests/upload_encryption.rs
 857 crates/pesto/src/poster/prepare.rs
 851 crates/pesto/src/poster/worker.rs
-1081 crates/pesto/src/nzb/tests.rs
+1084 crates/pesto/src/nzb/tests.rs
 1213 crates/pesto/src/resume.rs
 1400 crates/pesto/src/crypto/tests.rs
 920 crates/pesto/src/nntp/tests.rs

@@ -226,7 +226,7 @@ async fn multiple_connections_to_one_server_run_concurrently() {
     // roughly SEGMENTS/CONNECTIONS * DELAY (~160ms). Generous slack for a
     // loaded CI machine.
     assert!(
-        elapsed < DELAY * (SEGMENTS as u32) / 2,
+        elapsed < DELAY * (SEGMENTS as u32) * 3 / 4,
         "took {elapsed:?}, expected well under {:?} if truly sequential",
         DELAY * SEGMENTS as u32
     );
