@@ -57,52 +57,28 @@ impl UploadEncryptionAdapter {
             body,
         );
 
-        // Format =yencryption control line
-        let mut hex_salt = String::with_capacity(32);
-        for b in &self.session.salt() {
-            use std::fmt::Write;
-            write!(&mut hex_salt, "{:02x}", b).unwrap();
-        }
-        let mut hex_tag = String::with_capacity(32);
-        for b in &tag {
-            use std::fmt::Write;
-            write!(&mut hex_tag, "{:02x}", b).unwrap();
-        }
-        let yenc_line = format!(
-            "=yencryption cipher=XChaCha20-Poly1305 salt={} index={:08x} tag={}\r\n",
-            hex_salt, identity.segment_index, hex_tag
-        );
-
-        // Insert =yencryption after =ypart (if multipart) or after =ybegin (if single-part)
-        let insertion_idx = if spec.total > 1 {
-            let ypart_rel = encoded
-                .body
-                .windows(7)
-                .position(|w| w == b"\n=ypart")
-                .context("missing =ypart line")?;
-            let ypart_pos = ypart_rel + 1;
-            let nl_pos = encoded.body[ypart_pos..]
-                .iter()
-                .position(|&b| b == b'\n')
-                .context("missing newline after =ypart")?;
-            ypart_pos + nl_pos + 1
-        } else {
-            let nl_pos = encoded
-                .body
-                .iter()
-                .position(|&b| b == b'\n')
-                .context("missing newline after =ybegin")?;
-            nl_pos + 1
-        };
-
-        let mut with_yenc = Vec::with_capacity(encoded.body.len() + yenc_line.len());
-        with_yenc.extend_from_slice(&encoded.body[..insertion_idx]);
-        with_yenc.extend_from_slice(yenc_line.as_bytes());
-        with_yenc.extend_from_slice(&encoded.body[insertion_idx..]);
+        // Format and insert the =yencryption control line at the codec seam
+        // (`yenc::insert_yencryption_line`): after =ypart (multipart) or
+        // after =ybegin (single-part). A multipart body missing =ypart fails
+        // with the typed `MISSING_YPART_LINE` error instead of a generic
+        // context message.
+        let salt = self.session.salt();
+        yenc::insert_yencryption_line(
+            &mut encoded.body,
+            &salt,
+            &tag,
+            identity.segment_index,
+            spec.total > 1,
+        )
+        // Keep `MissingYPartLineError` as the downcastable error-chain root.
+        .map_err(anyhow::Error::new)?;
 
         // Encrypt control lines using FF1
-        let wire_body =
-            control::encrypt_yenc_control_lines(&self.session, identity.segment_index, &with_yenc)?;
+        let wire_body = control::encrypt_yenc_control_lines(
+            &self.session,
+            identity.segment_index,
+            &encoded.body,
+        )?;
 
         encoded.body = wire_body;
         Ok(encoded)
@@ -248,6 +224,23 @@ pub fn parse_yencryption_line(line: &[u8]) -> Result<YEncryptionParams> {
         .map_err(|_| anyhow::anyhow!("INVALID_INDEX_HEX: failed to parse index hex"))?;
     if segment_index == 0 {
         bail!("ZERO_SEGMENT_INDEX: segment index cannot be zero");
+    }
+    // CR-02 (Control Std §4/§8; Body Std §4): an index whose big-endian
+    // encoding contains 0x0A (LF) or 0x0D (CR) would have split a control
+    // line on the wire — reject it here too so the gap cannot resurface if
+    // body-only mode is ever added (combined mode already rejects it at the
+    // Line-1 bootstrap, `extract_bootstrap_from_line1`).
+    if segment_index
+        .to_be_bytes()
+        .iter()
+        .any(|&b| b == 0x0A || b == 0x0D)
+    {
+        return Err(attach_crypto_error_kind(
+            anyhow::anyhow!(
+                "FORBIDDEN_SEGMENT_INDEX_BYTE: segment index bytes contain 0x0A or 0x0D"
+            ),
+            CryptoErrorKind::ProviderFailover,
+        ));
     }
 
     // Token 4 must be tag=
@@ -516,8 +509,20 @@ impl DownloadDecryptionAdapter {
             )
         })?;
 
-        // Zero-output guarantee: clear ciphertext CRC metadata and replace data with authenticated plaintext
-        decoded.part_crc32 = None;
+        // Zero-output guarantee: replace data with authenticated plaintext.
+        // CRC normalization — recompute over the authenticated plaintext (Body
+        // Standard §10 permits clear OR recompute; recompute preserves the
+        // downstream per-part verification that clearing would drop). The
+        // plaintext here is post-Poly1305-auth, so the CRC describes verified
+        // data. The wire `crc32=`/`pcrc32=` values cover ciphertext and are
+        // discarded; the whole-file CRC cannot be derived from a single
+        // segment, so `file_crc32` stays cleared and verification folds part
+        // CRCs via `crc32_combine` at assembly time.
+        decoded.part_crc32 = {
+            let mut crc = yenc::Crc32::new();
+            crc.update(&plaintext);
+            Some(crc.finalize())
+        };
         decoded.file_crc32 = None;
         decoded.data = plaintext;
 

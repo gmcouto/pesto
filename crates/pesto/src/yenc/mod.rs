@@ -439,3 +439,79 @@ pub fn encode(out: &mut Vec<u8>, data: &[u8], line_len: usize) -> u32 {
     scalar::encode_scalar(out, data, line_len);
     crc
 }
+
+// --- `=yencryption` control-line generation (Body Encryption Standard v1.2 §4) ---
+
+/// Error returned by [`insert_yencryption_line`] when the target yEnc body
+/// lacks the control-line framing the `=yencryption` line must be placed
+/// against (`=ypart` for a multipart article, a terminated `=ybegin`
+/// otherwise).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MissingYPartLineError;
+
+impl std::fmt::Display for MissingYPartLineError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(
+            "MISSING_YPART_LINE: yEnc body lacks the =ypart/=ybegin framing \
+             the =yencryption line must follow",
+        )
+    }
+}
+
+impl std::error::Error for MissingYPartLineError {}
+
+/// Build the canonical `=yencryption` control line (Body Encryption Standard
+/// v1.2 §4, exactly 128 bytes + `\r\n`) and insert it into an already encoded
+/// yEnc article body: immediately after `=ypart` for a multipart article, or
+/// after `=ybegin` for a single-part one. This is the codec-level seam for
+/// encryption control-line generation — callers never byte-search and splice
+/// the line themselves, so a structurally invalid yEnc body (a multipart
+/// article with no `=ypart` line) fails with [`MissingYPartLineError`] instead
+/// of producing a silently misplaced header.
+///
+/// Runs before FF1 control-line encryption, which encrypts the whole control
+/// block (including this line) afterwards.
+pub fn insert_yencryption_line(
+    body: &mut Vec<u8>,
+    salt: &[u8; 16],
+    tag: &[u8; 16],
+    segment_index: u32,
+    multipart: bool,
+) -> Result<(), MissingYPartLineError> {
+    use std::fmt::Write;
+    let mut line = String::with_capacity(130);
+    line.push_str("=yencryption cipher=XChaCha20-Poly1305 salt=");
+    for b in salt {
+        write!(&mut line, "{b:02x}").unwrap();
+    }
+    write!(&mut line, " index={segment_index:08x} tag=").unwrap();
+    for b in tag {
+        write!(&mut line, "{b:02x}").unwrap();
+    }
+    line.push_str("\r\n");
+
+    let insertion_idx = if multipart {
+        let ypart_rel = body
+            .windows(7)
+            .position(|w| w == b"\n=ypart")
+            .ok_or(MissingYPartLineError)?;
+        let ypart_pos = ypart_rel + 1;
+        let nl_pos = body[ypart_pos..]
+            .iter()
+            .position(|&b| b == b'\n')
+            .ok_or(MissingYPartLineError)?;
+        ypart_pos + nl_pos + 1
+    } else {
+        body.iter()
+            .position(|&b| b == b'\n')
+            .map(|nl_pos| nl_pos + 1)
+            .ok_or(MissingYPartLineError)?
+    };
+
+    let mut out = Vec::with_capacity(body.len() + line.len());
+    out.extend_from_slice(&body[..insertion_idx]);
+    out.extend_from_slice(line.as_bytes());
+    out.extend_from_slice(&body[insertion_idx..]);
+    *body = out;
+    Ok(())
+}

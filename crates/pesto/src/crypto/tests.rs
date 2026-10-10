@@ -12,7 +12,7 @@ use super::body::{decrypt_body, encrypt_body};
 use super::control::{self, extract_salt_from_line1, ff1_decrypt_line, ff1_encrypt_line};
 use super::kdf::EncryptionSession;
 use crate::poster::SegmentIdentity;
-use crate::yenc::PartSpec;
+use crate::yenc::{self, PartSpec};
 
 fn hex_decode(s: &str) -> Vec<u8> {
     let s = s.trim();
@@ -870,7 +870,9 @@ fn test_adapter_strict_header_order() {
         .decode_article(&enc_single.body, Some(identity_single.segment_index))
         .expect("single-part decode must succeed");
     assert_eq!(dec_single.data, payload);
-    assert_eq!(dec_single.part_crc32, None);
+    // CRC normalization recomputes part_crc32 over the authenticated plaintext
+    // (Body Standard §10, recompute variant); file_crc32 stays cleared.
+    assert_eq!(dec_single.part_crc32, Some(yenc::crc32(payload)));
     assert_eq!(dec_single.file_crc32, None);
 
     // 2. Multipart article: line 1 = =ybegin, line 2 = =ypart, line 3 = =yencryption
@@ -898,7 +900,7 @@ fn test_adapter_strict_header_order() {
         .decode_article(&enc_multi.body, Some(identity_multi.segment_index))
         .expect("multi-part decode must succeed");
     assert_eq!(dec_multi.data, payload);
-    assert_eq!(dec_multi.part_crc32, None);
+    assert_eq!(dec_multi.part_crc32, Some(yenc::crc32(payload)));
     assert_eq!(dec_multi.file_crc32, None);
 }
 
@@ -936,7 +938,9 @@ fn test_adapter_ciphertext_crc_validation() {
         .decode_article(&enc.body, Some(identity.segment_index))
         .expect("intact article decodes");
     assert_eq!(dec.data, payload);
-    assert_eq!(dec.part_crc32, None);
+    // Recompute variant: part_crc32 now covers the authenticated plaintext
+    // (never the discarded ciphertext wire CRC); file_crc32 stays cleared.
+    assert_eq!(dec.part_crc32, Some(yenc::crc32(payload)));
     assert_eq!(dec.file_crc32, None);
 
     // Tamper with the =yend crc in the wire
@@ -1172,6 +1176,41 @@ fn bootstrap_extraction_rejects_forbidden_segment_index_bytes() {
 }
 
 #[test]
+fn yencryption_line_rejects_forbidden_segment_index_bytes() {
+    // CR-02 (Control Std §4/§8; Body Std §4): `parse_yencryption_line` must
+    // reject an `index=` whose big-endian encoding contains 0x0A/0x0D — same
+    // rule the Line-1 bootstrap enforces — with a PROVIDER_FAILOVER
+    // classification (retriable, matching `extract_bootstrap_from_line1`).
+    for idx in [10u32, 13, 266, 269] {
+        let line = format!(
+            "=yencryption cipher=XChaCha20-Poly1305 salt=1a2b3c4d5e6f7890abcdef1234567890 index={idx:08x} tag=ed70d238067735a20783df5e094ccafa"
+        );
+        assert_eq!(line.len(), 128, "test line for {idx} must be canonical");
+        let err = parse_yencryption_line(line.as_bytes()).unwrap_err();
+        assert!(
+            err.to_string().contains("FORBIDDEN_SEGMENT_INDEX_BYTE"),
+            "index {idx} must be rejected with FORBIDDEN_SEGMENT_INDEX_BYTE, got: {err}"
+        );
+        let kind = crate::crypto::crypto_error_kind_of(&err)
+            .expect("forbidden-byte rejection must carry a typed kind");
+        assert_eq!(
+            crate::crypto::CryptoErrorKind::ProviderFailover,
+            kind,
+            "index {idx} must be classified as retriable provider failover"
+        );
+    }
+    // Neighboring safe indices still parse.
+    for idx in [9u32, 11, 12, 14, 265, 267, 268, 270] {
+        let line = format!(
+            "=yencryption cipher=XChaCha20-Poly1305 salt=1a2b3c4d5e6f7890abcdef1234567890 index={idx:08x} tag=ed70d238067735a20783df5e094ccafa"
+        );
+        let params = parse_yencryption_line(line.as_bytes())
+            .unwrap_or_else(|e| panic!("index {idx} must parse, got: {e}"));
+        assert_eq!(params.segment_index, idx);
+    }
+}
+
+#[test]
 fn yencryption_whitespace_strictness() {
     // T8 (v1.2 Control Std §3): strict single-SP grammar.
     let canonical =
@@ -1357,10 +1396,13 @@ fn manifest_drift_check_vendored_vectors_match_canonical() {
 }
 
 #[test]
-fn encrypted_segments_clear_crc_metadata_regression() {
+fn encrypted_segments_normalize_crc_metadata_regression() {
     // T4 regression (adapter.rs:449-465 precedent): after authentication and
     // decryption, DecodedPart must NOT carry the ciphertext wire CRC into any
-    // verification path — part_crc32 and file_crc32 are None.
+    // verification path — the ciphertext `crc32=`/`pcrc32=` values are
+    // discarded and part_crc32 is RECOMPUTED over the authenticated plaintext
+    // (Body Standard §10, recompute variant); file_crc32 is None (the
+    // whole-file CRC cannot be derived from a single segment).
     let password = "crc-clearing-regression";
     let salt = control::generate_alphabet_salt();
     let session = Arc::new(EncryptionSession::new(password, salt).unwrap());
@@ -1388,9 +1430,10 @@ fn encrypted_segments_clear_crc_metadata_regression() {
     let decoded = DownloadDecryptionAdapter::with_password(password)
         .decode_article(&encoded.body, Some(identity.segment_index))
         .expect("authenticated decode must succeed");
-    assert!(
-        decoded.part_crc32.is_none(),
-        "part_crc32 must be None for encrypted segments (T4)"
+    assert_eq!(
+        decoded.part_crc32,
+        Some(yenc::crc32(payload)),
+        "part_crc32 must be recomputed over the authenticated plaintext (T4)"
     );
     assert!(
         decoded.file_crc32.is_none(),

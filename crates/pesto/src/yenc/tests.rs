@@ -539,3 +539,136 @@ fn encoded_size_matches_large_payload() {
         .collect();
     check_encoded_size(&data, 128);
 }
+
+// --- insert_yencryption_line ---
+
+fn salt_bytes() -> [u8; 16] {
+    [
+        0x1au8, 0x2b, 0x3c, 0x4d, 0x5e, 0x6f, 0x78, 0x90, 0xab, 0xcd, 0xef, 0x12, 0x34, 0x56, 0x78,
+        0x90,
+    ]
+}
+
+fn tag_bytes() -> [u8; 16] {
+    [0xedu8; 16]
+}
+
+#[test]
+fn insert_yencryption_single_part_places_line_after_ybegin() {
+    let mut body = encode_part(
+        "t.bin",
+        4,
+        PartSpec {
+            number: 1,
+            total: 1,
+            offset: 0,
+        },
+        b"test",
+        128,
+        None,
+    )
+    .body;
+
+    insert_yencryption_line(&mut body, &salt_bytes(), &tag_bytes(), 1, false).unwrap();
+
+    // The body is binary past the headers; slice the first two CRLF lines.
+    let first_line_end = body.windows(2).position(|w| w == b"\r\n").unwrap() + 2;
+    let second_line_end = body[first_line_end..]
+        .windows(2)
+        .position(|w| w == b"\r\n")
+        .unwrap()
+        + first_line_end
+        + 2;
+    let ybegin = &body[..first_line_end];
+    let yenc_line = &body[first_line_end..second_line_end];
+    assert!(ybegin.starts_with(b"=ybegin "), "got: {ybegin:?}");
+    assert_eq!(
+        yenc_line,
+        &b"=yencryption cipher=XChaCha20-Poly1305 salt=1a2b3c4d5e6f7890abcdef1234567890 index=00000001 tag=edededededededededededededededed\r\n"[..]
+    );
+    // Canonical line content is exactly 128 bytes + CRLF (Body Std v1.2 §4).
+    assert_eq!(yenc_line.len(), 130);
+}
+
+#[test]
+fn insert_yencryption_multipart_places_line_after_ypart() {
+    let mut body = encode_part(
+        "t.bin",
+        8,
+        PartSpec {
+            number: 2,
+            total: 3,
+            offset: 4,
+        },
+        b"test",
+        128,
+        None,
+    )
+    .body;
+
+    insert_yencryption_line(&mut body, &salt_bytes(), &tag_bytes(), 7, true).unwrap();
+
+    let first_line_end = body.windows(2).position(|w| w == b"\r\n").unwrap() + 2;
+    let second_line_end = body[first_line_end..]
+        .windows(2)
+        .position(|w| w == b"\r\n")
+        .unwrap()
+        + first_line_end
+        + 2;
+    let third_line_end = body[second_line_end..]
+        .windows(2)
+        .position(|w| w == b"\r\n")
+        .unwrap()
+        + second_line_end
+        + 2;
+    let ybegin = &body[..first_line_end];
+    let ypart = &body[first_line_end..second_line_end];
+    let yenc_line = &body[second_line_end..third_line_end];
+    assert!(ybegin.starts_with(b"=ybegin part=2 "), "got: {ybegin:?}");
+    assert!(ypart.starts_with(b"=ypart begin=5 "), "got: {ypart:?}");
+    assert!(
+        yenc_line.starts_with(b"=yencryption cipher=XChaCha20-Poly1305 salt=")
+            && yenc_line.ends_with(b"index=00000007 tag=edededededededededededededededed\r\n"),
+        "got: {yenc_line:?}"
+    );
+}
+
+#[test]
+fn insert_yencryption_multipart_missing_ypart_is_typed_error() {
+    // A "multipart" body that actually contains no =ypart line: the codec
+    // seam must fail with the typed MISSING_YPART_LINE error instead of
+    // silently inserting a misplaced (or missing) =yencryption header.
+    let mut body = encode_part(
+        "t.bin",
+        4,
+        PartSpec {
+            number: 1,
+            total: 1,
+            offset: 0,
+        },
+        b"test",
+        128,
+        None,
+    )
+    .body;
+
+    let err = insert_yencryption_line(&mut body, &salt_bytes(), &tag_bytes(), 1, true)
+        .expect_err("multipart insertion without =ypart must fail");
+    assert_eq!(err, MissingYPartLineError);
+    assert!(err.to_string().contains("MISSING_YPART_LINE"));
+    // The body must be untouched on failure.
+    let restored = encode_part(
+        "t.bin",
+        4,
+        PartSpec {
+            number: 1,
+            total: 1,
+            offset: 0,
+        },
+        b"test",
+        128,
+        None,
+    )
+    .body;
+    assert_eq!(body, restored);
+}

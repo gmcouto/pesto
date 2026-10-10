@@ -291,7 +291,18 @@ pub fn decrypt_yenc_control_lines(
     let tweak1 = session.derive_control_tweak(segment_index, 1);
     let pt1 = ff1_decrypt_line(session.control_key(), &tweak1, ct1)?;
     if !pt1.starts_with(b"=ybegin") {
-        bail!("CONTROL_LINE_DECRYPT_FAILURE: line 1 decrypted text does not start with =ybegin");
+        // Wrong-password signature: FF1 is a permutation, so a Line 1
+        // encrypted under a different password still decrypts "successfully"
+        // — to pseudorandom garbage that cannot be `=ybegin`. Typed at origin
+        // as PROVIDER_FAILOVER (retriable) so classification is explicit
+        // rather than an unclassified-defaults-to-retriable routing accident
+        // in the failover router.
+        return Err(attach_crypto_error_kind(
+            anyhow::anyhow!(
+                "CONTROL_LINE_DECRYPT_FAILURE: line 1 decrypted text does not start with =ybegin"
+            ),
+            CryptoErrorKind::ProviderFailover,
+        ));
     }
     out.extend_from_slice(&pt1);
     out.extend_from_slice(line1.ending);
