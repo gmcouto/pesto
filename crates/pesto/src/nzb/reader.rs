@@ -128,6 +128,11 @@ pub fn parse(content: &str) -> anyhow::Result<ParsedNzb> {
                 "password" => meta.password = Some(value),
                 "category" => meta.category = Some(value),
                 "encryption" => meta.encryption = Some(value),
+                "yenc_encrypted" => {
+                    if meta.encryption.is_none() && value.eq_ignore_ascii_case("true") {
+                        meta.encryption = Some("combined".to_string());
+                    }
+                }
                 "tag" => meta.tags.push(value),
                 _ => {}
             }

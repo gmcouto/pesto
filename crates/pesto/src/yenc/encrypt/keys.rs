@@ -12,6 +12,9 @@
 use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
+
 use super::keys_argon2::argon2id;
 
 type HmacSha256 = Hmac<Sha256>;
@@ -27,11 +30,27 @@ fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
 /// (Argon2id(password, salt, time=1, memory=64MB, threads=4)).
 pub type SessionKey = [u8; 32];
 
+static KEY_CACHE: OnceLock<Mutex<HashMap<([u8; SALT_LEN], Vec<u8>), SessionKey>>> =
+    OnceLock::new();
+
 /// Derive the shared session key: Argon2id(password, salt) with the normative
 /// parameters (body standard §4 step b; control standard §4 step b — both
 /// use time=1, memory=64MB, threads=4, 256-bit output).
+/// Thread-safely caches by (salt, password) to avoid repeated expensive KDF
+/// evaluation across segments of the same session.
 pub fn derive_session_key(password: &[u8], salt: &[u8; SALT_LEN]) -> SessionKey {
-    argon2id(password, salt)
+    let cache = KEY_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let cache_key = (*salt, password.to_vec());
+    if let Ok(guard) = cache.lock() {
+        if let Some(&key) = guard.get(&cache_key) {
+            return key;
+        }
+    }
+    let key = argon2id(password, salt);
+    if let Ok(mut guard) = cache.lock() {
+        guard.insert(cache_key, key);
+    }
+    key
 }
 
 /// Salt byte length (16 raw bytes, hex-encoded as 32 chars on the wire).

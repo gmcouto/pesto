@@ -59,6 +59,7 @@ pub fn generate(
         // tag for encrypted segments (body standard v1.2, NZB metadata
         // section).
         ("encryption", meta.encryption.as_deref()),
+        ("yenc_encrypted", if meta.encryption.is_some() { Some("true") } else { None }),
     ]
     .into_iter()
     .filter_map(|(k, v)| v.map(|s| (k, s)))
