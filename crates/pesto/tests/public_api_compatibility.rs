@@ -46,7 +46,7 @@ fn test_posted_segment_public_api_construction() {
         server_idx: 0,
         file_index: 1,
         total_files: 1,
-        segment_identity: SegmentIdentity::checked(0, 1, 1, 1),
+        segment_identity: SegmentIdentity::new(1, 1, 1, 1),
     };
 
     assert_eq!(seg.file_name, "test.bin");
@@ -76,7 +76,7 @@ fn test_failed_task_public_api_construction() {
         full_crc32: 0x12345678,
         file_index: 1,
         total_files: 1,
-        segment_identity: SegmentIdentity::checked(0, 1, 1, 1).unwrap(),
+        segment_identity: SegmentIdentity::new(1, 1, 1, 1).unwrap(),
     };
 
     assert_eq!(task.file_name, "test.bin");

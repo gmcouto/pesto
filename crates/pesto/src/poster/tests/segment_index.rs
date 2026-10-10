@@ -88,7 +88,7 @@ fn release_layout_planned_par2_index_and_volumes_follow_data_files() {
     // PAR2 volume 2 (ordinal 5): prefix 8, segments 9..=12
     assert_eq!(layout.entry(5).unwrap().prefix_parts, 8);
     assert_eq!(layout.segment_identity(5, 1).unwrap().segment_index, 9);
-    // CR-02: ranks 10 and 12 map through nth_safe_segment_index, skipping
+    // Index framing rule: ranks 10 and 12 map through nth_safe_segment_index, skipping
     // forbidden indices 10 and 13 (assigned 11 and 14).
     assert_eq!(layout.segment_identity(5, 2).unwrap().segment_index, 11);
     assert_eq!(layout.segment_identity(5, 4).unwrap().segment_index, 14);
@@ -112,13 +112,13 @@ fn release_layout_fails_on_cumulative_overflow_or_u32_max() {
 
 #[test]
 fn release_layout_safe_index_overflow_fails_cleanly() {
-    // CR-02: a release whose highest rank's safe index would exceed u32::MAX
+    // Index framing rule: a release whose highest rank's safe index would exceed u32::MAX
     // fails layout construction with an error (never a panic) even though the
     // raw cumulative count itself fits u32::MAX.
     let err = ReleaseLayout::from_parts(1, &[(1, u32::MAX)]).unwrap_err();
     assert!(
         err.to_string().contains("safe segment-index capacity"),
-        "expected CR-02 capacity error, got: {err}"
+        "expected safe-index capacity error, got: {err}"
     );
 }
 
@@ -160,7 +160,7 @@ fn posted_segment_and_failed_task_carry_planned_identity() {
         file_index: 1,
     });
 
-    let id = SegmentIdentity::checked(0, 1, 1, 1).expect("valid id");
+    let id = SegmentIdentity::new(1, 1, 1, 1).expect("valid id");
     let task = PostTask {
         meta: Arc::clone(&meta),
         part: 1,
@@ -235,12 +235,12 @@ fn posted_segment_and_failed_task_carry_planned_identity() {
 }
 
 #[test]
-fn sorting_post_outcome_preserves_exact_segment_identities() {
+fn sorting_post_outcome_preserves_exact_identities() {
     let dir = TempDir::new().unwrap();
     let file_path = dir.path().join("dummy");
 
-    let id1 = SegmentIdentity::checked(0, 1, 2, 1).unwrap();
-    let id2 = SegmentIdentity::checked(1, 2, 2, 1).unwrap();
+    let id1 = SegmentIdentity::new(1, 2, 1, 1).unwrap();
+    let id2 = SegmentIdentity::new(2, 2, 1, 2).unwrap();
 
     let seg1 = PostedSegment {
         file_name: "file_a.bin".into(),
@@ -359,7 +359,7 @@ async fn dry_run_assigns_planned_identity_to_posted_segments() {
 
 #[tokio::test]
 async fn repost_failed_tasks_preserves_exact_identity_and_subject_ordinals() {
-    let id = SegmentIdentity::checked(3, 2, 3, 2).unwrap();
+    let id = SegmentIdentity::new(2, 3, 2, 5).unwrap();
     assert_eq!(id.segment_index, 5);
     assert_eq!(id.file_ordinal, 2);
     assert_eq!(id.part_number, 2);
@@ -473,9 +473,9 @@ fn task_dispatcher_queue_reordering_preserves_segment_identity() {
         release_ordinal: 2,
     });
 
-    let id1 = SegmentIdentity::explicit(1, 2, 1, 1).unwrap();
-    let id2 = SegmentIdentity::explicit(1, 2, 2, 2).unwrap();
-    let id3 = SegmentIdentity::explicit(2, 2, 1, 3).unwrap();
+    let id1 = SegmentIdentity::new(1, 2, 1, 1).unwrap();
+    let id2 = SegmentIdentity::new(1, 2, 2, 2).unwrap();
+    let id3 = SegmentIdentity::new(2, 2, 1, 3).unwrap();
 
     let task1 = PostTask {
         meta: meta1.clone(),
@@ -551,7 +551,7 @@ async fn spool_storage_and_recovery_preserves_segment_identity_and_salt() {
     let tmp = tempfile::tempdir().unwrap();
     let spool_dir = tmp.path().join("spool");
 
-    let id = SegmentIdentity::explicit(1, 2, 1, 42).unwrap();
+    let id = SegmentIdentity::new(1, 2, 1, 42).unwrap();
     let salt = [7u8; 16];
     let meta = crate::spool::SpoolMetadata {
         wire_identity: None,
@@ -587,7 +587,7 @@ async fn spool_storage_and_recovery_preserves_segment_identity_and_salt() {
 
 #[test]
 fn failed_task_preserves_immutable_segment_identity() {
-    let id = SegmentIdentity::explicit(3, 5, 2, 99).unwrap();
+    let id = SegmentIdentity::new(3, 5, 2, 99).unwrap();
     let failed = FailedTask {
         file_name: "video.mkv".into(),
         client_path: "video.mkv".into(),
@@ -649,7 +649,7 @@ async fn prepare_ready_records_failure_on_encryption_error() {
     let shared = encrypted_shared(1024);
     let path = std::path::PathBuf::from("test.bin");
     let meta = meta_with_name(&path, "test.bin");
-    let id = SegmentIdentity::checked(0, 1, 1, 1).unwrap();
+    let id = SegmentIdentity::new(1, 1, 1, 1).unwrap();
     let task = PostTask {
         meta: Arc::new(meta),
         part: 1,

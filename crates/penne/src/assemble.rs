@@ -347,7 +347,6 @@ mod tests {
                     message_id: format!("id{p}@test"),
                     part: p,
                     bytes: 0,
-                    segment_index: None,
                 })
                 .collect(),
         }

@@ -418,13 +418,14 @@ pesto --obfuscate=full --password=MySecret42 ./MyShow.S01/
 
 ## Encryption (yEnc body & control lines)
 
-Pesto supports opt-in yEnc body and control-line encryption according to the v1.1
-Self-Describing Article Bootstrap Standard. Article bodies are encrypted with
+Pesto supports opt-in yEnc body and control-line encryption according to the
+yEnc Body and Control Lines Encryption Standards v1.2. Article bodies are encrypted with
 XChaCha20-Poly1305 before yEnc encoding, and yEnc control lines (`=ybegin`, `=ypart`,
 `=yend`, `=yencryption`) are encrypted using Radix 253 NIST SP 800-38G FF1.
 
-Under the v1.1 bootstrap standard, each posted Usenet article is self-describing
-and embeds its salt and monotonic segment index directly into the wire bytes:
+Under the v1.2 standards, each posted Usenet article is self-describing
+and embeds its salt and segment index directly into the wire bytes (indices are
+allocated from 1 upward, skipping any value whose big-endian bytes contain `0x0A`/`0x0D`):
 - A 20-byte bootstrap prefix (`[16-byte raw salt][4-byte uint32_be(segmentIndex)]`)
   is prepended to physical Line 1 (`=ybegin`) before FF1 ciphertext.
 - A canonical 5-token header line (`=yencryption cipher=XChaCha20-Poly1305 salt=<32_hex> index=<8_hex> tag=<32_hex>`)

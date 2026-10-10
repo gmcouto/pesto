@@ -170,7 +170,6 @@ async fn multiple_connections_to_one_server_run_concurrently() {
             message_id: id,
             part: i as u32 + 1,
             bytes: 5,
-            segment_index: None,
         });
     }
     let (addr, _in_flight, peak) = spawn_slow_server(known, DELAY);
@@ -263,7 +262,6 @@ async fn two_pooled_servers_are_drained_concurrently_as_one_tier() {
             message_id: id,
             part: i as u32 + 1,
             bytes: 5,
-            segment_index: None,
         });
     }
 
@@ -339,7 +337,6 @@ async fn progress_events_arrive_while_the_download_is_still_running() {
             message_id: id,
             part: i as u32 + 1,
             bytes: 5,
-            segment_index: None,
         });
     }
     let (addr, _in_flight, _peak) = spawn_slow_server(known, DELAY);
@@ -423,7 +420,6 @@ async fn missing_progress_events_arrive_while_the_download_is_still_running() {
             message_id: format!("seg{i}@test"),
             part: i as u32 + 1,
             bytes: 5,
-            segment_index: None,
         });
     }
     let queue = DownloadQueue {
@@ -507,7 +503,6 @@ async fn a_file_that_finishes_early_is_assembled_before_the_rest_of_the_queue() 
             message_id: id,
             part: i as u32 + 1,
             bytes: 5,
-            segment_index: None,
         });
     }
     let (addr, _in_flight, _peak) = spawn_slow_server(known, DELAY);
@@ -522,7 +517,6 @@ async fn a_file_that_finishes_early_is_assembled_before_the_rest_of_the_queue() 
                     message_id: "fast0@test".to_string(),
                     part: 1,
                     bytes: 5,
-                    segment_index: None,
                 }],
             },
             QueuedFile {

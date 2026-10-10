@@ -550,14 +550,14 @@ higher) run can still use it.
 ### Encrypted releases (yEnc encryption)
 
 Penne and Sugo support downloading releases encrypted with yEnc body and control-line
-encryption (XChaCha20-Poly1305 and Radix 253 FF1) according to the v1.1 Self-Describing
-Article Bootstrap Standard.
+encryption (XChaCha20-Poly1305 and Radix 253 FF1) according to the yEnc Body and Control
+Lines Encryption Standards v1.2.
 
 When an NZB includes `<meta type="yenc_encrypted">true</meta>`, decryption occurs
 automatically using the password embedded in `<meta type="password">`. Penne extracts the
 16-byte salt and unsigned 32-bit segment index directly from the 20-byte Line 1 bootstrap
 prefix, validates dual-bootstrap cross-header agreement against `=yencryption`, and decodes
-the article. Standard NZB 1.1 XML files without custom segment attributes are supported.
+the article. NZB segments are plain NZB 1.1 records; the NZB carries no segment identity.
 
 Transport decryption requires the password to be present in `<meta type="password">`
 within the NZB. The CLI `--password` option is used for downstream archive extraction

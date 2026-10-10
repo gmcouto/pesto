@@ -491,7 +491,7 @@ impl ReleaseLayout {
             if prefix_parts > u64::from(u32::MAX) {
                 bail!("release layout total segments exceeds u32::MAX: {prefix_parts}");
             }
-            // CR-02 safe-index capacity: the CR-02 skip mapping can push the
+            // Safe-index capacity: the index framing rule's skip mapping can push the
             // highest assigned safe index past u32::MAX earlier than the raw
             // cumulative count check above — fail layout construction with an
             // error (never panic) in that case.
@@ -499,7 +499,7 @@ impl ReleaseLayout {
             match nth_safe_segment_index(last_rank) {
                 Some(idx) => idx,
                 None => bail!(
-                    "release layout total segments ({last_rank}) exceed the CR-02 safe \
+                    "release layout total segments ({last_rank}) exceed the safe \
                      segment-index capacity of u32"
                 ),
             };
@@ -555,9 +555,9 @@ impl ReleaseLayout {
     ///
     /// This is the CENTRAL segment-index allocator: the raw 1-based rank
     /// (`prefix_parts + part_number`) is mapped release-wide through
-    /// [`nth_safe_segment_index`], which skips every CR-02-forbidden value
+    /// [`nth_safe_segment_index`], which skips every value forbidden by the index framing rule
     /// (zero, or any index whose big-endian bytes contain `0x0A`/`0x0D` — see
-    /// yEnc Control Lines Encryption Standard §4/§8 producer req 6). Every
+    /// yEnc Body Encryption Standard v1.2 §8). Every
     /// identity consumer (data paths in `producer.rs`/`mod.rs` and the PAR2
     /// path) goes through this method, so all consumers receive safe,
     /// monotonic, injective indices. Identity is finalized here BEFORE any

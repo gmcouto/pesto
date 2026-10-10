@@ -130,7 +130,7 @@ async fn encrypted_nzb_sugo_job_round_trip() {
         total: 1,
         offset: 0,
     };
-    let identity = pesto::poster::SegmentIdentity::checked(0, 1, 1, 1).unwrap();
+    let identity = pesto::poster::SegmentIdentity::new(1, 1, 1, 1).unwrap();
     let mut body = Vec::new();
     let encoded = adapter
         .encode_article(
@@ -233,7 +233,7 @@ async fn encrypted_nzb_sugo_tampered_job_fails_cleanly() {
         total: 1,
         offset: 0,
     };
-    let identity = pesto::poster::SegmentIdentity::checked(0, 1, 1, 1).unwrap();
+    let identity = pesto::poster::SegmentIdentity::new(1, 1, 1, 1).unwrap();
     let mut body = Vec::new();
     let encoded = adapter
         .encode_article(
@@ -355,7 +355,7 @@ async fn test_staged_encrypted_nzb_persistence_and_restart() {
         total: 1,
         offset: 0,
     };
-    let identity = pesto::poster::SegmentIdentity::explicit(0, 0, 1, 77).unwrap();
+    let identity = pesto::poster::SegmentIdentity::new(0, 0, 1, 77).unwrap();
     let mut body = Vec::new();
     let encoded = adapter
         .encode_article(

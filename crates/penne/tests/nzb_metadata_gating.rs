@@ -1,4 +1,4 @@
-//! T10 integration coverage: fail-closed gating on NZB encryption provenance
+//! Integration coverage: fail-closed gating on NZB encryption provenance
 //! metadata (Body Encryption Standard v1.2 §8).
 //!
 //! A declared-encrypted NZB whose `yenc_version`/`yenc_cipher` metadata names
@@ -36,7 +36,7 @@ fn gated_nzb_xml(version_tag: &str, cipher_tag: &str) -> String {
 <!DOCTYPE nzb PUBLIC "-//newzBin//DTD NZB 1.1//EN" "http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd">
 <nzb xmlns="http://www.newzbin.com/DTD/2003/nzb">
   <head>
-    <meta type="password">t10-gating-password</meta>
+    <meta type="password">gating-password</meta>
     <meta type="yenc_encrypted">true</meta>
     {version_tag}
     {cipher_tag}
@@ -55,9 +55,9 @@ fn valid_article(password: &str) -> Vec<u8> {
     let salt = pesto::crypto::control::generate_alphabet_salt();
     let session = Arc::new(EncryptionSession::new(password, salt).unwrap());
     let uploader = UploadEncryptionAdapter::new(session);
-    let identity = SegmentIdentity::checked(0, 1, 1, 1)
-        .expect("prefix 0 + ordinal 1 + part 1 must form a valid identity");
-    let payload = b"T10 gating payload that must never reach disk";
+    let identity = SegmentIdentity::new(1, 1, 1, 1)
+        .expect("file 1/1, part 1, index 1 must form a valid identity");
+    let payload = b"Gating payload that must never reach disk";
     let mut encoded_body = Vec::new();
     let encoded = uploader
         .encode_article(
@@ -79,7 +79,7 @@ fn valid_article(password: &str) -> Vec<u8> {
 }
 
 /// Run the penne NZB-load path for an NZB whose `yenc_version`/`yenc_cipher`
-/// metadata is expected to fail the reader's T10 gate, and assert the
+/// metadata is expected to fail the reader's metadata gate, and assert the
 /// failure is terminal `MetadataValidation`. The mock server exists to prove
 /// the gate fires before any network fetch could matter.
 async fn assert_gated_download_rejected(
@@ -87,7 +87,7 @@ async fn assert_gated_download_rejected(
     cipher_tag: &str,
     dest: &std::path::Path,
 ) {
-    let password = "t10-gating-password";
+    let password = "gating-password";
     let mut known = HashMap::new();
     known.insert(
         "gated-msg-01@example.com".to_string(),
@@ -100,7 +100,7 @@ async fn assert_gated_download_rejected(
 
     // The gate is the NZB reader itself: loading fails closed before any
     // queue, decryptor, or NNTP connection exists.
-    let err = load(nzb_file.path()).expect_err("unsupported metadata must fail the T10 gate");
+    let err = load(nzb_file.path()).expect_err("unsupported metadata must fail the metadata gate");
     let kind = crypto_error_kind_of(&err).expect("gate failure must carry a typed kind");
     assert_eq!(
         CryptoErrorKind::MetadataValidation,
@@ -153,7 +153,7 @@ async fn unsupported_yenc_cipher_fails_as_metadata_validation_releasing_no_plain
 async fn supported_metadata_passes_the_gate_and_downloads() {
     // Control: the same harness with supported metadata downloads the
     // plaintext normally (the gate fires on unsupported values only).
-    let password = "t10-gating-password";
+    let password = "gating-password";
     let mut known = HashMap::new();
     known.insert(
         "gated-msg-01@example.com".to_string(),
@@ -192,7 +192,7 @@ async fn supported_metadata_passes_the_gate_and_downloads() {
     let disk = std::fs::read(dest.path().join("gated.bin")).unwrap();
     assert_eq!(
         disk,
-        b"T10 gating payload that must never reach disk".to_vec(),
+        b"Gating payload that must never reach disk".to_vec(),
         "plaintext must match for the control case"
     );
 }

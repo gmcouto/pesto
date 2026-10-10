@@ -13,6 +13,16 @@ fn hex_decode(s: &str) -> Vec<u8> {
         .collect()
 }
 
+/// Generated segments carry only NZB 1.1 `bytes`/`number` attributes (Body Std v1.2 §8).
+fn assert_plain_segments(xml: &str) {
+    for t in xml.split("<segment ").skip(1) {
+        let tag = &t[..t.find('>').unwrap()];
+        let attrs = tag.matches('=').count();
+        let ok = attrs == 2 && tag.starts_with("bytes=") && tag.contains(" number=");
+        assert!(ok, "non-standard segment: {tag}");
+    }
+}
+
 fn test_vectors_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test-vectors")
 }
@@ -48,7 +58,7 @@ fn make_segment(
 
 #[test]
 fn test_tracer_explicit_segment_index_round_trip() {
-    let identity = SegmentIdentity::explicit(1, 1, 1, 1).expect("valid explicit identity");
+    let identity = SegmentIdentity::new(1, 1, 1, 1).expect("valid explicit identity");
     let segment = make_segment(
         "testfile.bin",
         1,
@@ -69,10 +79,7 @@ fn test_tracer_explicit_segment_index_round_trip() {
     let xml =
         generate(&groups, &[segment], &meta, ObfuscateMode::None).expect("generation must succeed");
 
-    assert!(
-        !xml.contains("segmentIndex="),
-        "XML must NOT contain custom segmentIndex attribute, got:\n{xml}"
-    );
+    assert_plain_segments(&xml);
     assert!(
         xml.contains("<meta type=\"yenc_encrypted\">true</meta>"),
         "XML must contain yenc_encrypted meta element, got:\n{xml}"
@@ -83,15 +90,11 @@ fn test_tracer_explicit_segment_index_round_trip() {
         parsed.meta.yenc_encrypted,
         "parsed meta must be marked encrypted"
     );
-    assert!(
-        parsed.segment_identities.is_none(),
-        "clean NZB 1.1 must have segment_identities: None"
-    );
 
     assert_eq!(parsed.segments.len(), 1);
     assert!(
         parsed.segments[0].segment_identity.is_none(),
-        "clean NZB 1.1 parsed segment must have segment_identity: None"
+        "NZB 1.1 parsed segment must have segment_identity: None"
     );
 }
 
@@ -103,7 +106,7 @@ fn test_conformance_vectors_nzb_segment_identity() {
     let fixture: serde_json::Value = serde_json::from_str(&content).unwrap();
     let vectors = fixture["vectors"].as_array().expect("vectors array");
 
-    assert_eq!(vectors.len(), 33, "expected exactly 33 test vectors");
+    assert_eq!(vectors.len(), 10, "expected exactly 10 test vectors");
     let mut count = 0;
 
     for vec in vectors {
@@ -113,13 +116,10 @@ fn test_conformance_vectors_nzb_segment_identity() {
 
         match category {
             "valid_identity" => {
-                let parsed = parse_encrypted(nzb_xml)
+                assert!(vec["is_encrypted"].as_bool().unwrap());
+                let parsed = parse(nzb_xml)
                     .unwrap_or_else(|e| panic!("vector {id} failed valid parsing: {e}"));
                 assert!(parsed.meta.yenc_encrypted, "vector {id} must be encrypted");
-                assert!(
-                    parsed.segment_identities.is_none(),
-                    "clean NZB 1.1 must have segment_identities: None"
-                );
 
                 let expected_segs = vec["expected_segments"].as_array().unwrap();
                 assert_eq!(
@@ -145,20 +145,6 @@ fn test_conformance_vectors_nzb_segment_identity() {
                     assert!(seg.segment_identity.is_none());
                 }
             }
-            "legacy_attribute_ignored" => {
-                let parsed = parse_encrypted(nzb_xml)
-                    .unwrap_or_else(|e| panic!("vector {id} failed legacy parsing: {e}"));
-                assert!(parsed.meta.yenc_encrypted, "vector {id} must be encrypted");
-                assert!(parsed.segment_identities.is_none());
-                for seg in &parsed.segments {
-                    assert!(seg.segment_identity.is_none());
-                }
-            }
-            "invalid_identity" => {
-                let parsed =
-                    parse(nzb_xml).unwrap_or_else(|e| panic!("vector {id} failed parse: {e}"));
-                assert!(parsed.meta.password.is_some());
-            }
             "unencrypted_compatibility" => {
                 let parsed = parse(nzb_xml)
                     .unwrap_or_else(|e| panic!("vector {id} failed unencrypted parse: {e}"));
@@ -166,10 +152,8 @@ fn test_conformance_vectors_nzb_segment_identity() {
                     !parsed.meta.yenc_encrypted,
                     "vector {id} must not be marked encrypted"
                 );
-                assert!(
-                    parsed.segment_identities.is_none(),
-                    "vector {id} segment_identities must be None"
-                );
+                let expected_segs = vec["expected_segments"].as_array().unwrap();
+                assert_eq!(parsed.segments.len(), expected_segs.len());
                 for seg in &parsed.segments {
                     assert!(
                         seg.segment_identity.is_none(),
@@ -228,7 +212,7 @@ fn test_conformance_vectors_nzb_segment_identity() {
         count += 1;
     }
 
-    assert_eq!(count, 33, "must process exactly 33 vectors");
+    assert_eq!(count, 10, "must process exactly 10 vectors");
 }
 
 #[test]
@@ -251,26 +235,23 @@ fn test_reader_parses_archive_password_nzb_without_segment_identity() {
 
     let parsed = parse(xml).expect("archive password NZB must parse cleanly");
     assert_eq!(parsed.meta.password.as_deref(), Some("rarpassword"));
-    // T3: the legacy `(password && any segmentIndex attribute)` inference
-    // heuristic is deleted — a password-only NZB is NOT encrypted.
+    // A password alone means an archive password — the NZB is NOT encrypted.
     assert!(!parsed.meta.yenc_encrypted);
-    assert!(parsed.segment_identities.is_none());
     assert!(parsed.segments[0].segment_identity.is_none());
 
     // parse_encrypted forces the encrypted flag but still consumes NO
     // identity from anywhere except article bootstraps.
     let forced = parse_encrypted(xml).expect("forced encryption provenance is the caller's choice");
     assert!(forced.meta.yenc_encrypted);
-    assert!(forced.segment_identities.is_none());
     for seg in &forced.segments {
         assert!(seg.segment_identity.is_none());
     }
 }
 
 #[test]
-fn test_nzb_writer_emits_segment_indices() {
-    let id1 = SegmentIdentity::explicit(1, 2, 1, 1).unwrap();
-    let id2 = SegmentIdentity::explicit(2, 2, 1, 2).unwrap();
+fn test_nzb_writer_emits_plain_segments_and_provenance() {
+    let id1 = SegmentIdentity::new(1, 2, 1, 1).unwrap();
+    let id2 = SegmentIdentity::new(2, 2, 1, 2).unwrap();
 
     let s1 = make_segment("f1.bin", 1, 1, "id1@x", 100, Some(id1));
     let s2 = make_segment("f2.bin", 1, 1, "id2@x", 200, Some(id2));
@@ -288,7 +269,7 @@ fn test_nzb_writer_emits_segment_indices() {
     )
     .unwrap();
 
-    assert!(!xml.contains("segmentIndex="));
+    assert_plain_segments(&xml);
     assert!(xml.contains("<meta type=\"yenc_encrypted\">true</meta>"));
     assert!(xml.contains(&format!(
         "<meta type=\"yenc_version\">{}</meta>",
@@ -306,7 +287,6 @@ fn test_nzb_writer_emits_segment_indices() {
         parsed.meta.yenc_cipher.as_deref(),
         Some("XChaCha20-Poly1305")
     );
-    assert!(parsed.segment_identities.is_none());
 }
 
 #[test]
@@ -323,59 +303,54 @@ fn test_reader_rejects_unsupported_yenc_version_and_cipher() {
   <file poster="poster@example.com" date="1774300000" subject="[1/1] - &quot;file.bin&quot; yEnc (1/1)">
     <groups><group>alt.binaries.test</group></groups>
     <segments>
-      <segment bytes="750000" number="1" segmentIndex="1">art1@example.com</segment>
+      <segment bytes="750000" number="1">art1@example.com</segment>
     </segments>
   </file>
 </nzb>"#;
 
-    // Bad version
-    let bad_ver_xml = base_xml
-        .replace("VERSION_TAG", "<meta type=\"yenc_version\">2.0</meta>")
-        .replace(
-            "CIPHER_TAG",
-            "<meta type=\"yenc_cipher\">XChaCha20-Poly1305</meta>",
+    // Any version other than the current one fails closed.
+    for bad_version in ["1", "1.3", "2.0"] {
+        let bad_ver_xml = base_xml
+            .replace(
+                "VERSION_TAG",
+                &format!("<meta type=\"yenc_version\">{bad_version}</meta>"),
+            )
+            .replace(
+                "CIPHER_TAG",
+                "<meta type=\"yenc_cipher\">XChaCha20-Poly1305</meta>",
+            );
+        let err = parse_encrypted(&bad_ver_xml).unwrap_err();
+        assert!(
+            err.to_string().contains("unsupported yenc_version"),
+            "version {bad_version} must be rejected"
         );
-    let err = parse_encrypted(&bad_ver_xml).unwrap_err();
-    assert!(err.to_string().contains("unsupported yenc_version"));
+    }
+
+    let version_tag = format!(
+        "<meta type=\"yenc_version\">{}</meta>",
+        super::YENC_SPEC_VERSION
+    );
 
     // Bad cipher
     let bad_cipher_xml = base_xml
-        .replace("VERSION_TAG", "<meta type=\"yenc_version\">1.0</meta>")
+        .replace("VERSION_TAG", &version_tag)
         .replace("CIPHER_TAG", "<meta type=\"yenc_cipher\">AES-GCM</meta>");
     let err2 = parse_encrypted(&bad_cipher_xml).unwrap_err();
     assert!(err2.to_string().contains("unsupported yenc_cipher"));
 
-    // Valid version and cipher
-    let valid_xml = base_xml
-        .replace("VERSION_TAG", "<meta type=\"yenc_version\">1.0</meta>")
-        .replace(
-            "CIPHER_TAG",
-            "<meta type=\"yenc_cipher\">XChaCha20-Poly1305</meta>",
-        );
-    let parsed = parse_encrypted(&valid_xml).unwrap();
-    assert_eq!(parsed.meta.yenc_version.as_deref(), Some("1.0"));
-    assert_eq!(
-        parsed.meta.yenc_cipher.as_deref(),
-        Some("XChaCha20-Poly1305")
+    // Current version and cipher are accepted.
+    let valid_xml = base_xml.replace("VERSION_TAG", &version_tag).replace(
+        "CIPHER_TAG",
+        "<meta type=\"yenc_cipher\">XChaCha20-Poly1305</meta>",
     );
-
-    // v1.2 (current spec version) is also accepted
-    let v12_xml = base_xml
-        .replace(
-            "VERSION_TAG",
-            &format!(
-                "<meta type=\"yenc_version\">{}</meta>",
-                super::YENC_SPEC_VERSION
-            ),
-        )
-        .replace(
-            "CIPHER_TAG",
-            "<meta type=\"yenc_cipher\">XChaCha20-Poly1305</meta>",
-        );
-    let parsed = parse_encrypted(&v12_xml).unwrap();
+    let parsed = parse_encrypted(&valid_xml).unwrap();
     assert_eq!(
         parsed.meta.yenc_version.as_deref(),
         Some(super::YENC_SPEC_VERSION)
+    );
+    assert_eq!(
+        parsed.meta.yenc_cipher.as_deref(),
+        Some("XChaCha20-Poly1305")
     );
 }
 
@@ -397,12 +372,11 @@ fn test_unencrypted_nzb_compatibility() {
         ObfuscateMode::None,
     )
     .unwrap();
-    assert!(!xml_plain.contains("segmentIndex"));
+    assert_plain_segments(&xml_plain);
     assert!(!xml_plain.contains("yenc_encrypted"));
 
     let parsed_plain = parse(&xml_plain).unwrap();
     assert!(!parsed_plain.meta.yenc_encrypted);
-    assert!(parsed_plain.segment_identities.is_none());
 
     // Case 2: unencrypted with archive password (rar/7z)
     let meta_rar = NzbMeta {
@@ -417,7 +391,7 @@ fn test_unencrypted_nzb_compatibility() {
         ObfuscateMode::None,
     )
     .unwrap();
-    assert!(!xml_rar.contains("segmentIndex"));
+    assert_plain_segments(&xml_rar);
     assert!(!xml_rar.contains("yenc_encrypted"));
     assert!(xml_rar.contains("<meta type=\"password\">archive-extract-pass</meta>"));
 
@@ -427,7 +401,6 @@ fn test_unencrypted_nzb_compatibility() {
         parsed_rar.meta.password.as_deref(),
         Some("archive-extract-pass")
     );
-    assert!(parsed_rar.segment_identities.is_none());
 }
 
 #[test]
@@ -481,7 +454,7 @@ fn test_reader_rejects_mixed_encrypted_and_ordinary_files() {
   <file poster="poster@example.com" date="1774300000" subject="encrypted.bin">
     <groups><group>alt.binaries.test</group></groups>
     <segments>
-      <segment bytes="100" number="1" segmentIndex="1">encrypted@example.com</segment>
+      <segment bytes="100" number="1">encrypted@example.com</segment>
     </segments>
   </file>
   <file poster="poster@example.com" date="1774300000" subject="ordinary.bin">
@@ -492,7 +465,7 @@ fn test_reader_rejects_mixed_encrypted_and_ordinary_files() {
   </file>
 </nzb>"#;
 
-    // T3: mixed releases parse cleanly under bootstrap-only identity —
+    // Mixed releases parse cleanly under bootstrap-only identity —
     // per-segment encryption validation happens post-fetch per article.
     let parsed = parse(xml).expect("mixed release parses under bootstrap-only identity");
     assert!(parsed.meta.yenc_encrypted);
@@ -503,9 +476,10 @@ fn test_reader_rejects_mixed_encrypted_and_ordinary_files() {
 
 #[test]
 fn test_validate_segments_allows_decoupled_obfuscation_and_subsets() {
-    // Uncounted geometry (0, 0); CR-02-safe indices (10 is forbidden, use 11)
-    let id1 = SegmentIdentity::explicit(0, 0, 1, 11).unwrap();
-    let id2 = SegmentIdentity::explicit(0, 0, 1, 20).unwrap();
+    // Uncounted geometry (0, 0); indices permitted by the index framing rule
+    // (10 is forbidden, use 11)
+    let id1 = SegmentIdentity::new(0, 0, 1, 11).unwrap();
+    let id2 = SegmentIdentity::new(0, 0, 1, 20).unwrap();
 
     let s1 = make_segment("obf1.bin", 1, 1, "id1@x", 100, Some(id1));
     let s2 = make_segment("obf2.bin", 1, 1, "id2@x", 200, Some(id2));
@@ -523,10 +497,10 @@ fn test_validate_segments_allows_decoupled_obfuscation_and_subsets() {
         ObfuscateMode::Full,
     )
     .unwrap();
-    assert!(!xml.contains("segmentIndex="));
+    assert_plain_segments(&xml);
 
     let parsed = parse_encrypted(&xml).unwrap();
-    assert!(parsed.segment_identities.is_none());
+    assert_eq!(parsed.segments.len(), 2);
 }
 
 #[test]
@@ -542,7 +516,7 @@ fn test_imported_uncounted_identity_round_trip() {
       <group>alt.binaries.test</group>
     </groups>
     <segments>
-      <segment bytes="750000" number="1" segmentIndex="42">art-42@example.com</segment>
+      <segment bytes="750000" number="1">art-42@example.com</segment>
     </segments>
   </file>
   <file poster="poster@example.com" date="1774300000" subject="arbitrary subject 2">
@@ -550,7 +524,7 @@ fn test_imported_uncounted_identity_round_trip() {
       <group>alt.binaries.test</group>
     </groups>
     <segments>
-      <segment bytes="750000" number="1" segmentIndex="99">art-99@example.com</segment>
+      <segment bytes="750000" number="1">art-99@example.com</segment>
     </segments>
   </file>
 </nzb>"#;
@@ -561,18 +535,16 @@ fn test_imported_uncounted_identity_round_trip() {
     let groups = vec!["alt.binaries.test".to_string()];
     let regen_xml = generate(&groups, &parsed.segments, &parsed.meta, ObfuscateMode::None).unwrap();
 
-    assert!(!regen_xml.contains("segmentIndex="));
+    assert_plain_segments(&regen_xml);
     assert!(regen_xml.contains("<meta type=\"yenc_encrypted\">true</meta>"));
 
     let parsed2 = parse_encrypted(&regen_xml).unwrap();
-    assert!(parsed2.segment_identities.is_none());
+    assert_eq!(parsed2.segments.len(), parsed.segments.len());
 }
 
 #[test]
 fn test_conformance_vectors_index_allocation() {
-    // VEC-07 (index_allocation.json): uploader-skip vectors. Loaded via a
-    // dedicated dispatch (not the nzb_xml-parsing loop of
-    // nzb_segment_identity.json, which stays 33 vectors).
+    // VEC-07 (index_allocation.json): uploader-skip vectors.
     let path = test_vectors_dir().join("index_allocation.json");
     let content = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()));

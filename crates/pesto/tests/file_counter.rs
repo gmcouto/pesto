@@ -419,7 +419,7 @@ fn release_layout_operational_invariance_and_reordering_proof() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn repeated_unchanged_runs_produce_identical_segment_identities_and_nzb() {
+async fn repeated_unchanged_runs_produce_identical_identities_and_nzb() {
     let (root, files) = build_volumes("repeat", 3);
     let recovery_count = 3u32;
     let config = dry_run_config(true, Some(recovery_count as usize));
@@ -469,7 +469,7 @@ async fn repeated_unchanged_runs_produce_identical_segment_identities_and_nzb() 
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn pregenerated_par2_and_normal_par2_produce_identical_segment_identities() {
+async fn pregenerated_par2_and_normal_par2_produce_identical_identities() {
     let (root, files) = build_two_files("par2_eq");
     let recovery_count = 3u32;
 

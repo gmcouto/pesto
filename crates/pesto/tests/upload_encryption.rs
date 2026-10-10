@@ -131,6 +131,16 @@ fn make_config_with_opts(
     config
 }
 
+/// Generated segments carry only NZB 1.1 `bytes`/`number` attributes (Body Std v1.2 §8).
+fn assert_plain_segments(xml: &str) {
+    for t in xml.split("<segment ").skip(1) {
+        let tag = &t[..t.find('>').unwrap()];
+        let attrs = tag.matches('=').count();
+        let ok = attrs == 2 && tag.starts_with("bytes=") && tag.contains(" number=");
+        assert!(ok, "non-standard segment: {tag}");
+    }
+}
+
 fn article_body(article: &[u8]) -> &[u8] {
     let marker = b"\r\n\r\n";
     let start = article
@@ -172,9 +182,7 @@ async fn encrypted_upload_round_trips_captured_articles() {
         let body = article_body(article);
         assert!(!body.starts_with(b"=ybegin"));
         assert_eq!(control::extract_salt_from_line1(body).unwrap().len(), 16);
-        let decoded = decryptor
-            .decode_article(body, segment.segment_identity.map(|id| id.segment_index))
-            .unwrap();
+        let decoded = decryptor.decode_article(body).unwrap();
         reconstructed.extend_from_slice(&decoded.data);
     }
     assert_eq!(reconstructed, plaintext);
@@ -242,9 +250,8 @@ fn test_cli_upload_artifacts_emits_encrypted_nzb() {
         pesto::nzb::parse_encrypted(&content).expect("generated nzb must parse as encrypted");
     assert!(parsed.meta.yenc_encrypted);
     assert_eq!(parsed.meta.password.as_deref(), Some("testpass"));
-    assert!(!content.contains("segmentIndex="));
+    assert_plain_segments(&content);
     assert!(content.contains("<meta type=\"yenc_encrypted\">true</meta>"));
-    assert!(parsed.segment_identities.is_none());
 }
 
 #[test]
@@ -293,7 +300,7 @@ fn test_cli_merge_encrypted_nzbs_rejects_multi_session() {
   <file poster="poster@example.com" date="1774300000" subject="Show.S01E01">
     <groups><group>alt.binaries.test</group></groups>
     <segments>
-      <segment bytes="750000" number="1" segmentIndex="1">art1@example.com</segment>
+      <segment bytes="750000" number="1">art1@example.com</segment>
     </segments>
   </file>
 </nzb>"#;
@@ -308,7 +315,7 @@ fn test_cli_merge_encrypted_nzbs_rejects_multi_session() {
   <file poster="poster@example.com" date="1774300000" subject="Show.S01E02">
     <groups><group>alt.binaries.test</group></groups>
     <segments>
-      <segment bytes="750000" number="1" segmentIndex="2">art2@example.com</segment>
+      <segment bytes="750000" number="1">art2@example.com</segment>
     </segments>
   </file>
 </nzb>"#;
@@ -335,10 +342,9 @@ fn test_cli_merge_encrypted_nzbs_rejects_multi_session() {
 
 #[test]
 fn test_cli_merge_encrypted_nzbs_rejects_conflicts() {
-    // Phase 58 T3: XML segmentIndex attributes are never consumed, so index
-    // overlap is undetectable at merge time (bootstrap-only identity). The
-    // remaining merge conflict is duplicate Message-IDs — same corruption
-    // class, still structurally rejectable.
+    // Segment indices live only in article bootstraps, so index overlap is
+    // undetectable at merge time. The detectable merge conflict is duplicate
+    // Message-IDs, which is structurally rejectable.
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path().join("merge_dir");
     std::fs::create_dir(&dir).unwrap();
@@ -432,7 +438,7 @@ fn test_cli_merge_ordinary_nzbs_remains_unencrypted() {
     let merged_content = std::fs::read_to_string(&merged_path).unwrap();
     let parsed = pesto::nzb::parse(&merged_content).expect("merged nzb must be valid ordinary nzb");
     assert!(!parsed.meta.yenc_encrypted);
-    assert!(!merged_content.contains("segmentIndex"));
+    assert_plain_segments(&merged_content);
     assert!(!merged_content.contains("yenc_encrypted"));
 }
 
@@ -468,12 +474,11 @@ async fn test_encrypted_upload_emits_segment_indices() {
         ObfuscateMode::None,
     )
     .unwrap();
-    assert!(!xml.contains("segmentIndex="));
+    assert_plain_segments(&xml);
     assert!(xml.contains("<meta type=\"yenc_encrypted\">true</meta>"));
 
     let parsed = pesto::nzb::parse_encrypted(&xml).unwrap();
     assert!(parsed.meta.yenc_encrypted);
-    assert!(parsed.segment_identities.is_none());
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -521,7 +526,7 @@ async fn test_encrypted_upload_multifile_par2_standard() {
         .map(|s| s.segment_identity.unwrap().segment_index)
         .collect();
     indices.sort();
-    // CR-02: assigned indices are the first N values of the safe sequence
+    // Index framing rule: assigned indices are the first N values of the safe sequence
     // (skipping 10 and 13), not the raw ranks 1..=N.
     assert_eq!(indices, {
         let mut expected: Vec<u32> = (1..)
@@ -572,9 +577,7 @@ async fn test_encrypted_upload_multifile_par2_standard() {
                 .find(|a| String::from_utf8_lossy(a).contains(&seg.message_id))
                 .unwrap();
             let body = article_body(article);
-            let decoded = decryptor
-                .decode_article(body, seg.segment_identity.map(|id| id.segment_index))
-                .unwrap();
+            let decoded = decryptor.decode_article(body).unwrap();
             decrypted_file_bytes.extend_from_slice(&decoded.data);
         }
 
@@ -655,7 +658,7 @@ async fn test_encrypted_upload_multifile_par2_obfuscated() {
             .map(|s| s.segment_identity.unwrap().segment_index)
             .collect();
         indices.sort();
-        // CR-02: assigned indices are the first N safe-sequence values
+        // Index framing rule: assigned indices are the first N safe-sequence values
         // (skipping 10 and 13), not the raw ranks 1..=N.
         assert_eq!(indices, {
             let mut expected: Vec<u32> = (1..)
@@ -699,9 +702,7 @@ async fn test_encrypted_upload_multifile_par2_obfuscated() {
                     .find(|a| String::from_utf8_lossy(a).contains(&seg.message_id))
                     .unwrap();
                 let body = article_body(article);
-                let decoded = decryptor
-                    .decode_article(body, seg.segment_identity.map(|id| id.segment_index))
-                    .unwrap();
+                let decoded = decryptor.decode_article(body).unwrap();
                 decrypted_file_bytes.extend_from_slice(&decoded.data);
             }
 
@@ -812,7 +813,7 @@ async fn test_persistence_lifecycle_invariants() {
         .iter()
         .map(|s| s.segment_identity.unwrap().segment_index)
         .collect();
-    // CR-02: the 20 assigned indices skip the forbidden values 10 and 13
+    // Index framing rule: the 20 assigned indices skip the forbidden values 10 and 13
     // (uint32_be contains 0x0A/0x0D) — the safe sequence is 1..9, 11, 12,
     // 14..22 per the nth_safe_segment_index rank mapping.
     assert_eq!(original_indices, {
@@ -847,9 +848,8 @@ async fn test_persistence_lifecycle_invariants() {
 
     let parsed = pesto::nzb::parse_encrypted(&xml1).unwrap();
     assert!(parsed.meta.yenc_encrypted);
-    assert!(!xml1.contains("segmentIndex="));
+    assert_plain_segments(&xml1);
     assert!(xml1.contains("<meta type=\"yenc_encrypted\">true</meta>"));
-    assert!(parsed.segment_identities.is_none());
 
     // Assert that captured articles match the saved salt
     let articles = captured.lock().unwrap();

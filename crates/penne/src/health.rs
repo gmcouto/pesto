@@ -130,7 +130,6 @@ mod tests {
                     message_id: format!("id{i}@test"),
                     part: i as u32 + 1,
                     bytes,
-                    segment_index: None,
                 })
                 .collect(),
         }

@@ -73,7 +73,6 @@ mod tests {
                         message_id: format!("id{i}@test"),
                         part: i as u32 + 1,
                         bytes,
-                        segment_index: None,
                     })
                     .collect(),
             }],
@@ -91,7 +90,6 @@ mod tests {
                 message_id: "id-g@test".to_string(),
                 part: 1,
                 bytes: 50,
-                segment_index: None,
             }],
         });
         assert_eq!(required_bytes(&queue), 350);

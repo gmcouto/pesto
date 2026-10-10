@@ -68,7 +68,7 @@ fn encode_test_article(
     segment_index: u32,
 ) -> Vec<u8> {
     let uploader = UploadEncryptionAdapter::new(session.clone());
-    let identity = SegmentIdentity::explicit(0, 0, spec.number, segment_index).unwrap();
+    let identity = SegmentIdentity::new(0, 0, spec.number, segment_index).unwrap();
     let mut body = Vec::new();
     let encoded = uploader
         .encode_article(
@@ -122,8 +122,8 @@ async fn test_download_obfuscated_and_arbitrary_subjects() {
     let addr = spawn_mock_nntp_server(known, None);
 
     let segments = format!(
-        "<segment bytes=\"{}\" number=\"1\" segmentIndex=\"101\">msg-obf-01@test</segment>\n\
-         <segment bytes=\"{}\" number=\"2\" segmentIndex=\"102\">msg-obf-02@test</segment>",
+        "<segment bytes=\"{}\" number=\"1\">msg-obf-01@test</segment>\n\
+         <segment bytes=\"{}\" number=\"2\">msg-obf-02@test</segment>",
         payload_p1.len(),
         payload_p2.len()
     );
@@ -191,8 +191,8 @@ async fn test_download_misleading_subject_counters() {
     let addr = spawn_mock_nntp_server(known, None);
 
     let segments = format!(
-        "<segment bytes=\"{}\" number=\"1\" segmentIndex=\"1\">msg-mis-01@test</segment>\n\
-         <segment bytes=\"{}\" number=\"2\" segmentIndex=\"2\">msg-mis-02@test</segment>",
+        "<segment bytes=\"{}\" number=\"1\">msg-mis-01@test</segment>\n\
+         <segment bytes=\"{}\" number=\"2\">msg-mis-02@test</segment>",
         payload_p1.len(),
         payload_p2.len()
     );
@@ -281,14 +281,14 @@ async fn test_download_reordered_files_and_segments() {
   <file poster="uploader@example.com" date="1774300000" subject="&quot;file_b.bin&quot; yEnc">
     <groups><group>alt.binaries.test</group></groups>
     <segments>
-      <segment bytes="{}" number="2" segmentIndex="21">msg-f2-p2@test</segment>
-      <segment bytes="{}" number="1" segmentIndex="20">msg-f2-p1@test</segment>
+      <segment bytes="{}" number="2">msg-f2-p2@test</segment>
+      <segment bytes="{}" number="1">msg-f2-p1@test</segment>
     </segments>
   </file>
   <file poster="uploader@example.com" date="1774300000" subject="&quot;file_a.bin&quot; yEnc">
     <groups><group>alt.binaries.test</group></groups>
     <segments>
-      <segment bytes="{}" number="1" segmentIndex="11">msg-f1@test</segment>
+      <segment bytes="{}" number="1">msg-f1@test</segment>
     </segments>
   </file>
 </nzb>"#,
@@ -363,13 +363,13 @@ async fn test_download_sparse_subsets() {
   <file poster="uploader@example.com" date="1774300000" subject="&quot;sparse1.bin&quot; yEnc">
     <groups><group>alt.binaries.test</group></groups>
     <segments>
-      <segment bytes="{}" number="1" segmentIndex="3">msg-sparse-03@test</segment>
+      <segment bytes="{}" number="1">msg-sparse-03@test</segment>
     </segments>
   </file>
   <file poster="uploader@example.com" date="1774300000" subject="&quot;sparse2.bin&quot; yEnc">
     <groups><group>alt.binaries.test</group></groups>
     <segments>
-      <segment bytes="{}" number="1" segmentIndex="7">msg-sparse-07@test</segment>
+      <segment bytes="{}" number="1">msg-sparse-07@test</segment>
     </segments>
   </file>
 </nzb>"#,
@@ -424,7 +424,7 @@ async fn test_download_accepts_boundary_segment_indices() {
             ),
         );
         files.push_str(&format!(
-            "<file poster=\"uploader@example.com\" date=\"1774300000\" subject=\"&quot;{name}&quot; yEnc\">\n<groups>\n<group>alt.binaries.test</group>\n</groups>\n<segments>\n<segment bytes=\"{}\" number=\"1\" segmentIndex=\"{index}\">{message_id}</segment>\n</segments>\n</file>\n",
+            "<file poster=\"uploader@example.com\" date=\"1774300000\" subject=\"&quot;{name}&quot; yEnc\">\n<groups>\n<group>alt.binaries.test</group>\n</groups>\n<segments>\n<segment bytes=\"{}\" number=\"1\">{message_id}</segment>\n</segments>\n</file>\n",
             payload.len()
         ));
     }
@@ -487,7 +487,7 @@ async fn test_download_provider_failover() {
     let addr_tier2 = spawn_mock_nntp_server(known_tier2, None);
 
     let segments = format!(
-        "<segment bytes=\"{}\" number=\"1\" segmentIndex=\"50\">msg-failover@test</segment>",
+        "<segment bytes=\"{}\" number=\"1\">msg-failover@test</segment>",
         payload.len()
     );
     let xml = encrypted_nzb_xml(password, "&quot;failover.bin&quot; yEnc", &segments);
@@ -515,7 +515,7 @@ async fn test_download_provider_failover() {
 }
 
 #[tokio::test]
-async fn test_download_index_tampering_zero_output() {
+async fn test_download_identity_comes_from_article_bootstrap() {
     let password = "test-pass-tampering-zero-out";
     let salt = [0x36u8; 16];
     let session = Arc::new(EncryptionSession::new(password, salt).unwrap());
@@ -539,14 +539,12 @@ async fn test_download_index_tampering_zero_output() {
     known.insert("msg-tamper@test".to_string(), genuine_art);
     let addr = spawn_mock_nntp_server(known, None);
 
-    // Phase 58 T3: the legacy segmentIndex="2" XML attribute is IGNORED
-    // (bootstrap-only identity), so the wire bootstrap index 1 governs and
-    // the download succeeds — XML indices can no longer be "tampered" data.
-    // The tampering rejection the old test exercised now lives in the wire
-    // path: a tampered Line 1 bootstrap fails AEAD (see the malformed
-    // vector tests in pesto::crypto).
+    // The NZB carries no segment identity (Body Encryption Standard v1.2
+    // §8): the article's own bootstrap index 1 governs and the download
+    // succeeds. A tampered bootstrap index fails AEAD instead (see the
+    // index_tampering and malformed vector tests in pesto).
     let segments = format!(
-        "<segment bytes=\"{}\" number=\"1\" segmentIndex=\"2\">msg-tamper@test</segment>",
+        "<segment bytes=\"{}\" number=\"1\">msg-tamper@test</segment>",
         payload.len()
     );
     let xml = encrypted_nzb_xml(password, "&quot;tamper.bin&quot; yEnc", &segments);
@@ -555,7 +553,7 @@ async fn test_download_index_tampering_zero_output() {
     let outcome =
         run_download_nzb(&xml, &[ServerTier::solo(server_entry(addr))], dest.path()).await;
 
-    // Attribute ignored: clean success with correct plaintext.
+    // Bootstrap-derived identity: clean success with correct plaintext.
     assert!(outcome.corrupt.is_empty(), "corrupt: {:?}", outcome.corrupt);
     assert!(
         outcome.segments.contains("<msg-tamper@test>"),
@@ -617,8 +615,8 @@ async fn test_cache_stability_and_reparse_restart() {
     let addr = spawn_mock_nntp_server(known, Some(req_counter.clone()));
 
     let segments_orig = format!(
-        "<segment bytes=\"{}\" number=\"1\" segmentIndex=\"5\">msg-cache-01@test</segment>\n\
-         <segment bytes=\"{}\" number=\"2\" segmentIndex=\"6\">msg-cache-02@test</segment>",
+        "<segment bytes=\"{}\" number=\"1\">msg-cache-01@test</segment>\n\
+         <segment bytes=\"{}\" number=\"2\">msg-cache-02@test</segment>",
         payload_p1.len(),
         payload_p2.len()
     );
@@ -651,8 +649,8 @@ async fn test_cache_stability_and_reparse_restart() {
 
     // Run 2: Reparse a reordered NZB of the same release
     let segments_reorder = format!(
-        "<segment bytes=\"{}\" number=\"2\" segmentIndex=\"6\">msg-cache-02@test</segment>\n\
-         <segment bytes=\"{}\" number=\"1\" segmentIndex=\"5\">msg-cache-01@test</segment>",
+        "<segment bytes=\"{}\" number=\"2\">msg-cache-02@test</segment>\n\
+         <segment bytes=\"{}\" number=\"1\">msg-cache-01@test</segment>",
         payload_p2.len(),
         payload_p1.len()
     );
@@ -688,77 +686,6 @@ async fn test_cache_stability_and_reparse_restart() {
 }
 
 #[tokio::test]
-async fn test_preflight_rejects_malformed_queue_before_effects() {
-    let password = "test-pass-preflight";
-    let decryptor = Arc::new(DownloadDecryptionAdapter::with_password(password));
-
-    // Construct queue with duplicate segmentIndex = 1 across two distinct Message-IDs
-    let queue = DownloadQueue {
-        files: vec![QueuedFile {
-            name: "malformed.bin".to_string(),
-            file_ordinal: Some(1),
-            total_files: Some(1),
-            segments: vec![
-                QueuedSegment {
-                    message_id: "pre-msg-01@test".to_string(),
-                    part: 1,
-                    bytes: 100,
-                    segment_index: Some(1),
-                },
-                QueuedSegment {
-                    message_id: "pre-msg-02@test".to_string(),
-                    part: 2,
-                    bytes: 100,
-                    segment_index: Some(1),
-                },
-            ],
-        }],
-    };
-
-    let req_counter = Arc::new(AtomicUsize::new(0));
-    let addr = spawn_mock_nntp_server(HashMap::new(), Some(req_counter.clone()));
-    let dest = tempfile::tempdir().unwrap();
-
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-
-    let result = download_queue_with_decryptor(
-        &queue,
-        &[ServerTier::solo(server_entry(addr))],
-        dest.path(),
-        0,
-        Some(tx),
-        Some(decryptor),
-    )
-    .await;
-
-    // Phase 58 T3: per-article-only preflight — duplicate XML-era indices
-    // are no longer rejected (identity is bootstrap-only; the two segments
-    // here would both extract their own index from Line 1 post-fetch, and
-    // release-wide uniqueness is a producer obligation). The preflight
-    // rejects only per-article violations: zero or CR-02-forbidden bytes.
-    // Both queue indices here are 1 (safe), so the run proceeds — the empty
-    // mock server yields missing/corrupt segments instead.
-    let outcome = result.expect("per-article-safe queue must pass preflight");
-    assert!(outcome.segments.is_empty());
-    assert_eq!(outcome.missing.len() + outcome.corrupt.len(), 2);
-
-    // Assert zero temporary or final files created
-    let entry_count = std::fs::read_dir(dest.path()).unwrap().count();
-    assert_eq!(
-        entry_count, 0,
-        "destination directory must have zero entries"
-    );
-
-    // Progress events were emitted (Started + per-segment events) — the run
-    // began, because nothing was structurally wrong with the queue.
-    assert!(
-        rx.try_recv().is_ok(),
-        "run must have emitted progress events"
-    );
-    let _ = req_counter; // server may or may not have been contacted; not a preflight guarantee anymore
-}
-
-#[tokio::test]
 async fn test_unencrypted_article_rejection_for_encrypted_segment() {
     let password = "unencrypted-rejection-password";
     let plain_body = pesto::yenc::encode_part(
@@ -788,7 +715,6 @@ async fn test_unencrypted_article_rejection_for_encrypted_segment() {
                 message_id: "spoofed-msg-01".to_string(),
                 part: 1,
                 bytes: 10,
-                segment_index: Some(1),
             }],
         }],
     };

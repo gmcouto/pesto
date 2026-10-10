@@ -2,7 +2,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::config::ObfuscateMode;
-use crate::poster::{reconstruct_identities, PostedSegment, SegmentIdentity};
+use crate::poster::{PostedSegment, SegmentIdentity};
 
 use super::*;
 
@@ -700,34 +700,32 @@ fn wire_subjects_empty_when_no_segments() {
     assert_eq!(wire_subjects(&[]), Vec::<(String, String)>::new());
 }
 
-// ── SegmentIdentity domain and checked arithmetic tests ──────────────────
+// ── SegmentIdentity domain tests ──────────────────
 
 #[test]
-fn segment_identity_checked_enforces_one_based_uint32() {
+fn segment_identity_new_enforces_one_based_uint32() {
     // Valid: ordinal 1 of 2, part 1 -> segment_index 1
-    let id = SegmentIdentity::checked(0, 1, 2, 1).unwrap();
+    let id = SegmentIdentity::new(1, 2, 1, 1).unwrap();
     assert_eq!(id.file_ordinal, 1);
     assert_eq!(id.total_files, 2);
     assert_eq!(id.part_number, 1);
     assert_eq!(id.segment_index, 1);
 
-    // Valid: ordinal 2 of 2, part 1, prefix 3 (file 1 had 3 parts) -> segment_index 4
-    let id2 = SegmentIdentity::checked(3, 2, 2, 1).unwrap();
+    // Valid: ordinal 2 of 2, part 1, explicit segment_index 4
+    let id2 = SegmentIdentity::new(2, 2, 1, 4).unwrap();
     assert_eq!(id2.file_ordinal, 2);
     assert_eq!(id2.segment_index, 4);
 
     // Reject 0 file_ordinal
-    assert!(SegmentIdentity::checked(0, 0, 2, 1).is_none());
+    assert!(SegmentIdentity::new(0, 2, 1, 1).is_none());
     // Reject 0 total_files
-    assert!(SegmentIdentity::checked(0, 1, 0, 1).is_none());
+    assert!(SegmentIdentity::new(1, 0, 1, 1).is_none());
     // Reject 0 part_number
-    assert!(SegmentIdentity::checked(0, 1, 2, 0).is_none());
+    assert!(SegmentIdentity::new(1, 2, 0, 1).is_none());
+    // Reject 0 segment_index
+    assert!(SegmentIdentity::new(1, 2, 1, 0).is_none());
     // Reject file_ordinal > total_files
-    assert!(SegmentIdentity::checked(0, 3, 2, 1).is_none());
-
-    // Reject overflow past u32::MAX
-    assert!(SegmentIdentity::checked(u64::from(u32::MAX), 1, 1, 1).is_none());
-    assert!(SegmentIdentity::checked(u64::MAX, 1, 1, 1).is_none());
+    assert!(SegmentIdentity::new(3, 2, 1, 1).is_none());
 }
 
 #[test]
@@ -751,84 +749,8 @@ fn parse_file_counter_extracts_ordinal_and_total() {
     assert_eq!(parse_file_counter("[LEAK] - \"movie.mkv\""), None);
 }
 
-// ── Adversarial identity reconstruction tests ────────────────────────────
-
 #[test]
-fn reconstruct_identities_rejects_inconsistent_and_incomplete_releases() {
-    use crate::poster::FileIdentityInput;
-
-    // Inconsistent total_files (1/2 vs 2/3)
-    let inconsistent = vec![
-        FileIdentityInput {
-            file_ordinal: 1,
-            total_files: 2,
-            parts: vec![(1, "id1".into())],
-        },
-        FileIdentityInput {
-            file_ordinal: 2,
-            total_files: 3,
-            parts: vec![(1, "id2".into())],
-        },
-    ];
-    assert!(reconstruct_identities(&inconsistent).is_none());
-
-    // Duplicate ordinals (two file 1s)
-    let dup_ord = vec![
-        FileIdentityInput {
-            file_ordinal: 1,
-            total_files: 2,
-            parts: vec![(1, "id1".into())],
-        },
-        FileIdentityInput {
-            file_ordinal: 1,
-            total_files: 2,
-            parts: vec![(1, "id2".into())],
-        },
-    ];
-    assert!(reconstruct_identities(&dup_ord).is_none());
-
-    // Incomplete ordinal set (files 1 and 3 of 3 present, file 2 missing)
-    let gap_ord = vec![
-        FileIdentityInput {
-            file_ordinal: 1,
-            total_files: 3,
-            parts: vec![(1, "id1".into())],
-        },
-        FileIdentityInput {
-            file_ordinal: 3,
-            total_files: 3,
-            parts: vec![(1, "id3".into())],
-        },
-    ];
-    assert!(reconstruct_identities(&gap_ord).is_none());
-
-    // Duplicate parts in one file
-    let dup_parts = vec![FileIdentityInput {
-        file_ordinal: 1,
-        total_files: 1,
-        parts: vec![(1, "id1a".into()), (1, "id1b".into())],
-    }];
-    assert!(reconstruct_identities(&dup_parts).is_none());
-
-    // Part gap in one file (part 1 and 3 present, part 2 missing)
-    let gap_parts = vec![FileIdentityInput {
-        file_ordinal: 1,
-        total_files: 1,
-        parts: vec![(1, "id1".into()), (3, "id3".into())],
-    }];
-    assert!(reconstruct_identities(&gap_parts).is_none());
-
-    // Huge M (malicious DoS attempt) rejected without allocating
-    let huge_m = vec![FileIdentityInput {
-        file_ordinal: 1,
-        total_files: u32::MAX,
-        parts: vec![(1, "id1".into())],
-    }];
-    assert!(reconstruct_identities(&huge_m).is_none());
-}
-
-#[test]
-fn parse_rejects_ambiguous_identity_and_preserves_declared_parts_without_compacting() {
+fn parse_preserves_declared_parts_without_compacting() {
     // An NZB where file 1 has parts 1 and 3 (part 2 missing).
     let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
 <nzb xmlns="http://www.newzbin.com/DTD/2003/nzb">
@@ -843,9 +765,6 @@ fn parse_rejects_ambiguous_identity_and_preserves_declared_parts_without_compact
 </nzb>"#;
 
     let parsed = parse(xml).unwrap();
-    // Segment identities must be None because part 2 is missing.
-    assert!(parsed.segment_identities.is_none());
-
     // Declared part numbers must be preserved exactly (1 and 3), NOT compacted to 1 and 2!
     assert_eq!(parsed.segments.len(), 2);
     assert_eq!(parsed.segments[0].part, 1);
@@ -866,7 +785,6 @@ fn parse_handles_ordinary_nzb_without_counters_leaving_identity_unset() {
 </nzb>"#;
 
     let parsed = parse(xml).unwrap();
-    assert!(parsed.segment_identities.is_none());
     assert_eq!(parsed.segments.len(), 1);
     assert_eq!(parsed.segments[0].file_name, "plain.bin");
 }
@@ -892,7 +810,10 @@ fn parse_handles_mixed_counters_leaving_identity_unset() {
 </nzb>"#;
 
     let parsed = parse(xml).unwrap();
-    assert!(parsed.segment_identities.is_none());
+    assert_eq!(parsed.segments.len(), 2);
+    for seg in &parsed.segments {
+        assert!(seg.segment_identity.is_none());
+    }
 }
 
 #[test]
@@ -932,7 +853,7 @@ fn generate_rejects_inconsistent_file_counter_within_file_group() {
 #[test]
 fn generate_rejects_mixed_segment_identity_presence_within_file_group() {
     let mut s1 = seg("file.bin", 1, 2, "<id1@x>");
-    s1.segment_identity = SegmentIdentity::checked(0, 1, 1, 1);
+    s1.segment_identity = SegmentIdentity::new(1, 1, 1, 1);
     let s2 = seg("file.bin", 2, 2, "<id2@x>");
     let res = generate(
         &["alt.test".into()],
@@ -948,9 +869,9 @@ fn generate_rejects_mixed_segment_identity_presence_within_file_group() {
 #[test]
 fn generate_rejects_inconsistent_file_ordinal_in_segment_identity() {
     let mut s1 = seg("file.bin", 1, 2, "<id1@x>");
-    s1.segment_identity = SegmentIdentity::checked(0, 1, 2, 1);
+    s1.segment_identity = SegmentIdentity::new(1, 2, 1, 1);
     let mut s2 = seg("file.bin", 2, 2, "<id2@x>");
-    s2.segment_identity = SegmentIdentity::checked(0, 2, 2, 2);
+    s2.segment_identity = SegmentIdentity::new(2, 2, 2, 2);
     let res = generate(
         &["alt.test".into()],
         &[s1, s2],
@@ -965,9 +886,9 @@ fn generate_rejects_inconsistent_file_ordinal_in_segment_identity() {
 #[test]
 fn generate_allows_non_contiguous_or_sparse_global_segment_index() {
     let mut s1 = seg("file.bin", 1, 2, "<id1@x>");
-    s1.segment_identity = SegmentIdentity::checked(10, 1, 1, 1);
+    s1.segment_identity = SegmentIdentity::new(1, 1, 1, 11);
     let mut s2 = seg("file.bin", 2, 2, "<id2@x>");
-    s2.segment_identity = SegmentIdentity::checked(12, 1, 1, 2);
+    s2.segment_identity = SegmentIdentity::new(1, 1, 2, 14);
     let res = generate(
         &["alt.test".into()],
         &[s1, s2],
@@ -980,9 +901,9 @@ fn generate_allows_non_contiguous_or_sparse_global_segment_index() {
 #[test]
 fn generate_rejects_conflicting_file_ordinals_across_different_files() {
     let mut s1 = seg("f1.bin", 1, 1, "<id1@x>");
-    s1.segment_identity = SegmentIdentity::checked(0, 1, 2, 1);
+    s1.segment_identity = SegmentIdentity::new(1, 2, 1, 1);
     let mut s2 = seg("f2.bin", 1, 1, "<id2@x>");
-    s2.segment_identity = SegmentIdentity::checked(1, 1, 2, 1);
+    s2.segment_identity = SegmentIdentity::new(1, 2, 1, 2);
     let res = generate(
         &["alt.test".into()],
         &[s1, s2],
@@ -999,17 +920,17 @@ fn generate_succeeds_for_valid_identity_bearing_multi_file_release() {
     let mut s1 = seg("f1.bin", 1, 2, "<id1@x>");
     s1.file_index = 1;
     s1.total_files = 2;
-    s1.segment_identity = SegmentIdentity::checked(0, 1, 2, 1);
+    s1.segment_identity = SegmentIdentity::new(1, 2, 1, 1);
 
     let mut s2 = seg("f1.bin", 2, 2, "<id2@x>");
     s2.file_index = 1;
     s2.total_files = 2;
-    s2.segment_identity = SegmentIdentity::checked(0, 1, 2, 2);
+    s2.segment_identity = SegmentIdentity::new(1, 2, 2, 2);
 
     let mut s3 = seg("f2.bin", 1, 1, "<id3@x>");
     s3.file_index = 2;
     s3.total_files = 2;
-    s3.segment_identity = SegmentIdentity::checked(2, 2, 2, 1);
+    s3.segment_identity = SegmentIdentity::new(2, 2, 1, 3);
 
     let res = generate(
         &["alt.test".into()],
@@ -1045,7 +966,7 @@ fn generate_rejects_incomplete_segment_set_for_identity_bearing_file() {
     let mut s1 = seg("file.bin", 1, 2, "<id1@x>");
     s1.file_index = 1;
     s1.total_files = 1;
-    s1.segment_identity = SegmentIdentity::checked(0, 1, 1, 1);
+    s1.segment_identity = SegmentIdentity::new(1, 1, 1, 1);
     let m = NzbMeta {
         yenc_encrypted: true,
         ..no_meta()
@@ -1061,7 +982,7 @@ fn generate_allows_incomplete_file_set_for_identity_bearing_release() {
     let mut s1 = seg("f1.bin", 1, 1, "<id1@x>");
     s1.file_index = 1;
     s1.total_files = 2;
-    s1.segment_identity = SegmentIdentity::checked(0, 1, 2, 1);
+    s1.segment_identity = SegmentIdentity::new(1, 2, 1, 1);
 
     let res = generate(&["alt.test".into()], &[s1], &no_meta(), ObfuscateMode::None);
     assert!(res.is_ok());

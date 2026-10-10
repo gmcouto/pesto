@@ -1,17 +1,15 @@
-//! Bootstrap-only segment identity at the penne queue boundary (Phase 58 T3).
+//! Bootstrap-only segment identity at the penne queue boundary.
 //!
-//! v1.2 Body Std §8 consumer req 3: readers MUST NOT consume `segmentIndex`
-//! XML attributes; if present, they are ignored. Identity derives exclusively
-//! from each article's Line 1 bootstrap bytes post-fetch. Download-time
-//! validation is per-article only.
+//! Body Encryption Standard v1.2 §8: encrypted NZBs carry plain NZB 1.1
+//! segments (`bytes`, `number`) and no encryption-specific segment data.
+//! Identity derives exclusively from each article's bootstrap post-fetch.
 
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::PathBuf;
 
-use penne::download::validate_queue_identity;
 use penne::nzb::load;
-use penne::queue::{build, DownloadQueue, QueuedFile, QueuedSegment};
+use penne::queue::build;
 use tempfile::NamedTempFile;
 
 fn test_vectors_dir() -> PathBuf {
@@ -25,11 +23,9 @@ fn write_temp_nzb(xml: &str) -> NamedTempFile {
 }
 
 #[test]
-fn bootstrap_only_identity_explicit_xml_attributes_are_ignored() {
-    // A legacy NZB carrying segmentIndex XML attributes: the attributes are
-    // ignored — no identity is consumed from them. Identity would come from
-    // each article's Line 1 bootstrap post-fetch (here: 42/43 are NOT
-    // reflected anywhere in the parsed or queued state).
+fn encrypted_nzb_queues_plain_segments_without_identity() {
+    // An obfuscated encrypted release: nothing in the NZB identifies the
+    // segment index; the queue carries only Message-ID, part and bytes.
     let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE nzb PUBLIC "-//newzBin//DTD NZB 1.1//EN" "http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd">
 <nzb xmlns="http://www.newzbin.com/DTD/2003/nzb">
@@ -40,8 +36,8 @@ fn bootstrap_only_identity_explicit_xml_attributes_are_ignored() {
   <file poster="uploader@example.com" date="1774300000" subject="completely-obfuscated-subject-no-counters">
     <groups><group>alt.binaries.test</group></groups>
     <segments>
-      <segment bytes="750000" number="1" segmentIndex="42">tracer-msg-01@example.com</segment>
-      <segment bytes="250000" number="2" segmentIndex="43">tracer-msg-02@example.com</segment>
+      <segment bytes="750000" number="1">tracer-msg-01@example.com</segment>
+      <segment bytes="250000" number="2">tracer-msg-02@example.com</segment>
     </segments>
   </file>
 </nzb>"#;
@@ -49,14 +45,10 @@ fn bootstrap_only_identity_explicit_xml_attributes_are_ignored() {
     let temp = write_temp_nzb(xml);
     let parsed = load(temp.path()).expect("Penne NZB load must succeed");
     assert!(parsed.meta.yenc_encrypted, "must be marked yenc_encrypted");
-    assert!(
-        parsed.segment_identities.is_none(),
-        "bootstrap-only identity: no segment_identities map at parse time"
-    );
     for seg in &parsed.segments {
         assert!(
             seg.segment_identity.is_none(),
-            "XML attributes must not become identity"
+            "identity is never derived from the NZB"
         );
     }
 
@@ -64,15 +56,10 @@ fn bootstrap_only_identity_explicit_xml_attributes_are_ignored() {
     assert_eq!(queue.files.len(), 1);
     let queued_file = &queue.files[0];
     assert_eq!(queued_file.segments.len(), 2);
-    for seg in &queued_file.segments {
-        assert_eq!(
-            seg.segment_index, None,
-            "queued segment must carry None index; bootstrap extraction happens post-fetch"
-        );
-    }
-
-    // Per-article-only preflight passes (nothing to validate at queue time).
-    validate_queue_identity(&queue, true).unwrap();
+    assert_eq!(queued_file.segments[0].part, 1);
+    assert_eq!(queued_file.segments[0].bytes, 750000);
+    assert_eq!(queued_file.segments[1].part, 2);
+    assert_eq!(queued_file.segments[1].bytes, 250000);
 }
 
 #[test]
@@ -83,7 +70,7 @@ fn test_conformance_vectors_penne_nzb_segment_identity() {
     let fixture: serde_json::Value = serde_json::from_str(&content).unwrap();
     let vectors = fixture["vectors"].as_array().expect("vectors array");
 
-    assert_eq!(vectors.len(), 33, "expected exactly 33 test vectors");
+    assert_eq!(vectors.len(), 10, "expected exactly 10 test vectors");
     let mut count = 0;
 
     for vec in vectors {
@@ -91,23 +78,23 @@ fn test_conformance_vectors_penne_nzb_segment_identity() {
         let category = vec["category"].as_str().unwrap();
         let nzb_xml = vec["nzb_xml"].as_str().unwrap();
 
+        let temp = write_temp_nzb(nzb_xml);
+        let parsed = load(temp.path()).unwrap_or_else(|e| panic!("vector {id} failed load: {e}"));
+        let queue = build(&parsed);
+
         match category {
-            "valid_identity" => {
-                let temp = write_temp_nzb(nzb_xml);
-                let parsed =
-                    load(temp.path()).unwrap_or_else(|e| panic!("vector {id} failed load: {e}"));
-                assert!(parsed.meta.yenc_encrypted, "vector {id} must be encrypted");
-                assert!(
-                    parsed.segment_identities.is_none(),
-                    "vector {id} clean NZB 1.1 must have segment_identities: None"
+            "valid_identity" | "unencrypted_compatibility" => {
+                let expect_encrypted = vec["is_encrypted"].as_bool().unwrap();
+                assert_eq!(
+                    parsed.meta.yenc_encrypted, expect_encrypted,
+                    "vector {id} encryption flag mismatch"
                 );
 
-                let queue = build(&parsed);
-                let actual: HashMap<&str, Option<u32>> = queue
+                let actual: HashMap<&str, (u32, u64)> = queue
                     .files
                     .iter()
                     .flat_map(|f| &f.segments)
-                    .map(|s| (s.message_id.as_str(), s.segment_index))
+                    .map(|s| (s.message_id.as_str(), (s.part, s.bytes)))
                     .collect();
 
                 let expected_segs = vec["expected_segments"].as_array().unwrap();
@@ -124,130 +111,36 @@ fn test_conformance_vectors_penne_nzb_segment_identity() {
                     } else {
                         format!("<{msg_id}>")
                     };
-
-                    let &actual_index = actual
+                    let &(part, bytes) = actual
                         .get(canonical_mid.as_str())
                         .unwrap_or_else(|| panic!("vector {id} missing message {canonical_mid}"));
                     assert_eq!(
-                        actual_index, None,
-                        "vector {id} clean NZB 1.1 queued segment must have None segment_index"
+                        u64::from(part),
+                        exp["part"].as_u64().unwrap(),
+                        "vector {id} part mismatch for {canonical_mid}"
+                    );
+                    assert_eq!(
+                        bytes,
+                        exp["bytes"].as_u64().unwrap(),
+                        "vector {id} bytes mismatch for {canonical_mid}"
                     );
                 }
-                validate_queue_identity(&queue, true).unwrap();
-            }
-            "legacy_attribute_ignored" => {
-                let temp = write_temp_nzb(nzb_xml);
-                let parsed = load(temp.path())
-                    .unwrap_or_else(|e| panic!("vector {id} failed legacy load: {e}"));
-                assert!(parsed.meta.yenc_encrypted, "vector {id} must be encrypted");
-                assert!(parsed.segment_identities.is_none());
-                let queue = build(&parsed);
-                for file in &queue.files {
-                    for seg in &file.segments {
-                        assert_eq!(seg.segment_index, None);
-                    }
-                }
-                validate_queue_identity(&queue, true).unwrap();
-            }
-            "invalid_identity" => {
-                let temp = write_temp_nzb(nzb_xml);
-                let parsed = load(temp.path())
-                    .expect("vector invalid_identity standard load succeeds as clean NZB 1.1");
-                assert!(parsed.meta.password.is_some());
-                let queue = build(&parsed);
-                validate_queue_identity(&queue, false).unwrap();
-            }
-            "unencrypted_compatibility" => {
-                let temp = write_temp_nzb(nzb_xml);
-                let parsed = load(temp.path())
-                    .unwrap_or_else(|e| panic!("vector {id} failed unencrypted parse: {e}"));
-                assert!(
-                    !parsed.meta.yenc_encrypted,
-                    "vector {id} must not be marked encrypted"
-                );
-                assert!(
-                    parsed.segment_identities.is_none(),
-                    "vector {id} segment_identities must be None"
-                );
-
-                let queue = build(&parsed);
-                for file in &queue.files {
-                    for seg in &file.segments {
-                        assert_eq!(
-                            seg.segment_index, None,
-                            "vector {id} queued segment must have None segment_index"
-                        );
-                    }
-                }
-                validate_queue_identity(&queue, false).unwrap();
             }
             "index_tampering" => {
-                let temp = write_temp_nzb(nzb_xml);
-                let parsed = load(temp.path()).expect("parse clean nzb 1.1");
+                // Tampering is only detectable post-fetch (Poly1305); the NZB
+                // itself parses as an ordinary encrypted release.
                 assert!(
                     parsed.meta.yenc_encrypted,
                     "vector {id} must be marked encrypted"
                 );
-                assert!(parsed.segment_identities.is_none());
-
-                let queue = build(&parsed);
-                for file in &queue.files {
-                    for seg in &file.segments {
-                        assert_eq!(seg.segment_index, None);
-                    }
-                }
-                validate_queue_identity(&queue, true).unwrap();
+                assert!(!queue.files.is_empty(), "vector {id} must queue segments");
             }
             other => panic!("unknown category {other}"),
         }
         count += 1;
     }
 
-    assert_eq!(count, 33, "must process exactly 33 vectors");
-}
-
-#[test]
-fn queue_identity_validation_is_per_article_only() {
-    // Per-article rule: non-zero and CR-02-safe. Release-wide uniqueness is
-    // NOT validated pre-fetch (producer obligation) — duplicate XML-level
-    // indices no longer exist as a concept (attributes are ignored), and
-    // same-message-different-index is unconsumable data.
-    let make_queue = |indices: &[Option<u32>]| DownloadQueue {
-        files: vec![QueuedFile {
-            name: "q.bin".to_string(),
-            file_ordinal: Some(1),
-            total_files: Some(1),
-            segments: indices
-                .iter()
-                .enumerate()
-                .map(|(i, &idx)| QueuedSegment {
-                    message_id: format!("msg-{i}@test"),
-                    part: i as u32 + 1,
-                    bytes: 100,
-                    segment_index: idx,
-                })
-                .collect(),
-        }],
-    };
-
-    // Duplicates are not a queue-time error anymore (producer obligation).
-    validate_queue_identity(&make_queue(&[Some(1), Some(1)]), true).unwrap();
-
-    // Non-zero enforced.
-    let err = validate_queue_identity(&make_queue(&[Some(0)]), true).unwrap_err();
-    assert!(err.to_string().contains("INVALID_SEGMENT_INDEX_ZERO"));
-
-    // Forbidden bytes enforced (10, 13, 266, 269).
-    for idx in [10u32, 13, 266, 269] {
-        let err = validate_queue_identity(&make_queue(&[Some(idx)]), true).unwrap_err();
-        assert!(
-            err.to_string().contains("FORBIDDEN_SEGMENT_INDEX_BYTE"),
-            "index {idx} must be forbidden, got: {err}"
-        );
-    }
-
-    // Safe indices pass.
-    validate_queue_identity(&make_queue(&[Some(1), Some(11), Some(14)]), true).unwrap();
+    assert_eq!(count, 10, "must process exactly 10 vectors");
 }
 
 #[test]
@@ -273,9 +166,8 @@ fn test_compatibility_archive_password_only() {
         "must NOT be marked yenc_encrypted"
     );
     assert_eq!(parsed.meta.password.as_deref(), Some("rarpassword"));
-    assert!(parsed.segment_identities.is_none());
 
     let queue = build(&parsed);
     assert_eq!(queue.files.len(), 1);
-    assert_eq!(queue.files[0].segments[0].segment_index, None);
+    assert_eq!(queue.files[0].segments.len(), 1);
 }

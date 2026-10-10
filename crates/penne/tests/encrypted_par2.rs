@@ -40,7 +40,7 @@ fn encode_article(
     segment_index: u32,
 ) -> Vec<u8> {
     let uploader = UploadEncryptionAdapter::new(session.clone());
-    let identity = SegmentIdentity::explicit(0, 0, spec.number, segment_index).unwrap();
+    let identity = SegmentIdentity::new(0, 0, spec.number, segment_index).unwrap();
     let mut body = Vec::new();
     let encoded = uploader
         .encode_article(
@@ -104,7 +104,6 @@ fn build_encrypted_par2_fixture(password: &str) -> EncryptedPar2Release {
     );
     let msg_d1_p1 = "msg-data1-01@test".to_string();
     known_articles.insert(msg_d1_p1.clone(), art_d1_p1);
-    let idx_d1_p1 = next_index;
     next_index += 1;
 
     let art_d1_p2 = encode_article(
@@ -121,7 +120,6 @@ fn build_encrypted_par2_fixture(password: &str) -> EncryptedPar2Release {
     );
     let msg_d1_p2 = "msg-data1-02@test".to_string();
     known_articles.insert(msg_d1_p2.clone(), art_d1_p2);
-    let idx_d1_p2 = next_index;
     next_index += 1;
 
     // Encrypt data2.bin (1 part of 1536 bytes)
@@ -139,7 +137,6 @@ fn build_encrypted_par2_fixture(password: &str) -> EncryptedPar2Release {
     );
     let msg_d2 = "msg-data2-01@test".to_string();
     known_articles.insert(msg_d2.clone(), art_d2);
-    let idx_d2 = next_index;
     next_index += 1;
 
     // Encrypt base.par2 (1 part)
@@ -157,7 +154,6 @@ fn build_encrypted_par2_fixture(password: &str) -> EncryptedPar2Release {
     );
     let msg_base_par2 = "msg-base-par2@test".to_string();
     known_articles.insert(msg_base_par2.clone(), art_base_par2);
-    let idx_base_par2 = next_index;
     next_index += 1;
 
     // Encrypt base.vol000+008.par2 (1 part)
@@ -175,7 +171,6 @@ fn build_encrypted_par2_fixture(password: &str) -> EncryptedPar2Release {
     );
     let msg_vol_par2 = "msg-vol-par2@test".to_string();
     known_articles.insert(msg_vol_par2.clone(), art_vol_par2);
-    let idx_vol_par2 = next_index;
 
     let xml = format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -188,26 +183,26 @@ fn build_encrypted_par2_fixture(password: &str) -> EncryptedPar2Release {
   <file poster="uploader@example.com" date="1774300000" subject="&quot;data1.bin&quot; yEnc">
     <groups><group>alt.binaries.test</group></groups>
     <segments>
-      <segment bytes="{}" number="1" segmentIndex="{idx_d1_p1}">{msg_d1_p1}</segment>
-      <segment bytes="{}" number="2" segmentIndex="{idx_d1_p2}">{msg_d1_p2}</segment>
+      <segment bytes="{}" number="1">{msg_d1_p1}</segment>
+      <segment bytes="{}" number="2">{msg_d1_p2}</segment>
     </segments>
   </file>
   <file poster="uploader@example.com" date="1774300000" subject="&quot;data2.bin&quot; yEnc">
     <groups><group>alt.binaries.test</group></groups>
     <segments>
-      <segment bytes="{}" number="1" segmentIndex="{idx_d2}">{msg_d2}</segment>
+      <segment bytes="{}" number="1">{msg_d2}</segment>
     </segments>
   </file>
   <file poster="uploader@example.com" date="1774300000" subject="&quot;base.par2&quot; yEnc">
     <groups><group>alt.binaries.test</group></groups>
     <segments>
-      <segment bytes="{}" number="1" segmentIndex="{idx_base_par2}">{msg_base_par2}</segment>
+      <segment bytes="{}" number="1">{msg_base_par2}</segment>
     </segments>
   </file>
   <file poster="uploader@example.com" date="1774300000" subject="&quot;{vol_filename}&quot; yEnc">
     <groups><group>alt.binaries.test</group></groups>
     <segments>
-      <segment bytes="{}" number="1" segmentIndex="{idx_vol_par2}">{msg_vol_par2}</segment>
+      <segment bytes="{}" number="1">{msg_vol_par2}</segment>
     </segments>
   </file>
 </nzb>"#,

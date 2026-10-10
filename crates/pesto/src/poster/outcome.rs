@@ -1,6 +1,5 @@
 //! Posting results and the pure policies that decide whether to publish them.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
@@ -12,19 +11,18 @@ use tracing::{debug, info, warn};
 ///
 /// Carries the file ordinal (`file_ordinal`), total files in the release
 /// (`total_files`), the segment's declared part number (`part_number`), and
-/// the canonical globally unique `segment_index` computed by the prefix-sum
-/// formula defined in the yEnc Body Encryption Standard v1.0 §2:
+/// the `segment_index` embedded in the article bootstrap (the `=yencryption`
+/// `index=` token and, in combined mode, Line 1 bytes 16..19).
 ///
-/// ```text
-/// segment_index = sum(parts(J) for J < file_ordinal) + part_number
-/// ```
-///
-/// All fields are one-based `u32` values; zero is never valid, and — per
-/// CR-02 (yEnc Control Lines Encryption Standard §4/§8 producer req 6) —
-/// neither is any index whose big-endian `uint32_be` encoding contains a
-/// `0x0A` (LF) or `0x0D` (CR) byte, because such bytes would split Line 1
-/// on the wire. Construction is only through [`SegmentIdentity::checked`],
-/// which enforces the full contract and returns `None` on any violation.
+/// Uploaders allocate indices continuously from 1 across the whole release,
+/// skipping every value forbidden by the index framing rule (yEnc Body
+/// Encryption Standard v1.2 §8): `0` is never valid, and neither is any index
+/// whose big-endian `uint32_be` encoding contains a `0x0A` (LF) or `0x0D`
+/// (CR) byte, because such bytes would split Line 1 on the wire. The
+/// production allocator is [`super::ReleaseLayout::segment_identity`], backed
+/// by [`nth_safe_segment_index`]. Construction is only through
+/// [`SegmentIdentity::new`], which enforces the full contract and returns
+/// `None` on any violation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SegmentIdentity {
     /// 1-based file position in the release (`N` in `[N/M]`).
@@ -38,50 +36,18 @@ pub struct SegmentIdentity {
 }
 
 impl SegmentIdentity {
-    /// Construct a checked identity from the prefix-sum parts.
-    ///
-    /// `prefix_parts` is the sum of part counts for every file whose ordinal
-    /// is strictly less than `file_ordinal`. Returns `None` if any input is
-    /// zero, `file_ordinal > total_files`, or the resulting `segment_index`
-    /// overflows `u32`, equals zero, or is forbidden by CR-02 (any big-endian
-    /// byte equals `0x0A` or `0x0D`).
-    pub fn checked(
-        prefix_parts: u64,
-        file_ordinal: u32,
-        total_files: u32,
-        part_number: u32,
-    ) -> Option<Self> {
-        if file_ordinal == 0 || total_files == 0 || part_number == 0 {
-            return None;
-        }
-        if file_ordinal > total_files {
-            return None;
-        }
-        let index_u64 = prefix_parts.checked_add(u64::from(part_number))?;
-        let segment_index = u32::try_from(index_u64).ok()?;
-        if !is_safe_segment_index(segment_index) {
-            return None;
-        }
-        Some(SegmentIdentity {
-            file_ordinal,
-            total_files,
-            part_number,
-            segment_index,
-        })
-    }
-
     /// Construct a checked identity from an explicit segment index.
     ///
-    /// Requires `part_number > 0 && segment_index > 0` and CR-02 safety (no
-    /// big-endian byte equal to `0x0A` or `0x0D`).
-    /// Enforces two legal geometry forms:
+    /// Requires `part_number > 0` and a `segment_index` permitted by the
+    /// index framing rule (non-zero, no big-endian byte equal to `0x0A` or
+    /// `0x0D`). Enforces two legal geometry forms:
     /// - Counted geometry: `total_files > 0 && file_ordinal >= 1 && file_ordinal <= total_files`.
     /// - Uncounted geometry: exactly `file_ordinal == 0 && total_files == 0` (used for imported
-    ///   NZBs and obfuscated releases where release counters are omitted per RFC Section 8).
+    ///   NZBs and obfuscated releases where release counters are omitted).
     ///
     /// Rejects mixed forms (e.g. `file_ordinal > 0 && total_files == 0` or
     /// `file_ordinal == 0 && total_files > 0`) by returning `None`.
-    pub fn explicit(
+    pub fn new(
         file_ordinal: u32,
         total_files: u32,
         part_number: u32,
@@ -106,8 +72,8 @@ impl SegmentIdentity {
     }
 }
 
-/// CR-02 wire-safety predicate (yEnc Control Lines Encryption Standard §4/§8
-/// producer req 6): `0` is never a valid index, and any index whose big-endian
+/// Index framing rule (yEnc Body Encryption Standard v1.2 §8): `0` is never
+/// a valid index, and any index whose big-endian
 /// `uint32_be` encoding contains a `0x0A` (LF) or `0x0D` (CR) byte would split
 /// Line 1 on the wire and is forbidden.
 pub fn is_safe_segment_index(segment_index: u32) -> bool {
@@ -118,7 +84,7 @@ pub fn is_safe_segment_index(segment_index: u32) -> bool {
             .all(|&b| b != 0x0A && b != 0x0D)
 }
 
-/// Number of CR-02-forbidden values in `1..=n` (values whose big-endian
+/// Number of forbidden values in `1..=n` (values whose big-endian
 /// bytes contain `0x0A` or `0x0D`). Computed by digit DP over the four
 /// big-endian bytes of `n` — exact, O(1), no enumeration.
 fn count_forbidden_le(n: u64) -> u64 {
@@ -146,7 +112,7 @@ fn count_forbidden_le(n: u64) -> u64 {
 }
 
 /// Map a 1-based ordinal (rank) to the ordinal-th permitted segment index:
-/// the monotonic sequence over `u32` that skips every CR-02-forbidden value
+/// the monotonic sequence over `u32` that skips every value forbidden by the index framing rule
 /// (`0` and any value whose big-endian encoding contains `0x0A`/`0x0D`).
 ///
 /// Ordinals 1-9 map to indices 1-9; ordinal 10→11, 11→12, 12→14, 13→15
@@ -176,106 +142,6 @@ pub fn nth_safe_segment_index(ordinal: u64) -> Option<u32> {
         }
         candidate = next;
     }
-}
-
-/// File-level parts and numbering input for identity reconstruction.
-#[derive(Debug, Clone)]
-pub struct FileIdentityInput {
-    pub file_ordinal: u32,
-    pub total_files: u32,
-    pub parts: Vec<(u32, String)>,
-}
-
-/// Reconstruct the complete set of [`SegmentIdentity`] values for a release
-/// given per-file ordinals and part counts.
-///
-/// Returns `Some(map)` keyed by Message-ID when every file has a valid unique
-/// ordinal in `1..=total_files` and every part has a contiguous range starting
-/// at 1. Returns `None` if any validation fails — the release is then treated
-/// as ordinary (no encryption identity).
-pub fn reconstruct_identities(
-    files: &[FileIdentityInput],
-) -> Option<HashMap<String, SegmentIdentity>> {
-    if files.is_empty() {
-        return None;
-    }
-
-    // All files must agree on total_files.
-    let total_files = files[0].total_files;
-    if total_files == 0 {
-        return None;
-    }
-    if files.iter().any(|f| f.total_files != total_files) {
-        return None;
-    }
-
-    // Ordinal set must be complete: file count must match total_files exactly.
-    // This also bounds memory allocation so total_files cannot cause DoS.
-    if files.len() as u64 != u64::from(total_files) {
-        return None;
-    }
-
-    // Collect unique ordinals and validated part info.
-    let mut ordinal_parts: Vec<(u32, u32)> = Vec::with_capacity(files.len());
-    for f in files {
-        if f.file_ordinal == 0 || f.file_ordinal > total_files {
-            return None;
-        }
-        let max_part = f.parts.len() as u32;
-        if max_part == 0 {
-            return None;
-        }
-        // Parts must be contiguous 1..=max_part with no duplicates.
-        let mut seen_parts: Vec<u32> = f.parts.iter().map(|(p, _)| *p).collect();
-        seen_parts.sort_unstable();
-        seen_parts.dedup();
-        if seen_parts.len() != max_part as usize {
-            return None;
-        }
-        for (i, &p) in seen_parts.iter().enumerate() {
-            if p != (i as u32) + 1 {
-                return None;
-            }
-        }
-        ordinal_parts.push((f.file_ordinal, max_part));
-    }
-
-    // Check unique ordinals and complete 1..=total_files set.
-    let mut ordinals: Vec<u32> = ordinal_parts.iter().map(|(o, _)| *o).collect();
-    ordinals.sort_unstable();
-    ordinals.dedup();
-    if ordinals.len() != files.len() {
-        return None;
-    }
-    if ordinals.len() != total_files as usize {
-        return None;
-    }
-    for (i, &o) in ordinals.iter().enumerate() {
-        if o != (i as u32) + 1 {
-            return None;
-        }
-    }
-
-    // Build prefix sums sorted by ordinal.
-    ordinal_parts.sort_by_key(|(o, _)| *o);
-    let mut prefix_sums: Vec<u64> = Vec::with_capacity(total_files as usize);
-    let mut running: u64 = 0;
-    for (_, part_count) in &ordinal_parts {
-        prefix_sums.push(running);
-        running = running.checked_add(u64::from(*part_count))?;
-    }
-
-    // Build result map keyed by Message-ID.
-    let mut result = HashMap::new();
-    for f in files {
-        let prefix = prefix_sums[(f.file_ordinal - 1) as usize];
-        for (part, mid) in &f.parts {
-            let identity = SegmentIdentity::checked(prefix, f.file_ordinal, total_files, *part)?;
-            result.insert(mid.clone(), identity);
-        }
-    }
-
-    Some(result)
 }
 
 /// A posted segment, retained for later `.nzb` generation.
@@ -559,7 +425,7 @@ mod tests {
 }
 
 #[cfg(test)]
-mod cr02_tests {
+mod index_framing_tests {
     use super::*;
 
     fn forbidden(i: u32) -> bool {
@@ -567,16 +433,13 @@ mod cr02_tests {
     }
 
     #[test]
-    fn checked_rejects_all_four_forbidden_indices() {
+    fn new_rejects_all_four_forbidden_indices() {
         for idx in [10u32, 13, 266, 269] {
             assert!(
-                SegmentIdentity::checked(0, 1, 1, idx).is_none(),
-                "checked must reject forbidden index {idx}"
+                SegmentIdentity::new(1, 1, 1, idx).is_none(),
+                "new must reject forbidden index {idx}"
             );
-            assert!(
-                SegmentIdentity::explicit(1, 1, 1, idx).is_none(),
-                "explicit must reject forbidden index {idx}"
-            );
+
             assert!(!is_safe_segment_index(idx));
         }
         // Neighbors remain valid.
@@ -587,7 +450,7 @@ mod cr02_tests {
 
     #[test]
     fn nth_safe_segment_index_rank_mapping() {
-        // Rank semantics per plan Task 1: the ordinal-th permitted value.
+        // Rank semantics: the ordinal-th permitted value.
         // Derived from the forbidden set {0, 10, 13, 266, 269} — the permitted
         // sequence is 1..9, 11, 12, 14, 15, 16, ... so:
         for (ordinal, expected) in [

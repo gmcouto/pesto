@@ -99,7 +99,7 @@ fn test_inner(results: Arc<Mutex<Vec<PostedSegment>>>) -> Inner {
 
 #[test]
 fn splice_preserves_logical_identity_and_subject_ordinals() {
-    let id = crate::poster::outcome::SegmentIdentity::checked(0, 1, 2, 1).unwrap();
+    let id = crate::poster::outcome::SegmentIdentity::new(1, 2, 1, 1).unwrap();
     let initial = PostedSegment {
         file_name: "file.bin".into(),
         file_path: Arc::from(std::path::Path::new("file.bin")),
@@ -152,8 +152,8 @@ fn splice_preserves_logical_identity_and_subject_ordinals() {
 
 #[test]
 fn splice_errors_if_repost_mutates_segment_identity() {
-    let id1 = crate::poster::outcome::SegmentIdentity::checked(0, 1, 2, 1).unwrap();
-    let id2 = crate::poster::outcome::SegmentIdentity::checked(1, 2, 2, 1).unwrap();
+    let id1 = crate::poster::outcome::SegmentIdentity::new(1, 2, 1, 1).unwrap();
+    let id2 = crate::poster::outcome::SegmentIdentity::new(2, 2, 1, 2).unwrap();
     let initial = PostedSegment {
         file_name: "file.bin".into(),
         file_path: Arc::from(std::path::Path::new("file.bin")),
@@ -206,7 +206,7 @@ fn splice_errors_if_repost_mutates_segment_identity() {
 
 #[test]
 fn splice_errors_if_repost_mutates_file_index() {
-    let id = crate::poster::outcome::SegmentIdentity::checked(0, 1, 2, 1).unwrap();
+    let id = crate::poster::outcome::SegmentIdentity::new(1, 2, 1, 1).unwrap();
     let initial = PostedSegment {
         file_name: "file.bin".into(),
         file_path: Arc::from(std::path::Path::new("file.bin")),

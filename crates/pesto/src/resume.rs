@@ -205,7 +205,7 @@ pub struct UploadSessionIdentity {
     pub allocator_version: Option<u32>,
 }
 
-/// Current segment-index allocator version. Bump when the CR-02 safe-index
+/// Current segment-index allocator version. Bump when the safe-index
 /// mapping in `poster::outcome::nth_safe_segment_index` changes shape: the
 /// version is persisted in the resume session record, and a mismatch fails
 /// the session closed (invalidate + explicit error) instead of silently
@@ -380,7 +380,7 @@ impl ResumeState {
     /// version, the entire session is invalidated and `false` is returned.
     ///
     /// Allocator-version policy (fail closed, never silently re-map): sessions
-    /// persisted without a version marker (pre-CR-02 builds) or by a different
+    /// persisted without a version marker (earlier builds) or by a different
     /// version carry identities allocated under a different rank→index mapping;
     /// resuming them would re-post articles whose bootstrap indices no longer
     /// match the freshly computed layout, producing undecryptable articles. The
@@ -936,7 +936,7 @@ mod tests {
         let layout = ReleaseLayout::from_parts(2, &[(1, 2), (2, 3)]).unwrap();
         state.set_session_identity(UploadSessionIdentity::new(Some(salt), layout.clone()));
 
-        let id1 = SegmentIdentity::checked(0, 1, 2, 1).unwrap();
+        let id1 = SegmentIdentity::new(1, 2, 1, 1).unwrap();
         state.record_with(
             "file1.bin",
             1,
@@ -1014,7 +1014,7 @@ mod tests {
                     mtime: Some(100),
                 },
             );
-            let id = SegmentIdentity::checked(0, 1, 2, 1).unwrap();
+            let id = SegmentIdentity::new(1, 2, 1, 1).unwrap();
             s.record_with(
                 "a.bin",
                 1,
@@ -1073,7 +1073,7 @@ mod tests {
         s.set_session_identity(UploadSessionIdentity::new(Some(salt), base_layout.clone()));
 
         // Record a segment with a conflicting identity (wrong part_number / segment_index)
-        let conflicting_id = SegmentIdentity::checked(10, 1, 2, 1).unwrap(); // prefix sum 10 instead of 0
+        let conflicting_id = SegmentIdentity::new(1, 2, 1, 11).unwrap(); // prefix sum 10 instead of 0
         s.record_with(
             "a.bin",
             1,
@@ -1100,9 +1100,9 @@ mod tests {
         let base_layout = ReleaseLayout::from_parts(1, &[(1, 1)]).unwrap();
         let salt = [0xabu8; 16];
 
-        // Simulate a pre-CR-02 session: no allocator version marker, and a
-        // persisted identity with index 10 — a value the CR-02 allocator skips
-        // and `SegmentIdentity::explicit` now rejects, so emulate the legacy
+        // Simulate a session from an earlier build: no allocator version
+        // marker, and a persisted identity with index 10 — a value the
+        // allocator skips and `SegmentIdentity::new` rejects, so emulate the
         // persisted record with a direct struct literal.
         let legacy_id = SegmentIdentity {
             file_ordinal: 1,
@@ -1146,7 +1146,7 @@ mod tests {
         let base_layout = ReleaseLayout::from_parts(1, &[(1, 1)]).unwrap();
         let salt = [0xcdu8; 16];
 
-        let id = SegmentIdentity::checked(0, 1, 1, 1).unwrap();
+        let id = SegmentIdentity::new(1, 1, 1, 1).unwrap();
         let mut s = ResumeState {
             session_identity: Some(UploadSessionIdentity {
                 salt: Some(salt),
@@ -1183,7 +1183,7 @@ mod tests {
 
         let mut s = ResumeState::default();
         s.set_session_identity(UploadSessionIdentity::new(Some(salt), base_layout.clone()));
-        let id = SegmentIdentity::checked(0, 1, 1, 1).unwrap();
+        let id = SegmentIdentity::new(1, 1, 1, 1).unwrap();
         s.record_with(
             "a.bin",
             1,

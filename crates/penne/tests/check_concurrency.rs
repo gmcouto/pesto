@@ -116,7 +116,6 @@ async fn multiple_connections_to_one_server_run_concurrently() {
             message_id: id,
             part: i as u32 + 1,
             bytes: 5,
-            segment_index: None,
         });
     }
     let (addr, _in_flight, peak) = spawn_slow_server(known, DELAY);

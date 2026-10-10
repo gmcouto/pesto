@@ -56,7 +56,6 @@ fn queue_with_one_segment(message_id: &str) -> DownloadQueue {
                 message_id: message_id.to_string(),
                 part: 1,
                 bytes: 4,
-                segment_index: None,
             }],
         }],
     }

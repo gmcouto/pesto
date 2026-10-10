@@ -81,7 +81,7 @@ fn record_failure_appends_description() {
         total: 5,
         offset: 0,
         data: vec![],
-        segment_identity: SegmentIdentity::checked(0, 1, 1, 2).unwrap(),
+        segment_identity: SegmentIdentity::new(1, 1, 2, 2).unwrap(),
         subject_name: "ep.mkv".into(),
         yenc_name: "ep.mkv".into(),
         from: String::new(),

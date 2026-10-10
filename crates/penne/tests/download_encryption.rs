@@ -111,7 +111,7 @@ async fn test_download_adapter_encapsulation() {
     let uploader = UploadEncryptionAdapter::new(session.clone());
 
     let payload = b"Plaintext content for Penne download encapsulation test. 1234567890.";
-    let identity = SegmentIdentity::checked(0, 1, 1, 1).unwrap();
+    let identity = SegmentIdentity::new(1, 1, 1, 1).unwrap();
     let spec = PartSpec {
         number: 1,
         total: 1,
@@ -146,7 +146,6 @@ async fn test_download_adapter_encapsulation() {
                 message_id: "enc-msg-01".to_string(),
                 part: 1,
                 bytes: payload.len() as u64,
-                segment_index: Some(1),
             }],
         }],
     };
@@ -231,7 +230,6 @@ async fn test_download_adapter_encapsulation() {
                 message_id: "plain-msg-01".to_string(),
                 part: 1,
                 bytes: plain_payload.len() as u64,
-                segment_index: None,
             }],
         }],
     };
@@ -260,7 +258,7 @@ async fn test_zero_output_on_auth_failure() {
     let uploader = UploadEncryptionAdapter::new(session.clone());
 
     let payload = b"Sensitive payload that must never touch disk if authentication fails!";
-    let identity = SegmentIdentity::checked(0, 1, 1, 1).unwrap();
+    let identity = SegmentIdentity::new(1, 1, 1, 1).unwrap();
     let spec = PartSpec {
         number: 1,
         total: 1,
@@ -316,7 +314,6 @@ async fn test_zero_output_on_auth_failure() {
                 message_id: "failover-msg-01".to_string(),
                 part: 1,
                 bytes: payload.len() as u64,
-                segment_index: Some(1),
             }],
         }],
     };
@@ -370,7 +367,6 @@ async fn test_zero_output_on_auth_failure() {
                 message_id: "bad-msg-01".to_string(),
                 part: 1,
                 bytes: payload.len() as u64,
-                segment_index: Some(1),
             }],
         }],
     };
@@ -432,7 +428,7 @@ async fn test_bad_cache_eviction_and_refetch() {
     let uploader = UploadEncryptionAdapter::new(session.clone());
 
     let payload = b"Payload for testing cache eviction and refetch on corruption!";
-    let identity = SegmentIdentity::checked(0, 1, 1, 1).unwrap();
+    let identity = SegmentIdentity::new(1, 1, 1, 1).unwrap();
     let spec = PartSpec {
         number: 1,
         total: 1,
@@ -474,7 +470,6 @@ async fn test_bad_cache_eviction_and_refetch() {
                 message_id: "cache-evict-msg-01".to_string(),
                 part: 1,
                 bytes: payload.len() as u64,
-                segment_index: Some(1),
             }],
         }],
     };
@@ -513,7 +508,7 @@ async fn test_tampered_primary_failover_to_secondary() {
     let uploader = UploadEncryptionAdapter::new(session.clone());
 
     let payload = b"Payload for multi-tier failover verification under provider tampering!";
-    let identity = SegmentIdentity::checked(0, 1, 1, 1).unwrap();
+    let identity = SegmentIdentity::new(1, 1, 1, 1).unwrap();
     let spec = PartSpec {
         number: 1,
         total: 1,
@@ -561,7 +556,6 @@ async fn test_tampered_primary_failover_to_secondary() {
                 message_id: "tier-failover-01".to_string(),
                 part: 1,
                 bytes: payload.len() as u64,
-                segment_index: Some(1),
             }],
         }],
     };
@@ -602,8 +596,8 @@ async fn test_multipart_partial_auth_failure_cleanup() {
     let part1_payload = vec![0x11u8; 500];
     let part2_payload = vec![0x22u8; 500];
 
-    let id1 = SegmentIdentity::checked(0, 1, 1, 1).unwrap();
-    let id2 = SegmentIdentity::checked(0, 1, 1, 2).unwrap();
+    let id1 = SegmentIdentity::new(1, 1, 1, 1).unwrap();
+    let id2 = SegmentIdentity::new(1, 1, 2, 2).unwrap();
 
     let mut body1 = Vec::new();
     let enc1 = uploader
@@ -665,13 +659,11 @@ async fn test_multipart_partial_auth_failure_cleanup() {
                     message_id: "mp-msg-01".to_string(),
                     part: 1,
                     bytes: 500,
-                    segment_index: Some(1),
                 },
                 QueuedSegment {
                     message_id: "mp-msg-02".to_string(),
                     part: 2,
                     bytes: 500,
-                    segment_index: Some(2),
                 },
             ],
         }],
@@ -708,16 +700,12 @@ async fn test_multipart_partial_auth_failure_cleanup() {
     );
 }
 
-/// C2-01 regression: an encrypted download (decryptor configured) must reject a
-/// spoofed *unencrypted* article served for a clean NZB 1.1 segment that carries
-/// no explicit `segment_index` (so `decode_article` is called with `None`).
-///
-/// Before the fix, `caller_segment_index.is_some()` was the only guard, so a
-/// `None` caller let `=ybegin` plaintext pass straight through — an
-/// authentication bypass that released unauthenticated plaintext to disk.
-/// The fix fails closed whenever the adapter holds decryption credentials.
+/// An encrypted download (decryptor configured) must reject a spoofed
+/// *unencrypted* article served for a plain NZB 1.1 segment: accepting `=ybegin`
+/// plaintext would release unauthenticated data to disk. The adapter fails
+/// closed whenever it holds decryption credentials.
 #[tokio::test]
-async fn test_unencrypted_spoof_rejected_for_decoupled_nzb_with_none_segment_index() {
+async fn test_unencrypted_spoof_rejected_for_encrypted_nzb_segment() {
     let password = "decoupled-spoof-password";
 
     // Adversary-supplied unauthenticated plaintext article: a normal, valid yEnc
@@ -742,8 +730,7 @@ async fn test_unencrypted_spoof_rejected_for_decoupled_nzb_with_none_segment_ind
     known.insert("spoof-none-idx-01".to_string(), spoofed_body);
     let addr = spawn_fake_server(known);
 
-    // Clean NZB 1.1 decoupling: no explicit index, so the queue segment has
-    // `segment_index: None`.
+    // Plain NZB 1.1 segment: the queue carries no encryption identity.
     let queue = DownloadQueue {
         files: vec![QueuedFile {
             name: "spoofed_decoupled.bin".to_string(),
@@ -753,7 +740,6 @@ async fn test_unencrypted_spoof_rejected_for_decoupled_nzb_with_none_segment_ind
                 message_id: "spoof-none-idx-01".to_string(),
                 part: 1,
                 bytes: plain_payload.len() as u64,
-                segment_index: None,
             }],
         }],
     };

@@ -387,7 +387,6 @@ mod tests {
                         message_id: format!("<{n}@x>"),
                         part: 1,
                         bytes: 10,
-                        segment_index: None,
                     }],
                 })
                 .collect(),

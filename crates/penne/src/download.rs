@@ -116,7 +116,6 @@ struct WorkItem {
     file_name: String,
     part: u32,
     message_id: String,
-    segment_index: Option<u32>,
 }
 
 /// Per-file completion tracking shared across the cache-hit prepass and
@@ -181,32 +180,6 @@ pub async fn download_queue(
     download_queue_with_decryptor(queue, tiers, dest_dir, retries, progress, None).await
 }
 
-/// Preflight validation for queue segment identities before any download side effects.
-///
-/// PER-ARTICLE ONLY (Phase 58 T3 design decision): any queue-time segment
-/// index must be non-zero and CR-02-safe (no big-endian byte equal to
-/// `0x0A`/`0x0D`). Release-wide bootstrap-index uniqueness is intentionally
-/// NOT validated pre-fetch: bootstrap indices live inside unfetched articles,
-/// so nothing at NZB parse time can see them — release-wide uniqueness is a
-/// PRODUCER obligation (enforced by `pesto`'s `nth_safe_segment_index`
-/// mapping) plus the per-article reject at bootstrap extraction. With
-/// bootstrap-only identity (v1.2 §8: readers MUST NOT consume `segmentIndex`
-/// XML attributes), clean NZBs queue with `segment_index = None` everywhere
-/// and this validation is a no-op pass-through.
-pub fn validate_queue_identity(queue: &DownloadQueue, encrypted: bool) -> Result<()> {
-    if !encrypted {
-        return Ok(());
-    }
-    for segment in queue.files.iter().flat_map(|file| &file.segments) {
-        if let Some(index) = segment.segment_index {
-            use pesto::poster::is_safe_segment_index;
-            anyhow::ensure!(index > 0, "INVALID_SEGMENT_INDEX_ZERO");
-            anyhow::ensure!(is_safe_segment_index(index), "FORBIDDEN_SEGMENT_INDEX_BYTE");
-        }
-    }
-    Ok(())
-}
-
 /// Fetch and decode every segment in `queue` from `tiers`, optionally using
 /// `decryptor` to restore encrypted control lines and authenticate body ciphertext.
 pub async fn download_queue_with_decryptor(
@@ -217,16 +190,6 @@ pub async fn download_queue_with_decryptor(
     progress: Option<ProgressSender>,
     decryptor: Option<Arc<DownloadDecryptionAdapter>>,
 ) -> Result<DownloadOutcome> {
-    let is_encrypted_queue = queue
-        .files
-        .iter()
-        .any(|f| f.segments.iter().any(|s| s.segment_index.is_some()));
-
-    if is_encrypted_queue && decryptor.is_none() {
-        anyhow::bail!("queue contains encrypted segments but no decryption adapter was provided");
-    }
-
-    validate_queue_identity(queue, is_encrypted_queue || decryptor.is_some())?;
     anyhow::ensure!(!tiers.is_empty(), "no servers configured");
 
     emit(&progress, || ProgressEvent::Started {
@@ -277,11 +240,9 @@ pub async fn download_queue_with_decryptor(
     let mut pending: Vec<WorkItem> = Vec::new();
     for file in &queue.files {
         for seg in &file.segments {
-            let segment_index = seg.segment_index;
-
             if let Some(cached) = cache::load(dest_dir, &seg.message_id) {
                 let decoded_result = if let Some(ref d) = decryptor {
-                    d.decode_article(&cached, segment_index)
+                    d.decode_article(&cached)
                 } else {
                     decode_part(&cached)
                 };
@@ -313,7 +274,6 @@ pub async fn download_queue_with_decryptor(
                 file_name: file.name.clone(),
                 part: seg.part,
                 message_id: seg.message_id.clone(),
-                segment_index,
             });
         }
     }
@@ -624,7 +584,7 @@ async fn worker_loop(
         };
 
         let decoded_result = if let Some(ref decryptor) = ctx.decryptor {
-            decryptor.decode_article(&body, item.segment_index)
+            decryptor.decode_article(&body)
         } else {
             decode_part(&body)
         };

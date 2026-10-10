@@ -728,11 +728,11 @@ async fn read_response_detects_closed_connection() {
     let _ = err; // presence of an error is what we assert
 }
 
-// ── T9: dot-stuffing round-trip — salt[0]==0x2E Line 1 bootstrap ──────────
+// ── Dot-stuffing round-trip — salt[0]==0x2E Line 1 bootstrap ──────────
 
 #[tokio::test]
 async fn salt_leading_dot_line1_bootstrap_survives_stuffed_round_trip() {
-    // T9 (Body Std §9 Transport boundary bullet, amended v1.2): Line 1 of an
+    // Body Std v1.2 §9 (transport boundary): Line 1 of an
     // encrypted article begins with the bootstrap salt; salt byte 0x2E ('.')
     // is legal in the 253-Alphabet, so Line 1 can start with a dot and a
     // conformant server strips/stuffs it on the wire. The posting path must

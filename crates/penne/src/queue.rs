@@ -13,9 +13,6 @@ pub struct QueuedSegment {
     pub message_id: String,
     pub part: u32,
     pub bytes: u64,
-    /// Explicit globally unique segment index read directly from legacy NZB
-    /// `segmentIndex` attribute. `None` for clean standard NZB 1.1 releases and unencrypted NZBs.
-    pub segment_index: Option<u32>,
 }
 
 /// One file to reassemble, and the segments it is made of, in part order.
@@ -46,14 +43,11 @@ pub struct DownloadQueue {
 /// eventually gets joined straight onto a destination directory
 /// (`assemble::StreamingAssembly::new`).
 ///
-/// When `parsed.segment_identities` is present, the identity fields are
-/// copied into the queue before sanitization can obscure the original
-/// Message-IDs.
+/// Encryption identity is never taken from the NZB: each article's
+/// `segmentIndex` and salt come from its own bootstrap after fetch. File
+/// ordinals come from the subject's `[N/M]` counter (parsed into
+/// `file_index`/`total_files`), independent of encryption identity.
 pub fn build(parsed: &ParsedNzb) -> DownloadQueue {
-    // Phase 58 T3: identity is bootstrap-only — no segment_identities map
-    // exists at parse time. File ordinals come from the subject's `[N/M]`
-    // counter (parsed into `file_index`/`total_files`), independent of
-    // encryption identity.
     let mut files: Vec<QueuedFile> = Vec::new();
     for seg in &parsed.segments {
         let name = sanitize_file_name(&seg.file_name);
@@ -61,9 +55,6 @@ pub fn build(parsed: &ParsedNzb) -> DownloadQueue {
             message_id: seg.message_id.clone(),
             part: seg.part,
             bytes: seg.bytes,
-            // Bootstrap-only identity: the index is extracted from Line 1
-            // post-fetch; nothing at queue time.
-            segment_index: None,
         };
         let file_ordinal = if seg.file_index > 0 {
             Some(seg.file_index)
@@ -363,21 +354,21 @@ mod tests {
     }
 
     #[test]
-    fn two_file_numbered_release_reconstructs_canonical_segment_indices() {
+    fn two_file_numbered_release_builds_ordered_queue() {
         let groups = vec!["alt.test".to_string()];
         // File 1 has 2 parts; File 2 has 1 part.
         let mut s1 = seg("f1.bin", 1, 2, "<f1p1@x>");
         s1.file_index = 1;
         s1.total_files = 2;
-        s1.segment_identity = Some(pesto::poster::SegmentIdentity::checked(0, 1, 2, 1).unwrap());
+        s1.segment_identity = Some(pesto::poster::SegmentIdentity::new(1, 2, 1, 1).unwrap());
         let mut s2 = seg("f1.bin", 2, 2, "<f1p2@x>");
         s2.file_index = 1;
         s2.total_files = 2;
-        s2.segment_identity = Some(pesto::poster::SegmentIdentity::checked(0, 1, 2, 2).unwrap());
+        s2.segment_identity = Some(pesto::poster::SegmentIdentity::new(1, 2, 2, 2).unwrap());
         let mut s3 = seg("f2.bin", 1, 1, "<f2p1@x>");
         s3.file_index = 2;
         s3.total_files = 2;
-        s3.segment_identity = Some(pesto::poster::SegmentIdentity::checked(2, 2, 2, 1).unwrap());
+        s3.segment_identity = Some(pesto::poster::SegmentIdentity::new(2, 2, 1, 3).unwrap());
 
         let meta = NzbMeta {
             password: Some("secret".into()),
@@ -398,16 +389,19 @@ mod tests {
 
         assert_eq!(queue.files.len(), 2);
         assert_eq!(queue.files[0].name, "f1.bin");
-        assert_eq!(queue.files[0].segments[0].segment_index, None);
-        assert_eq!(queue.files[0].segments[1].segment_index, None);
+        assert_eq!(queue.files[0].file_ordinal, Some(1));
+        assert_eq!(queue.files[0].segments.len(), 2);
+        assert_eq!(queue.files[0].segments[0].part, 1);
+        assert_eq!(queue.files[0].segments[1].part, 2);
 
         assert_eq!(queue.files[1].name, "f2.bin");
-        assert_eq!(queue.files[1].segments[0].segment_index, None);
+        assert_eq!(queue.files[1].file_ordinal, Some(2));
+        assert_eq!(queue.files[1].segments.len(), 1);
     }
 
     #[test]
-    fn reversing_xml_file_order_preserves_canonical_indices() {
-        // Construct NZB XML where File 2 appears BEFORE File 1 carrying explicit segmentIndex.
+    fn reversing_xml_file_order_preserves_file_ordinals() {
+        // Construct NZB XML where File 2 appears BEFORE File 1.
         let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
 <nzb xmlns="http://www.newzbin.com/DTD/2003/nzb">
   <head>
@@ -416,14 +410,14 @@ mod tests {
   <file poster="poster" date="1700000000" subject="[2/2] - &quot;f2.bin&quot; yEnc (1/1)">
     <groups><group>alt.test</group></groups>
     <segments>
-      <segment bytes="500" number="1" segmentIndex="3">f2p1@x</segment>
+      <segment bytes="500" number="1">f2p1@x</segment>
     </segments>
   </file>
   <file poster="poster" date="1700000000" subject="[1/2] - &quot;f1.bin&quot; yEnc (1/2)">
     <groups><group>alt.test</group></groups>
     <segments>
-      <segment bytes="500" number="1" segmentIndex="1">f1p1@x</segment>
-      <segment bytes="500" number="2" segmentIndex="2">f1p2@x</segment>
+      <segment bytes="500" number="1">f1p1@x</segment>
+      <segment bytes="500" number="2">f1p2@x</segment>
     </segments>
   </file>
 </nzb>"#;
@@ -434,12 +428,9 @@ mod tests {
         // Files are sorted by name in parsed: f1.bin then f2.bin.
         let f1 = queue.files.iter().find(|f| f.name == "f1.bin").unwrap();
         assert_eq!(f1.file_ordinal, Some(1));
-        assert_eq!(f1.segments[0].segment_index, None);
-        assert_eq!(f1.segments[1].segment_index, None);
 
         let f2 = queue.files.iter().find(|f| f.name == "f2.bin").unwrap();
         assert_eq!(f2.file_ordinal, Some(2));
-        assert_eq!(f2.segments[0].segment_index, None);
     }
 
     #[test]
@@ -482,13 +473,11 @@ mod tests {
         .unwrap();
 
         let parsed = pesto::nzb::parse(&xml).unwrap();
-        assert!(parsed.segment_identities.is_none());
 
         let queue = build(&parsed);
         assert_eq!(queue.files.len(), 1);
         assert_eq!(queue.files[0].file_ordinal, None);
         assert_eq!(queue.files[0].total_files, None);
-        assert_eq!(queue.files[0].segments[0].segment_index, None);
     }
 
     #[test]
@@ -507,7 +496,6 @@ mod tests {
 </nzb>"#;
 
         let parsed = pesto::nzb::parse(xml).unwrap();
-        assert!(parsed.segment_identities.is_none());
 
         let queue = build(&parsed);
         assert_eq!(queue.files.len(), 1);
@@ -517,9 +505,7 @@ mod tests {
         assert_eq!(queue.files[0].segments.len(), 2);
         // Declared part 3 must NEVER be compacted to 2!
         assert_eq!(queue.files[0].segments[0].part, 1);
-        assert_eq!(queue.files[0].segments[0].segment_index, None);
         assert_eq!(queue.files[0].segments[1].part, 3);
-        assert_eq!(queue.files[0].segments[1].segment_index, None);
     }
 
     #[test]
@@ -532,13 +518,13 @@ mod tests {
   <file poster="poster" date="1700000000" subject="[1/2] - &quot;data.bin&quot; yEnc (1/1)">
     <groups><group>alt.test</group></groups>
     <segments>
-      <segment bytes="500" number="1" segmentIndex="1">s1@x</segment>
+      <segment bytes="500" number="1">s1@x</segment>
     </segments>
   </file>
   <file poster="poster" date="1700000000" subject="[2/2] - &quot;data.bin&quot; yEnc (1/1)">
     <groups><group>alt.test</group></groups>
     <segments>
-      <segment bytes="500" number="1" segmentIndex="2">s2@x</segment>
+      <segment bytes="500" number="1">s2@x</segment>
     </segments>
   </file>
 </nzb>"#;
@@ -548,10 +534,8 @@ mod tests {
         assert_eq!(queue.files.len(), 2);
         assert_eq!(queue.files[0].file_ordinal, Some(1));
         assert_eq!(queue.files[0].segments.len(), 1);
-        assert_eq!(queue.files[0].segments[0].segment_index, None);
 
         assert_eq!(queue.files[1].file_ordinal, Some(2));
         assert_eq!(queue.files[1].segments.len(), 1);
-        assert_eq!(queue.files[1].segments[0].segment_index, None);
     }
 }

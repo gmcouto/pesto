@@ -225,7 +225,7 @@ pub fn parse_yencryption_line(line: &[u8]) -> Result<YEncryptionParams> {
     if segment_index == 0 {
         bail!("ZERO_SEGMENT_INDEX: segment index cannot be zero");
     }
-    // CR-02 (Control Std §4/§8; Body Std §4): an index whose big-endian
+    // Index framing rule (Body Std v1.2 §5/§8): an index whose big-endian
     // encoding contains 0x0A (LF) or 0x0D (CR) would have split a control
     // line on the wire — reject it here too so the gap cannot resurface if
     // body-only mode is ever added (combined mode already rejects it at the
@@ -404,12 +404,12 @@ impl DownloadDecryptionAdapter {
     /// with `=ybegin` is rejected as `UNAUTHENTICATED_ARTICLE` (fail closed), because accepting
     /// it would release unauthenticated plaintext and violate the Zero-Output Guarantee.
     /// Unencrypted passthrough is only allowed for an adapter with no credentials at all.
-    /// If encrypted, requires `segment_index` and valid session/password.
+    /// If encrypted, the `segmentIndex` and salt are taken from the article bootstrap and a
+    /// valid session/password is required.
     /// Strictly guarantees Zero-Output on authentication failure.
-    pub fn decode_article(&self, body: &[u8], segment_index: Option<u32>) -> Result<DecodedPart> {
-        let caller_segment_index = segment_index;
+    pub fn decode_article(&self, body: &[u8]) -> Result<DecodedPart> {
         if body.starts_with(b"=ybegin") {
-            if caller_segment_index.is_some() || self.has_decryption_credentials() {
+            if self.has_decryption_credentials() {
                 bail!(
                     "UNAUTHENTICATED_ARTICLE: unencrypted article received for encrypted segment"
                 );
@@ -441,19 +441,7 @@ impl DownloadDecryptionAdapter {
             .strip_suffix(b"\r")
             .unwrap_or(&body[..first_line_end]);
 
-        let (salt, line1_segment_index) = control::extract_bootstrap_from_line1(first_line)?;
-        let segment_index = match caller_segment_index {
-            Some(caller_idx) => {
-                ensure!(
-                    caller_idx == line1_segment_index,
-                    "CALLER_INDEX_MISMATCH: caller index {} does not match line 1 bootstrap index {}",
-                    caller_idx,
-                    line1_segment_index
-                );
-                caller_idx
-            }
-            None => line1_segment_index,
-        };
+        let (salt, segment_index) = control::extract_bootstrap_from_line1(first_line)?;
         let session = self.get_or_create_session(salt)?;
 
         // Decrypt control lines
@@ -652,7 +640,7 @@ mod tests {
         let session = Arc::new(EncryptionSession::new(password, salt).unwrap());
         let upload_adapter = UploadEncryptionAdapter::new(session);
         let payload = b"LF-only encrypted control framing";
-        let identity = SegmentIdentity::checked(0, 1, 1, 1).unwrap();
+        let identity = SegmentIdentity::new(1, 1, 1, 1).unwrap();
         let mut body = Vec::new();
         let encoded = upload_adapter
             .encode_article(
@@ -680,7 +668,7 @@ mod tests {
         }
 
         let decoded = DownloadDecryptionAdapter::with_password(password)
-            .decode_article(&lf_wire, Some(identity.segment_index))
+            .decode_article(&lf_wire)
             .unwrap();
         assert_eq!(decoded.data, payload);
     }
@@ -691,7 +679,7 @@ mod tests {
         let salt = control::generate_alphabet_salt();
         let session = Arc::new(EncryptionSession::new(password, salt).unwrap());
         let upload_adapter = UploadEncryptionAdapter::new(session);
-        let identity = SegmentIdentity::checked(0, 1, 1, 1).unwrap();
+        let identity = SegmentIdentity::new(1, 1, 1, 1).unwrap();
         let mut body = Vec::new();
         let encoded = upload_adapter
             .encode_article(
@@ -711,7 +699,7 @@ mod tests {
             .unwrap();
 
         let decoded = DownloadDecryptionAdapter::with_password(password)
-            .decode_article(&encoded.body, Some(identity.segment_index))
+            .decode_article(&encoded.body)
             .unwrap();
         assert!(decoded.data.is_empty());
         assert_eq!(decoded.file_size, 0);
@@ -730,7 +718,7 @@ mod tests {
             total: 1,
             offset: 0,
         };
-        let identity = SegmentIdentity::checked(0, 1, 1, 1).unwrap();
+        let identity = SegmentIdentity::new(1, 1, 1, 1).unwrap();
         let mut body = Vec::new();
         let encoded = upload_adapter
             .encode_article(
@@ -747,7 +735,7 @@ mod tests {
 
         let download_adapter = DownloadDecryptionAdapter::with_password(password);
         let decoded = download_adapter
-            .decode_article(&encoded.body, Some(identity.segment_index))
+            .decode_article(&encoded.body)
             .expect("decode single-part file with part= in filename must succeed");
 
         assert_eq!(decoded.data, payload);
@@ -767,7 +755,7 @@ mod tests {
             total: 2,
             offset: 0,
         };
-        let identity = SegmentIdentity::checked(0, 1, 2, 1).unwrap();
+        let identity = SegmentIdentity::new(1, 2, 1, 1).unwrap();
         let mut body = Vec::new();
         let encoded = upload_adapter
             .encode_article(
@@ -784,7 +772,7 @@ mod tests {
 
         let download_adapter = DownloadDecryptionAdapter::with_password(password);
         let decoded = download_adapter
-            .decode_article(&encoded.body, Some(identity.segment_index))
+            .decode_article(&encoded.body)
             .expect("decode multipart file with =ypart in filename must succeed");
 
         assert_eq!(decoded.data, payload);

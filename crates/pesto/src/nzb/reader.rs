@@ -25,11 +25,10 @@ struct RawSegment {
 
 /// Parse a `.nzb` document and reconstruct its [`PostedSegment`] list.
 ///
-/// Unencrypted releases and archive-password-only releases parse with `segment_identities: None`.
 /// Encrypted releases (indicated by `<meta type="yenc_encrypted">true</meta>`) are marked
-/// `yenc_encrypted`; segment identity is derived exclusively from each article's Line 1
-/// bootstrap bytes at download time (Body Encryption Standard v1.2 §8 consumer req 3:
-/// readers MUST NOT consume legacy segment-index XML attributes — if present, they are ignored).
+/// `yenc_encrypted`. Segments are plain NZB 1.1 records; segment identity is derived
+/// exclusively from each article's bootstrap at download time (Body Encryption
+/// Standard v1.2 §8).
 pub fn parse(content: &str) -> Result<ParsedNzb> {
     parse_internal(content, false)
 }
@@ -37,9 +36,8 @@ pub fn parse(content: &str) -> Result<ParsedNzb> {
 /// Parse an encrypted `.nzb` document.
 ///
 /// Requires encryption provenance (`<meta type="yenc_encrypted">true</meta>`).
-/// Segment identity is bootstrap-only: no segment-index XML attribute is
-/// read, validated, or required (v1.2 §8 — readers MUST NOT consume legacy
-/// segment-index attributes; writers MUST NOT emit them).
+/// Segment identity is bootstrap-only (Body Encryption Standard v1.2 §8):
+/// the NZB carries no encryption-specific segment data.
 pub fn parse_encrypted(content: &str) -> Result<ParsedNzb> {
     parse_internal(content, true)
 }
@@ -144,10 +142,6 @@ fn parse_internal(content: &str, force_encrypted: bool) -> Result<ParsedNzb> {
             } else {
                 format!("<{raw_id}>")
             };
-            // v1.2 §8: any legacy segment-index XML attribute is IGNORED — not
-            // consumed, not validated. Segment identity derives exclusively
-            // from each article's Line 1 bootstrap bytes at download time.
-
             raw_segments.push(RawSegment {
                 file_name: current_file_name.clone(),
                 subject_name: current_subject_name.clone(),
@@ -183,21 +177,18 @@ fn parse_internal(content: &str, force_encrypted: bool) -> Result<ParsedNzb> {
     }
 
     // Encryption provenance: explicit `yenc_encrypted` meta (v1.2 §8), or —
-    // for `parse_encrypted`'s caller contract — forced. The legacy
-    // `(password && any segment-index attribute)` inference heuristic is
-    // DELETED (Phase 58 T3): XML attributes are never consumed, so they can
-    // never prove encryption.
+    // for `parse_encrypted`'s caller contract — forced.
     let is_encrypted = force_encrypted || explicit_yenc_encrypted;
 
     if is_encrypted {
-        // T10 fail-closed gating (Body Encryption Standard v1.2 §8): a
+        // Fail-closed gating (Body Encryption Standard v1.2 §8): a
         // declared-encrypted NZB with unsupported provenance metadata is a
         // STRUCTURAL failure — it would reproduce identically against every
         // server — so it is typed `MetadataValidation` at the parse origin
         // (the downloader aborts instead of rotating providers, and releases
         // no plaintext).
         if let Some(ref ver) = meta.yenc_version {
-            if ver != "1.0" && ver != "1.1" && ver != YENC_SPEC_VERSION {
+            if ver != YENC_SPEC_VERSION {
                 return Err(attach_crypto_error_kind(
                     anyhow::anyhow!("unsupported yenc_version in nzb: {ver}"),
                     CryptoErrorKind::MetadataValidation,
@@ -217,8 +208,8 @@ fn parse_internal(content: &str, force_encrypted: bool) -> Result<ParsedNzb> {
 
     // Bootstrap-only identity (v1.2 §8): no segment identity is constructed
     // at NZB parse time. Identity comes exclusively from each article's
-    // Line 1 bootstrap bytes after fetch; download-time validation is
-    // per-article only (non-zero, CR-02-safe) — release-wide uniqueness is a
+    // bootstrap after fetch; download-time validation is per-article only
+    // (non-zero, index framing rule) — release-wide uniqueness is a
     // PRODUCER obligation (nth_safe_segment_index mapping), because bootstrap
     // indices live inside unfetched articles and cannot be validated here.
     let mut segments = Vec::with_capacity(raw_segments.len());
@@ -251,7 +242,6 @@ fn parse_internal(content: &str, force_encrypted: bool) -> Result<ParsedNzb> {
         groups,
         segments,
         meta,
-        segment_identities: None,
     })
 }
 

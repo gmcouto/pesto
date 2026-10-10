@@ -7,7 +7,7 @@ use fpe::ff1::{FlexibleNumeralString, FF1};
 use super::kdf::EncryptionSession;
 use super::{attach_crypto_error_kind, CryptoErrorKind};
 
-/// Map byte octet to numeral 0..252 per yEnc Control Lines Standard v1.0,
+/// Map byte octet to numeral 0..252 per yEnc Control Lines Standard v1.2,
 /// attaching [`CryptoErrorKind::ProviderFailover`] (wire-corruption tier) to
 /// out-of-Alphabet rejections so downstream routers can classify.
 pub fn byte_to_numeral(b: u8) -> Result<u16> {
@@ -26,7 +26,7 @@ pub fn byte_to_numeral(b: u8) -> Result<u16> {
     }
 }
 
-/// Map numeral 0..252 back to byte octet per yEnc Control Lines Standard v1.0.
+/// Map numeral 0..252 back to byte octet per yEnc Control Lines Standard v1.2.
 pub fn numeral_to_byte(n: u16) -> Result<u8> {
     match n {
         0..=8 => Ok((n + 1) as u8),
@@ -65,7 +65,7 @@ pub fn extract_bootstrap_from_line1(line1: &[u8]) -> Result<([u8; 16], u32)> {
     if segment_index == 0 {
         bail!("ZERO_SEGMENT_INDEX: segment index cannot be zero");
     }
-    // CR-02 (Control Std §4/§8): a segmentIndex whose big-endian encoding
+    // Index framing rule (Control Std v1.2 §5/§8): a segmentIndex whose big-endian encoding
     // contains 0x0A (LF) or 0x0D (CR) would have split Line 1 on the wire —
     // reject under PROVIDER_FAILOVER (typed at origin for the failover
     // router).
@@ -211,7 +211,7 @@ pub fn split_lines_preserving_endings(input: &[u8]) -> Vec<LineSlice<'_>> {
 
 /// Encrypt control lines in a yEnc block, preserving data lines and line terminators.
 ///
-/// Follows NIST SP 800-38G FF1 and yEnc Control Lines Standard v1.1:
+/// Follows NIST SP 800-38G FF1 and yEnc Control Lines Standard v1.2:
 /// - Physical lineIndex is 1-based, incrementing on every line (header, data, footer).
 /// - Line 1 (=ybegin) prepends 20-byte bootstrap prefix ([16B salt][4B uint32_be(segmentIndex)]) to ciphertext.
 /// - Lines 2..N preserve exact length.

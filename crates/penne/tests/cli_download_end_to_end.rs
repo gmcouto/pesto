@@ -897,7 +897,7 @@ fn encrypted_nzb_metadata_round_trip() {
         total: 1,
         offset: 0,
     };
-    let identity = pesto::poster::SegmentIdentity::checked(0, 1, 1, 1).unwrap();
+    let identity = pesto::poster::SegmentIdentity::new(1, 1, 1, 1).unwrap();
     let mut body = Vec::new();
     let encoded = adapter
         .encode_article(
@@ -968,7 +968,7 @@ fn encrypted_nzb_missing_metadata_rejects() {
         total: 1,
         offset: 0,
     };
-    let identity = pesto::poster::SegmentIdentity::checked(0, 1, 1, 1).unwrap();
+    let identity = pesto::poster::SegmentIdentity::new(1, 1, 1, 1).unwrap();
     let mut body = Vec::new();
     let encoded = adapter
         .encode_article(
@@ -1092,8 +1092,8 @@ fn cli_download_encrypted_multipart_round_trip() {
     let part2_data = vec![0x22u8; 1000];
     let full_data = [part1_data.as_slice(), part2_data.as_slice()].concat();
 
-    let id1 = pesto::poster::SegmentIdentity::checked(0, 1, 1, 1).unwrap();
-    let id2 = pesto::poster::SegmentIdentity::checked(0, 1, 1, 2).unwrap();
+    let id1 = pesto::poster::SegmentIdentity::new(1, 1, 1, 1).unwrap();
+    let id2 = pesto::poster::SegmentIdentity::new(1, 1, 2, 2).unwrap();
 
     let mut body1 = Vec::new();
     let enc1 = adapter

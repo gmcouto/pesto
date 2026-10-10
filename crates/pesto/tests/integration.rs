@@ -890,7 +890,7 @@ async fn pst3_spool_replay_preserves_identity_and_invalidation_clears_spool() {
     ));
     resume_state.save(&state_path).unwrap();
 
-    let seg_id = pesto::poster::SegmentIdentity::checked(0, 1, 1, 1).unwrap();
+    let seg_id = pesto::poster::SegmentIdentity::new(1, 1, 1, 1).unwrap();
     let metadata = pesto::spool::SpoolMetadata {
         wire_identity: Some(pesto::resume::PersistedWireIdentity {
             subject_name: "replay_pst3.bin".into(),

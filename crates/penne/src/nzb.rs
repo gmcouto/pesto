@@ -16,8 +16,8 @@ pub fn load(path: &Path) -> Result<ParsedNzb> {
     pesto::nzb::parse(&contents).with_context(|| format!("parsing {}", path.display()))
 }
 
-/// Read and parse an encrypted `.nzb` file from disk, strictly enforcing
-/// explicit `segmentIndex` on every segment.
+/// Read and parse an encrypted `.nzb` file from disk, treating it as encrypted
+/// (see [`pesto::nzb::parse_encrypted`]).
 pub fn load_encrypted(path: &Path) -> Result<ParsedNzb> {
     let contents =
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
@@ -178,125 +178,5 @@ mod tests {
             ..Default::default()
         };
         assert!(download_decryptor(&meta_whitespace_pwd).is_err());
-    }
-
-    #[test]
-    fn test_validate_queue_identity_unencrypted_allows_missing_or_arbitrary() {
-        let queue = crate::queue::DownloadQueue {
-            files: vec![crate::queue::QueuedFile {
-                name: "file.bin".into(),
-                segments: vec![
-                    crate::queue::QueuedSegment {
-                        message_id: "id1@x".into(),
-                        part: 1,
-                        bytes: 100,
-                        segment_index: None,
-                    },
-                    crate::queue::QueuedSegment {
-                        message_id: "id2@x".into(),
-                        part: 2,
-                        bytes: 100,
-                        segment_index: Some(0),
-                    },
-                ],
-                file_ordinal: None,
-                total_files: None,
-            }],
-        };
-        assert!(crate::download::validate_queue_identity(&queue, false).is_ok());
-    }
-
-    #[test]
-    fn test_validate_queue_identity_encrypted_per_article_checks() {
-        // Phase 58 T3: per-article-only validation — non-zero + CR-02-safe.
-        // Release-wide uniqueness/conflict checks are intentionally absent
-        // (producer obligation; bootstrap indices invisible at queue time).
-        let make_seg = |mid: &str, idx: Option<u32>| crate::queue::QueuedSegment {
-            message_id: mid.into(),
-            part: 1,
-            bytes: 100,
-            segment_index: idx,
-        };
-        let make_queue = |segs: Vec<crate::queue::QueuedSegment>| crate::queue::DownloadQueue {
-            files: vec![crate::queue::QueuedFile {
-                name: "file1.bin".into(),
-                segments: segs,
-                file_ordinal: None,
-                total_files: None,
-            }],
-        };
-
-        // Sparse/unordered safe indices pass.
-        assert!(crate::download::validate_queue_identity(
-            &make_queue(vec![
-                make_seg("id1@x", Some(10 + 1)),
-                make_seg("id2@x", Some(5))
-            ]),
-            true
-        )
-        .is_ok());
-
-        // Missing index passes in clean NZB 1.1 (bootstrap-only identity).
-        assert!(crate::download::validate_queue_identity(
-            &make_queue(vec![make_seg("id1@x", None)]),
-            true
-        )
-        .is_ok());
-
-        // Zero rejected.
-        let err = crate::download::validate_queue_identity(
-            &make_queue(vec![make_seg("id1@x", Some(0))]),
-            true,
-        )
-        .unwrap_err();
-        assert!(err.to_string().contains("INVALID_SEGMENT_INDEX_ZERO"));
-
-        // Forbidden bytes rejected (10, 13, 266, 269).
-        for idx in [10u32, 13, 266, 269] {
-            let err = crate::download::validate_queue_identity(
-                &make_queue(vec![make_seg("id1@x", Some(idx))]),
-                true,
-            )
-            .unwrap_err();
-            assert!(
-                err.to_string().contains("FORBIDDEN_SEGMENT_INDEX_BYTE"),
-                "index {idx} must be forbidden, got: {err}"
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn test_download_queue_encrypted_without_decryptor_fails_preflight() {
-        let queue = crate::queue::DownloadQueue {
-            files: vec![crate::queue::QueuedFile {
-                name: "file.bin".into(),
-                segments: vec![crate::queue::QueuedSegment {
-                    message_id: "msg@x".into(),
-                    part: 1,
-                    bytes: 100,
-                    segment_index: Some(1),
-                }],
-                file_ordinal: None,
-                total_files: None,
-            }],
-        };
-        let dest = tempfile::tempdir().unwrap();
-        let dummy_tier = crate::config::ServerTier::solo(pesto::config::ServerEntry {
-            host: "127.0.0.1".into(),
-            port: 119,
-            ssl: false,
-            connections: 1,
-            username: None,
-            password: None,
-            retry_delay: 0,
-            timeout: 1,
-            proxy: None,
-        });
-        let res =
-            crate::download::download_queue(&queue, &[dummy_tier], dest.path(), 0, None).await;
-        assert!(res.is_err());
-        let err = res.unwrap_err().to_string();
-        assert!(err
-            .contains("queue contains encrypted segments but no decryption adapter was provided"));
     }
 }

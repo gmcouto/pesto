@@ -416,11 +416,11 @@ proptest! {
     fn control_line_roundtrip_preserves_framing_for_arbitrary_session_identity(
         password in "[ -~]{1,32}",
         salt_numerals in prop::array::uniform16(0u16..253),
-        // CR-02: the round-trip must exercise only wire-safe indices (the
+        // Index framing rule: the round-trip must exercise only wire-safe indices (the
         // uploader allocator never assigns forbidden ones); arbitrary u32
         // values including forbidden indices are rejected at the bootstrap.
         segment_index in (1u32..=200u32)
-            .prop_filter("segment_index must be CR-02-safe", |i| {
+            .prop_filter("segment_index must satisfy the index framing rule", |i| {
                 i.to_be_bytes().iter().all(|&b| b != 0x0A && b != 0x0D)
             }),
         name in "[A-Za-z0-9._-]{1,48}",
@@ -610,7 +610,7 @@ fn test_malformed_inputs_rejection() {
                     total: 1,
                     offset: 0,
                 };
-                let identity = SegmentIdentity::checked(0, 1, 1, line1_idx).unwrap();
+                let identity = SegmentIdentity::new(1, 1, line1_idx, line1_idx).unwrap();
                 let mut body = Vec::new();
                 let enc = upload_adapter
                     .encode_article(
@@ -646,7 +646,7 @@ fn test_malformed_inputs_rejection() {
                     control::encrypt_yenc_control_lines(&session, line1_idx, &modified).unwrap();
 
                 let download_adapter = DownloadDecryptionAdapter::with_password("test123");
-                let res = download_adapter.decode_article(&re_enc, None);
+                let res = download_adapter.decode_article(&re_enc);
                 assert!(res.is_err(), "vector {id} expected error {expected_err}");
                 let err_msg = res.unwrap_err().to_string();
                 assert!(
@@ -671,7 +671,7 @@ fn test_adapter_contracts() {
         total: 1,
         offset: 0,
     };
-    let identity = SegmentIdentity::checked(0, 1, 1, 1).unwrap();
+    let identity = SegmentIdentity::new(1, 1, 1, 1).unwrap();
 
     let mut body = Vec::new();
     let encoded = upload_adapter
@@ -693,7 +693,7 @@ fn test_adapter_contracts() {
 
     let download_adapter = DownloadDecryptionAdapter::new(Some(session));
     let decoded = download_adapter
-        .decode_article(&encoded.body, Some(identity.segment_index))
+        .decode_article(&encoded.body)
         .expect("decode_article failed");
 
     assert_eq!(decoded.data, payload);
@@ -713,7 +713,7 @@ fn test_adapter_multipart_roundtrip() {
         total: 5,
         offset: 1024,
     };
-    let identity = SegmentIdentity::checked(0, 1, 5, 2).unwrap();
+    let identity = SegmentIdentity::new(1, 5, 2, 2).unwrap();
 
     let mut body = Vec::new();
     let encoded = upload_adapter
@@ -734,7 +734,7 @@ fn test_adapter_multipart_roundtrip() {
 
     let download_adapter = DownloadDecryptionAdapter::with_password("multi-part-password");
     let decoded = download_adapter
-        .decode_article(&encoded.body, Some(identity.segment_index))
+        .decode_article(&encoded.body)
         .expect("decode_article failed");
 
     assert_eq!(decoded.data, payload);
@@ -778,7 +778,7 @@ fn test_upload_adapter_encapsulation() {
     // Also verify DownloadDecryptionAdapter passes unencrypted articles through untouched
     let download_adapter_empty = DownloadDecryptionAdapter::new(None);
     let pass_through_decoded = download_adapter_empty
-        .decode_article(&unencrypted_part.body, None)
+        .decode_article(&unencrypted_part.body)
         .expect("unencrypted article should decode transparently without session");
     assert_eq!(pass_through_decoded.data, payload);
 
@@ -786,7 +786,7 @@ fn test_upload_adapter_encapsulation() {
     let salt = [0x55u8; 16];
     let session = Arc::new(EncryptionSession::new("encapsulation-test-pass", salt).unwrap());
     let adapter = UploadEncryptionAdapter::new(session.clone());
-    let identity = SegmentIdentity::checked(0, 1, 1, 1).unwrap();
+    let identity = SegmentIdentity::new(1, 1, 1, 1).unwrap();
 
     let mut encrypted_buf = Vec::new();
     let encrypted_part = adapter
@@ -813,7 +813,7 @@ fn test_upload_adapter_encapsulation() {
     // 3. Transparent decryption recovers original plaintext
     let download_adapter = DownloadDecryptionAdapter::new(Some(session));
     let decrypted_part = download_adapter
-        .decode_article(&encrypted_part.body, Some(identity.segment_index))
+        .decode_article(&encrypted_part.body)
         .expect("transparent decryption failed");
 
     assert_eq!(decrypted_part.data, payload);
@@ -850,7 +850,7 @@ fn test_adapter_strict_header_order() {
         total: 1,
         offset: 0,
     };
-    let identity_single = SegmentIdentity::checked(0, 1, 1, 1).unwrap();
+    let identity_single = SegmentIdentity::new(1, 1, 1, 1).unwrap();
     let mut body_single = Vec::new();
     let enc_single = upload_adapter
         .encode_article(
@@ -867,7 +867,7 @@ fn test_adapter_strict_header_order() {
 
     let download_adapter = DownloadDecryptionAdapter::with_password(password);
     let dec_single = download_adapter
-        .decode_article(&enc_single.body, Some(identity_single.segment_index))
+        .decode_article(&enc_single.body)
         .expect("single-part decode must succeed");
     assert_eq!(dec_single.data, payload);
     // CRC normalization recomputes part_crc32 over the authenticated plaintext
@@ -881,7 +881,7 @@ fn test_adapter_strict_header_order() {
         total: 2,
         offset: 0,
     };
-    let identity_multi = SegmentIdentity::checked(0, 1, 2, 1).unwrap();
+    let identity_multi = SegmentIdentity::new(1, 2, 1, 1).unwrap();
     let mut body_multi = Vec::new();
     let enc_multi = upload_adapter
         .encode_article(
@@ -897,7 +897,7 @@ fn test_adapter_strict_header_order() {
         .unwrap();
 
     let dec_multi = download_adapter
-        .decode_article(&enc_multi.body, Some(identity_multi.segment_index))
+        .decode_article(&enc_multi.body)
         .expect("multi-part decode must succeed");
     assert_eq!(dec_multi.data, payload);
     assert_eq!(dec_multi.part_crc32, Some(yenc::crc32(payload)));
@@ -917,7 +917,7 @@ fn test_adapter_ciphertext_crc_validation() {
         total: 1,
         offset: 0,
     };
-    let identity = SegmentIdentity::checked(0, 1, 1, 1).unwrap();
+    let identity = SegmentIdentity::new(1, 1, 1, 1).unwrap();
     let mut body = Vec::new();
     let enc = upload_adapter
         .encode_article(
@@ -935,7 +935,7 @@ fn test_adapter_ciphertext_crc_validation() {
     // Decrypting the intact article works
     let download_adapter = DownloadDecryptionAdapter::with_password(password);
     let dec = download_adapter
-        .decode_article(&enc.body, Some(identity.segment_index))
+        .decode_article(&enc.body)
         .expect("intact article decodes");
     assert_eq!(dec.data, payload);
     // Recompute variant: part_crc32 now covers the authenticated plaintext
@@ -963,9 +963,7 @@ fn test_adapter_ciphertext_crc_validation() {
         tampered_text.as_bytes(),
     )
     .unwrap();
-    let err = download_adapter
-        .decode_article(&re_encrypted, Some(identity.segment_index))
-        .unwrap_err();
+    let err = download_adapter.decode_article(&re_encrypted).unwrap_err();
     assert!(
         err.to_string().contains("ciphertext CRC mismatch")
             || err.to_string().contains("CRC")
@@ -1035,7 +1033,7 @@ fn test_adapter_zero_output_rejection_matrix() {
         total: 1,
         offset: 0,
     };
-    let identity = SegmentIdentity::checked(0, 1, 1, 1).unwrap();
+    let identity = SegmentIdentity::new(1, 1, 1, 1).unwrap();
     let mut body = Vec::new();
     let enc = upload_adapter
         .encode_article(
@@ -1052,28 +1050,21 @@ fn test_adapter_zero_output_rejection_matrix() {
 
     let download_adapter = Arc::new(DownloadDecryptionAdapter::with_password(password));
 
-    // 1. Calling decode_article with None succeeds because article is self-describing
-    let dec_none = download_adapter
-        .decode_article(&enc.body, None)
-        .expect("self-describing article decodes with None segment_index");
-    assert_eq!(dec_none.data, payload);
+    // 1. The article is self-describing: identity comes from its bootstrap
+    let dec = download_adapter
+        .decode_article(&enc.body)
+        .expect("self-describing article decodes from its bootstrap");
+    assert_eq!(dec.data, payload);
 
-    // 2. Caller segment index mismatch fails closed
-    assert!(download_adapter.decode_article(&enc.body, Some(2)).is_err());
-
-    // 3. Wrong password fails closed
+    // 2. Wrong password fails closed
     let wrong_password_adapter = DownloadDecryptionAdapter::with_password("wrong-password");
-    assert!(wrong_password_adapter
-        .decode_article(&enc.body, Some(identity.segment_index))
-        .is_err());
+    assert!(wrong_password_adapter.decode_article(&enc.body).is_err());
 
-    // 4. Truncated article body fails closed
+    // 3. Truncated article body fails closed
     let half = &enc.body[..enc.body.len() / 2];
-    assert!(download_adapter
-        .decode_article(half, Some(identity.segment_index))
-        .is_err());
+    assert!(download_adapter.decode_article(half).is_err());
 
-    // 5. Salt mismatch between line 1 and =yencryption fails closed
+    // 4. Salt mismatch between line 1 and =yencryption fails closed
     let restored =
         control::decrypt_yenc_control_lines(&session, identity.segment_index, &enc.body).unwrap();
     let text = String::from_utf8_lossy(&restored);
@@ -1089,21 +1080,17 @@ fn test_adapter_zero_output_rejection_matrix() {
         let re_enc =
             control::encrypt_yenc_control_lines(&session, identity.segment_index, t.as_bytes())
                 .unwrap();
-        let err = download_adapter
-            .decode_article(&re_enc, Some(identity.segment_index))
-            .unwrap_err();
+        let err = download_adapter.decode_article(&re_enc).unwrap_err();
         assert!(err.to_string().contains("salt mismatch"));
     }
 
-    // 6. Concurrency & idempotency test
+    // 5. Concurrency & idempotency test
     let mut handles = Vec::new();
     for _ in 0..10 {
         let adapter_clone = download_adapter.clone();
         let wire = enc.body.clone();
         handles.push(std::thread::spawn(move || {
-            let res = adapter_clone
-                .decode_article(&wire, Some(identity.segment_index))
-                .unwrap();
+            let res = adapter_clone.decode_article(&wire).unwrap();
             assert_eq!(res.data, payload);
         }));
     }
@@ -1145,7 +1132,7 @@ fn truncated_wire_line1_is_not_split_on_stray_newline_bytes() {
 
 #[test]
 fn bootstrap_extraction_rejects_forbidden_segment_index_bytes() {
-    // CR-02 (Control Std §4/§8): indices 10, 13, 266 (0x0000010A), 269
+    // Index framing rule (Control Std v1.2 §5/§8): indices 10, 13, 266 (0x0000010A), 269
     // (0x0000010D) contain 0x0A/0x0D in their big-endian encoding and are
     // rejected under FORBIDDEN_SEGMENT_INDEX_BYTE (maps to PROVIDER_FAILOVER).
     for idx in [10u32, 13, 266, 269] {
@@ -1177,7 +1164,7 @@ fn bootstrap_extraction_rejects_forbidden_segment_index_bytes() {
 
 #[test]
 fn yencryption_line_rejects_forbidden_segment_index_bytes() {
-    // CR-02 (Control Std §4/§8; Body Std §4): `parse_yencryption_line` must
+    // Index framing rule (Body Std v1.2 §5/§8): `parse_yencryption_line` must
     // reject an `index=` whose big-endian encoding contains 0x0A/0x0D — same
     // rule the Line-1 bootstrap enforces — with a PROVIDER_FAILOVER
     // classification (retriable, matching `extract_bootstrap_from_line1`).
@@ -1251,7 +1238,7 @@ fn yencryption_whitespace_strictness() {
 
 #[test]
 fn header_loop_ff1_error_fails_closed_not_passthrough() {
-    // T7 (v1.2 Control Std §5 step 4): an FF1 decryption error on a line in
+    // Control Std v1.2 §5 step 4: an FF1 decryption error on a line in
     // the expected-header region is PROVIDER_FAILOVER — it must never be
     // committed as a data line.
     let password = "fail-closed-header-loop";
@@ -1277,7 +1264,7 @@ fn header_loop_ff1_error_fails_closed_not_passthrough() {
             payload,
             128,
             None,
-            SegmentIdentity::explicit(1, 1, 1, segment_index).unwrap(),
+            SegmentIdentity::new(1, 1, 1, segment_index).unwrap(),
             &mut body,
         )
         .unwrap();
@@ -1322,7 +1309,7 @@ fn header_loop_ff1_error_fails_closed_not_passthrough() {
     case_b[1][flip] ^= 0x01;
     let corrupted = case_b.concat();
     let adapter = DownloadDecryptionAdapter::with_password(password);
-    let res = adapter.decode_article(&corrupted, Some(segment_index));
+    let res = adapter.decode_article(&corrupted);
     assert!(
         res.is_err(),
         "corrupted =yencryption header must fail closed"
@@ -1339,7 +1326,7 @@ fn header_loop_ff1_error_fails_closed_not_passthrough() {
 
 #[test]
 fn manifest_drift_check_vendored_vectors_match_canonical() {
-    // T11 vendoring hygiene (nyuu malformed_inputs.js:84-90 pattern): every
+    // Vendoring hygiene: every
     // vendored vector file's SHA-256 and vector count must match the
     // canonical manifest, byte-identically.
     let dir = test_vectors_dir();
@@ -1354,7 +1341,7 @@ fn manifest_drift_check_vendored_vectors_match_canonical() {
     let files = manifest["files"].as_object().expect("files map");
     assert!(
         files.contains_key("index_allocation.json"),
-        "manifest must index the new index_allocation.json"
+        "manifest must index index_allocation.json"
     );
 
     use sha2::Digest;
@@ -1397,7 +1384,7 @@ fn manifest_drift_check_vendored_vectors_match_canonical() {
 
 #[test]
 fn encrypted_segments_normalize_crc_metadata_regression() {
-    // T4 regression (adapter.rs:449-465 precedent): after authentication and
+    // Regression: after authentication and
     // decryption, DecodedPart must NOT carry the ciphertext wire CRC into any
     // verification path — the ciphertext `crc32=`/`pcrc32=` values are
     // discarded and part_crc32 is RECOMPUTED over the authenticated plaintext
@@ -1409,7 +1396,7 @@ fn encrypted_segments_normalize_crc_metadata_regression() {
     let payload = b"ciphertext CRC must never leak into verification";
     let uploader = UploadEncryptionAdapter::new(session.clone());
     let mut body = Vec::new();
-    let identity = SegmentIdentity::explicit(1, 1, 1, 1).unwrap();
+    let identity = SegmentIdentity::new(1, 1, 1, 1).unwrap();
     let encoded = uploader
         .encode_article(
             "crc.bin",
@@ -1428,16 +1415,16 @@ fn encrypted_segments_normalize_crc_metadata_regression() {
         .unwrap();
 
     let decoded = DownloadDecryptionAdapter::with_password(password)
-        .decode_article(&encoded.body, Some(identity.segment_index))
+        .decode_article(&encoded.body)
         .expect("authenticated decode must succeed");
     assert_eq!(
         decoded.part_crc32,
         Some(yenc::crc32(payload)),
-        "part_crc32 must be recomputed over the authenticated plaintext (T4)"
+        "part_crc32 must be recomputed over the authenticated plaintext"
     );
     assert!(
         decoded.file_crc32.is_none(),
-        "file_crc32 must be None for encrypted segments (T4)"
+        "file_crc32 must be None for encrypted segments"
     );
     assert_eq!(decoded.data, payload);
 }
