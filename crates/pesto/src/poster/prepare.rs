@@ -354,31 +354,36 @@ pub(super) async fn prepare_inputs(
     // independent of `metas`' processing order (File-ID sort for PAR2) and
     // serves as the immutable release ordinal for segment identity.
     //
-    // When `--file-counter` is enabled, `file_index` reflects this ordinal for
-    // the `[filenum/total]` subject prefix. When disabled, `file_index` remains
-    // 0 while `release_ordinal` is always assigned.
-    let mut order: Vec<usize> = (0..metas.len()).collect();
-    order.sort_by(|&a, &b| natural_cmp(&metas[a].real_name, &metas[b].real_name));
-    let mut rank = vec![0u32; metas.len()];
-    for (pos, &idx) in order.iter().enumerate() {
-        rank[idx] = pos as u32 + 1;
-    }
-    metas = metas
-        .into_iter()
-        .zip(rank)
-        .map(|(m, release_ordinal)| {
-            let file_index = if config.file_counter {
-                release_ordinal
-            } else {
-                0
-            };
-            Arc::new(FileMeta {
-                release_ordinal,
-                file_index,
-                ..(*m).clone()
+    // The rank pass only runs for encrypted uploads (where the layout planner
+    // consumes `release_ordinal`) or when `--file-counter` needs it for the
+    // `[filenum/total]` prefix: upstream's rank pass was `file_counter`-gated,
+    // and unconditionally renumbering every ordinary upload is churn with no
+    // effect on the plain path (audit P23 — same computed value, kept
+    // upstream's shape of a single gated pass).
+    if config.file_counter || config.encrypt_password.is_some() {
+        let mut order: Vec<usize> = (0..metas.len()).collect();
+        order.sort_by(|&a, &b| natural_cmp(&metas[a].real_name, &metas[b].real_name));
+        let mut rank = vec![0u32; metas.len()];
+        for (pos, &idx) in order.iter().enumerate() {
+            rank[idx] = pos as u32 + 1;
+        }
+        metas = metas
+            .into_iter()
+            .zip(rank)
+            .map(|(m, release_ordinal)| {
+                let file_index = if config.file_counter {
+                    release_ordinal
+                } else {
+                    0
+                };
+                Arc::new(FileMeta {
+                    release_ordinal,
+                    file_index,
+                    ..(*m).clone()
+                })
             })
-        })
-        .collect();
+            .collect();
+    }
 
     let mut initial_segments = 0;
     for meta in &metas {
@@ -537,6 +542,21 @@ impl ReleaseLayout {
         }
         let rank = entry.prefix_parts.checked_add(u64::from(part_number))?;
         nth_safe_segment_index(rank)
+    }
+
+    /// The layout used by unencrypted uploads: no entries, no identity.
+    ///
+    /// `segment_identity` returns `None` for it, which is fine — an
+    /// unencrypted article has no bootstrap and no index, and the plain
+    /// upload path never calls this (see the encryption gate in
+    /// `prepare_resources` and the `encrypt_password.is_some()` guards in
+    /// `producer.rs`/`mod.rs`).
+    pub(crate) fn empty() -> Self {
+        ReleaseLayout {
+            total_files: 0,
+            total_segments: 0,
+            entries: Vec::new(),
+        }
     }
 
     /// Build the release layout from prepared input files and PAR2 configuration.
@@ -727,12 +747,20 @@ pub(super) async fn prepare_resources(
         0
     };
 
-    let release_layout = Arc::new(ReleaseLayout::build(
-        metas,
-        config,
-        recovery_count,
-        par2_slice_size,
-    )?);
+    // The release layout (segment-identity planner) only exists for
+    // encrypted uploads: it is what maps release ordinal + part number to
+    // the globally unique, framing-safe segment index the encrypted article
+    // bootstrap carries. Unencrypted uploads have no bootstrap, no nonce and
+    // no index, so running the planner there only adds a hand-written PAR2
+    // packet-size prediction that can fail ("exceed safe segment-index
+    // capacity") or panic on an upload that never needed it (audit P1).
+    // `FileMeta::release_ordinal` is still assigned by `prepare_inputs` for
+    // every run; the plain upload path simply never reads it back.
+    let release_layout = Arc::new(if config.encrypt_password.is_some() {
+        ReleaseLayout::build(metas, config, recovery_count, par2_slice_size)?
+    } else {
+        ReleaseLayout::empty()
+    });
 
     if config.encrypt_password.is_some() {
         if let Some(resume) = resume_arc {

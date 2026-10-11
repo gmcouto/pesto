@@ -475,10 +475,17 @@ pub(super) async fn producer(
                         if let Some(tx) = &tx_opt {
                             // Send buf to the worker; the worker will return it to
                             // the pool (Phase 12b) after encoding the article.
-                            let identity = shared
-                                .release_layout
-                                .segment_identity(meta.release_ordinal, i)
-                                .expect("valid segment identity for planned data file");
+                            // Encryption-gated (see `prepare_resources`):
+                            // unencrypted uploads have no bootstrap/index and
+                            // the empty layout would return `None` (audit P1).
+                            let identity = if shared.encryption_adapter.is_some() {
+                                shared
+                                    .release_layout
+                                    .segment_identity(meta.release_ordinal, i)
+                                    .expect("valid segment identity for planned data file")
+                            } else {
+                                0
+                            };
                             if tx
                                 .send(make_task(
                                     meta.clone(),

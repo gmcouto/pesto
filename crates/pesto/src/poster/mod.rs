@@ -447,10 +447,17 @@ async fn post_data_files(
             };
 
             i += 1;
-            let segment_index = shared
-                .release_layout
-                .segment_identity(meta.release_ordinal, i)
-                .expect("valid segment index for planned data file");
+            // Encrypted uploads only: the layout planner is encryption-gated
+            // (see `prepare_resources`), so unencrypted uploads leave the
+            // index at 0 — meaningless without a bootstrap (audit P1).
+            let segment_index = if shared.encryption_adapter.is_some() {
+                shared
+                    .release_layout
+                    .segment_identity(meta.release_ordinal, i)
+                    .expect("valid segment identity for planned data file")
+            } else {
+                0
+            };
             if tx
                 .send(make_task(
                     meta.clone(),
@@ -564,10 +571,16 @@ async fn push_par2_file(
         crc.update(&buf);
         let file_crc32 = (i as u32 == last_idx).then(|| crc.finalize());
         let part_number = i as u32 + 1;
-        let segment_index = shared
-            .release_layout
-            .segment_identity(release_ordinal, part_number)
-            .expect("valid segment index for planned PAR2 file");
+        // Encryption-gated, like the data path in `post_data_files`: PAR2
+        // files only carry a segment identity for encrypted uploads (audit P1).
+        let segment_index = if shared.encryption_adapter.is_some() {
+            shared
+                .release_layout
+                .segment_identity(release_ordinal, part_number)
+                .expect("valid segment identity for planned PAR2 file")
+        } else {
+            0
+        };
         if tx
             .send(make_task(
                 meta.clone(),
