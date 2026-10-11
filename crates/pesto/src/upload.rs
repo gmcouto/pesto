@@ -281,13 +281,11 @@ pub async fn run_upload(
 
     // POST failures and Inconclusive always refuse the NZB.
     // `--allow-incomplete-nzb` unblocks only MissingConfirmed.
-    // Encrypted uploads strictly refuse incomplete NZBs (validate_segments in writer.rs).
-    let allow_incomplete = config.allow_incomplete_nzb && config.encrypt_password.is_none();
     let write_blocked = crate::poster::nzb_write_decision(
         has_post_failures,
         has_confirmed_missing,
         has_inconclusive,
-        allow_incomplete,
+        config.allow_incomplete_nzb,
     ) == crate::poster::NzbWriteDecision::Refuse;
 
     // ── Write NZB ────────────────────────────────────────────────────────────
@@ -330,7 +328,7 @@ pub async fn run_upload(
                 &outcome.segments,
                 &nzb_meta,
                 config.obfuscate,
-            )?;
+            );
             match tokio::fs::write(&out, &xml).await {
                 Ok(()) => {
                     emit_status(&progress_tx, format!("wrote nzb: {}", out.display()));
@@ -461,10 +459,6 @@ pub async fn run_upload(
             // list — see the analogous comment on the history record above.
             group: outcome.groups.first().cloned().unwrap_or_default(),
             groups: outcome.groups.join(":"),
-            // WR-02-R4: same fallback chain as the NZB meta emission
-            // (nzb_password → encrypt_password → compress_password, see
-            // artifacts.rs effective-password resolution) so hooks receive the
-            // password the NZB actually advertises for encrypted uploads.
             password: config
                 .nzb_password
                 .as_deref()

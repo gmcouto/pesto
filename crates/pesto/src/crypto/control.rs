@@ -43,12 +43,6 @@ pub const BOOTSTRAP_PREFIX_LEN: usize = 20;
 /// from the first encrypted control line.
 pub fn extract_bootstrap_from_line1(line1: &[u8]) -> Result<([u8; 16], u32)> {
     if line1.len() < 22 {
-        // IN-03: an ordinary uu-encoded article starts with "begin <mode> <name>"
-        // and is far shorter than the 22-byte bootstrap — name the actual
-        // condition instead of a misleading truncation message.
-        if line1.starts_with(b"begin ") {
-            bail!("UU_ENCODED_ARTICLE: unencrypted uu-encoded article received where an encrypted segment was expected");
-        }
         bail!("LINE_TRUNCATED: line 1 length is {} < 22", line1.len());
     }
     let mut salt = [0u8; 16];
@@ -82,12 +76,6 @@ pub fn extract_bootstrap_from_line1(line1: &[u8]) -> Result<([u8; 16], u32)> {
         ));
     }
     Ok((salt, segment_index))
-}
-
-/// Extract and validate the 16-byte random salt from the first encrypted control line.
-pub fn extract_salt_from_line1(line1: &[u8]) -> Result<[u8; 16]> {
-    let (salt, _) = extract_bootstrap_from_line1(line1)?;
-    Ok(salt)
 }
 
 /// Generate a 16-byte random session salt sampled strictly from the 253-byte

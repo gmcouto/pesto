@@ -181,7 +181,10 @@ async fn encrypted_upload_round_trips_captured_articles() {
             .expect("captured article must match posted Message-ID");
         let body = article_body(article);
         assert!(!body.starts_with(b"=ybegin"));
-        assert_eq!(control::extract_salt_from_line1(body).unwrap().len(), 16);
+        assert_eq!(
+            control::extract_bootstrap_from_line1(body).unwrap().0.len(),
+            16
+        );
         let decoded = decryptor.decode_article(body).unwrap();
         reconstructed.extend_from_slice(&decoded.data);
     }
@@ -246,8 +249,7 @@ fn test_cli_upload_artifacts_emits_encrypted_nzb() {
     let nzb_file = nzb_dir.join("file.nzb");
     assert!(nzb_file.exists());
     let content = std::fs::read_to_string(&nzb_file).unwrap();
-    let parsed =
-        pesto::nzb::parse_encrypted(&content).expect("generated nzb must parse as encrypted");
+    let parsed = pesto::nzb::parse(&content).unwrap();
     assert!(parsed.meta.yenc_encrypted);
     assert_eq!(parsed.meta.password.as_deref(), Some("testpass"));
     assert_plain_segments(&content);
@@ -472,12 +474,11 @@ async fn test_encrypted_upload_emits_segment_indices() {
         &outcome.segments,
         &meta,
         ObfuscateMode::None,
-    )
-    .unwrap();
+    );
     assert_plain_segments(&xml);
     assert!(xml.contains("<meta type=\"yenc_encrypted\">true</meta>"));
 
-    let parsed = pesto::nzb::parse_encrypted(&xml).unwrap();
+    let parsed = pesto::nzb::parse(&xml).unwrap();
     assert!(parsed.meta.yenc_encrypted);
 }
 
@@ -520,10 +521,15 @@ async fn test_encrypted_upload_multifile_par2_standard() {
         .iter()
         .any(|s| s.file_name.contains(".vol")));
 
-    let mut indices: Vec<u32> = outcome
-        .segments
+    let mut indices: Vec<u32> = captured
+        .lock()
+        .unwrap()
         .iter()
-        .map(|s| s.segment_identity.unwrap().segment_index)
+        .map(|article| {
+            control::extract_bootstrap_from_line1(article_body(article))
+                .unwrap()
+                .1
+        })
         .collect();
     indices.sort();
     // Index framing rule: assigned indices are the first N values of the safe sequence
@@ -547,9 +553,8 @@ async fn test_encrypted_upload_multifile_par2_standard() {
         &outcome.segments,
         &meta,
         ObfuscateMode::None,
-    )
-    .unwrap();
-    let parsed = pesto::nzb::parse_encrypted(&xml).unwrap();
+    );
+    let parsed = pesto::nzb::parse(&xml).unwrap();
     assert_eq!(parsed.segments.len(), outcome.segments.len());
 
     let articles = captured.lock().unwrap().clone();
@@ -652,10 +657,15 @@ async fn test_encrypted_upload_multifile_par2_obfuscated() {
         }
 
         // Verify continuous segment indices
-        let mut indices: Vec<u32> = outcome
-            .segments
+        let mut indices: Vec<u32> = captured
+            .lock()
+            .unwrap()
             .iter()
-            .map(|s| s.segment_identity.unwrap().segment_index)
+            .map(|article| {
+                control::extract_bootstrap_from_line1(article_body(article))
+                    .unwrap()
+                    .1
+            })
             .collect();
         indices.sort();
         // Index framing rule: assigned indices are the first N safe-sequence values
@@ -674,9 +684,8 @@ async fn test_encrypted_upload_multifile_par2_obfuscated() {
             yenc_encrypted: true,
             ..Default::default()
         };
-        let xml =
-            pesto::nzb::generate(&outcome.groups, &outcome.segments, &meta, obf_mode).unwrap();
-        let parsed = pesto::nzb::parse_encrypted(&xml).unwrap();
+        let xml = pesto::nzb::generate(&outcome.groups, &outcome.segments, &meta, obf_mode);
+        let parsed = pesto::nzb::parse(&xml).unwrap();
         assert_eq!(parsed.segments.len(), outcome.segments.len());
 
         let decryptor = DownloadDecryptionAdapter::with_password("obfpass456");
@@ -808,14 +817,23 @@ async fn test_persistence_lifecycle_invariants() {
     assert!(outcome.failures.is_empty());
     assert_eq!(outcome.segments.len(), 20);
 
-    let original_indices: Vec<u32> = outcome
-        .segments
+    // Index framing rule: the 20 assigned bootstrap indices skip the forbidden
+    // values 10 and 13 (uint32_be contains 0x0A/0x0D) — the safe sequence is
+    // 1..9, 11, 12, 14..22 per the nth_safe_segment_index rank mapping.
+    let articles_sorted = {
+        let mut a: Vec<Vec<u8>> = captured.lock().unwrap().clone();
+        a.sort();
+        a
+    };
+    let mut original_indices: Vec<u32> = articles_sorted
         .iter()
-        .map(|s| s.segment_identity.unwrap().segment_index)
+        .map(|article| {
+            control::extract_bootstrap_from_line1(article_body(article))
+                .unwrap()
+                .1
+        })
         .collect();
-    // Index framing rule: the 20 assigned indices skip the forbidden values 10 and 13
-    // (uint32_be contains 0x0A/0x0D) — the safe sequence is 1..9, 11, 12,
-    // 14..22 per the nth_safe_segment_index rank mapping.
+    original_indices.sort();
     assert_eq!(original_indices, {
         let expected: Vec<u32> = (1..=22u32)
             .filter(|&i| i.to_be_bytes().iter().all(|&b| b != 0x0A && b != 0x0D))
@@ -835,18 +853,16 @@ async fn test_persistence_lifecycle_invariants() {
         &outcome.segments,
         &meta,
         ObfuscateMode::None,
-    )
-    .unwrap();
+    );
     let xml2 = pesto::nzb::generate(
         &outcome.groups,
         &outcome.segments,
         &meta,
         ObfuscateMode::None,
-    )
-    .unwrap();
+    );
     assert_eq!(xml1, xml2);
 
-    let parsed = pesto::nzb::parse_encrypted(&xml1).unwrap();
+    let parsed = pesto::nzb::parse(&xml1).unwrap();
     assert!(parsed.meta.yenc_encrypted);
     assert_plain_segments(&xml1);
     assert!(xml1.contains("<meta type=\"yenc_encrypted\">true</meta>"));

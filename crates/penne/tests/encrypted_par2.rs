@@ -19,7 +19,6 @@ use penne::queue::build;
 use penne::repair::{verify_and_repair, RepairOutcome};
 use pesto::crypto::kdf::EncryptionSession;
 use pesto::crypto::UploadEncryptionAdapter;
-use pesto::poster::SegmentIdentity;
 use pesto::yenc::PartSpec;
 use tempfile::NamedTempFile;
 
@@ -37,14 +36,13 @@ fn encode_article(
     file_size: u64,
     spec: PartSpec,
     payload: &[u8],
-    segment_index: u32,
+    _segment_index: u32,
 ) -> Vec<u8> {
     let uploader = UploadEncryptionAdapter::new(session.clone());
-    let identity = SegmentIdentity::new(0, 0, spec.number, segment_index).unwrap();
     let mut body = Vec::new();
     let encoded = uploader
         .encode_article(
-            file_name, file_size, spec, payload, 128, None, identity, &mut body,
+            file_name, file_size, spec, payload, 128, None, 1u32, &mut body,
         )
         .expect("encode article failed");
     encoded.body

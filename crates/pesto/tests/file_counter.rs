@@ -200,8 +200,7 @@ async fn file_counter_off_emits_no_prefix() {
         &outcome.segments,
         &pesto::nzb::NzbMeta::default(),
         ObfuscateMode::None,
-    )
-    .unwrap();
+    );
     assert!(
         !xml.contains('['),
         "no file counter should appear when the flag is off"
@@ -254,8 +253,7 @@ async fn file_counter_numbers_data_files_index_and_every_volume() {
         &outcome.segments,
         &pesto::nzb::NzbMeta::default(),
         ObfuscateMode::None,
-    )
-    .unwrap();
+    );
     for i in 1..=expected_total {
         assert!(
             xml.contains(&format!("[{i}/{expected_total}]")),
@@ -322,8 +320,7 @@ async fn pregenerated_par2_path_preserves_file_counter_and_layout_bijection() {
         &outcome.segments,
         &pesto::nzb::NzbMeta::default(),
         ObfuscateMode::None,
-    )
-    .unwrap();
+    );
     for i in 1..=expected_total {
         assert!(xml.contains(&format!("[{i}/{expected_total}]")));
     }
@@ -405,13 +402,13 @@ fn release_layout_operational_invariance_and_reordering_proof() {
 
     for arrivals in arrival_orders {
         for (ord, part) in arrivals {
-            let id = layout.segment_identity(ord, part).expect("valid segment");
+            let index = layout.segment_identity(ord, part).expect("valid segment");
             let (_, expected_idx) = expected_mappings
                 .iter()
                 .find(|&&(k, _)| k == (ord, part))
                 .unwrap();
             assert_eq!(
-                id.segment_index, *expected_idx,
+                index, *expected_idx,
                 "arrival order perturbation must never change logical segment index"
             );
         }
@@ -436,8 +433,7 @@ async fn repeated_unchanged_runs_produce_identical_identities_and_nzb() {
         assert_eq!(s1.total, s2.total);
         assert_eq!(s1.file_index, s2.file_index);
         assert_eq!(s1.total_files, s2.total_files);
-        assert!(s1.segment_identity.is_some());
-        assert_eq!(s1.segment_identity, s2.segment_identity);
+        assert_eq!(s1.from, s2.from);
     }
 
     let nzb1 = pesto::nzb::generate(
@@ -445,15 +441,13 @@ async fn repeated_unchanged_runs_produce_identical_identities_and_nzb() {
         &outcome1.segments,
         &pesto::nzb::NzbMeta::default(),
         ObfuscateMode::None,
-    )
-    .unwrap();
+    );
     let nzb2 = pesto::nzb::generate(
         &config.groups,
         &outcome2.segments,
         &pesto::nzb::NzbMeta::default(),
         ObfuscateMode::None,
-    )
-    .unwrap();
+    );
 
     // The generated XML subjects and segment mappings must be identical
     assert_eq!(
@@ -495,8 +489,7 @@ async fn pregenerated_par2_and_normal_par2_produce_identical_identities() {
         assert_eq!(s_norm.total, s_pre.total);
         assert_eq!(s_norm.file_index, s_pre.file_index);
         assert_eq!(s_norm.total_files, s_pre.total_files);
-        assert_eq!(s_norm.segment_identity, s_pre.segment_identity);
-        assert!(s_norm.segment_identity.is_some());
+        assert_eq!(s_norm.from, s_pre.from);
     }
 
     std::fs::remove_dir_all(&root).ok();

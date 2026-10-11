@@ -2,7 +2,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::config::ObfuscateMode;
-use crate::poster::{PostedSegment, SegmentIdentity};
+use crate::poster::PostedSegment;
 
 use super::*;
 
@@ -24,7 +24,6 @@ fn seg(name: &str, part: u32, total: u32, id: &str) -> PostedSegment {
         server_idx: 0,
         file_index: 0,
         total_files: 0,
-        segment_identity: None,
     }
 }
 
@@ -161,7 +160,7 @@ fn parse_mal_ref_rejects_bad_input() {
 
 #[test]
 fn empty_input_yields_a_well_formed_skeleton() {
-    let xml = generate(&["alt.test".into()], &[], &no_meta(), ObfuscateMode::None).unwrap();
+    let xml = generate(&["alt.test".into()], &[], &no_meta(), ObfuscateMode::None);
     assert!(xml.starts_with("<?xml version=\"1.0\""));
     assert!(xml.contains("<nzb xmlns="));
     assert!(xml.trim_end().ends_with("</nzb>"));
@@ -180,8 +179,7 @@ fn groups_segments_per_file_and_strips_brackets() {
         &segments,
         &no_meta(),
         ObfuscateMode::None,
-    )
-    .unwrap();
+    );
 
     assert_eq!(xml.matches("<file ").count(), 2);
     assert_eq!(xml.matches("<segment ").count(), 3);
@@ -214,15 +212,13 @@ fn file_element_never_carries_a_name_attribute() {
         server_idx: 0,
         file_index: 0,
         total_files: 0,
-        segment_identity: None,
     };
     let xml = generate(
         &["alt.test".into()],
         &[segment],
         &no_meta(),
         ObfuscateMode::None,
-    )
-    .unwrap();
+    );
     assert!(!xml.contains("name=\""));
     assert!(xml.contains("<file poster="));
 }
@@ -237,8 +233,7 @@ fn xml_special_characters_are_escaped() {
         &segments,
         &no_meta(),
         ObfuscateMode::None,
-    )
-    .unwrap();
+    );
     assert!(xml.contains("poster=\"a &quot;b&quot; &amp; &lt;c&gt;\""));
     assert!(xml.contains("a&amp;b&lt;c&gt;.bin"));
 }
@@ -258,7 +253,7 @@ fn meta_fields_emitted_in_head() {
         yenc_version: None,
         yenc_cipher: None,
     };
-    let xml = generate(&["alt.test".into()], &[], &meta, ObfuscateMode::None).unwrap();
+    let xml = generate(&["alt.test".into()], &[], &meta, ObfuscateMode::None);
     assert!(xml.contains("<meta type=\"title\">My Upload</meta>"));
     assert!(xml.contains("<meta type=\"password\">s3cr3t</meta>"));
     assert!(xml.contains("<meta type=\"category\">TV &gt; HD</meta>"));
@@ -283,7 +278,7 @@ fn encryption_password_emitted_in_nzb_meta() {
         yenc_version: None,
         yenc_cipher: None,
     };
-    let xml = generate(&["alt.test".into()], &[], &meta, ObfuscateMode::None).unwrap();
+    let xml = generate(&["alt.test".into()], &[], &meta, ObfuscateMode::None);
     assert!(xml.contains("<meta type=\"password\">encryption-secret-pass</meta>"));
 }
 
@@ -291,7 +286,7 @@ fn encryption_password_emitted_in_nzb_meta() {
 fn head_block_always_present() {
     // <head> is emitted even when no meta fields are set, for maximum
     // compatibility with strict NZB parsers.
-    let xml = generate(&["alt.test".into()], &[], &no_meta(), ObfuscateMode::None).unwrap();
+    let xml = generate(&["alt.test".into()], &[], &no_meta(), ObfuscateMode::None);
     assert!(xml.contains("<head>"));
     assert!(xml.contains("</head>"));
     assert!(!xml.contains("<meta"));
@@ -307,7 +302,7 @@ fn multi_file_multi_segment_with_par2() {
         seg("movie.par2", 1, 1, "<p1@x>"),
         seg("movie.vol00+01.par2", 1, 1, "<p2@x>"),
     ];
-    let xml = generate(&groups, &segments, &no_meta(), ObfuscateMode::None).unwrap();
+    let xml = generate(&groups, &segments, &no_meta(), ObfuscateMode::None);
 
     // Three distinct <file> blocks.
     assert_eq!(xml.matches("<file ").count(), 3);
@@ -328,8 +323,7 @@ fn multiple_groups_all_emitted() {
         &[seg("f.bin", 1, 1, "<id@x>")],
         &no_meta(),
         ObfuscateMode::None,
-    )
-    .unwrap();
+    );
     assert!(xml.contains("<group>alt.binaries.a</group>"));
     assert!(xml.contains("<group>alt.binaries.b</group>"));
     assert_eq!(xml.matches("<group>").count(), 2);
@@ -346,8 +340,7 @@ fn single_part_subject_still_carries_1_of_1() {
         &[seg("file.bin", 1, 1, "<id@x>")],
         &no_meta(),
         ObfuscateMode::None,
-    )
-    .unwrap();
+    );
     assert!(xml.contains("subject=\"&quot;file.bin&quot; yEnc (1/1)\""));
 }
 
@@ -365,8 +358,7 @@ fn escape_apostrophe() {
         &segments,
         &no_meta(),
         ObfuscateMode::None,
-    )
-    .unwrap();
+    );
     assert!(xml.contains("it&apos;s.bin"), "apostrophe must be escaped");
     assert!(!xml.contains("it's.bin"));
 }
@@ -378,7 +370,7 @@ fn file_name_with_slash_is_not_escaped() {
     let mut s = seg("Season01/ep01.mkv", 1, 1, "<id@x>");
     s.file_name = "Season01/ep01.mkv".into();
     s.subject_name = "Season01/ep01.mkv".into();
-    let xml = generate(&["alt.test".into()], &[s], &no_meta(), ObfuscateMode::None).unwrap();
+    let xml = generate(&["alt.test".into()], &[s], &no_meta(), ObfuscateMode::None);
     assert!(xml.contains("subject=\"&quot;Season01/ep01.mkv&quot; yEnc (1/1)\""));
 }
 
@@ -395,8 +387,7 @@ fn subject_always_shows_part_one_of_total() {
         &segments,
         &no_meta(),
         ObfuscateMode::None,
-    )
-    .unwrap();
+    );
     assert!(xml.contains("subject=\"&quot;big.bin&quot; yEnc (1/5)\""));
     assert!(!xml.contains("(2/5)"));
 }
@@ -405,7 +396,7 @@ fn subject_always_shows_part_one_of_total() {
 fn segment_bytes_attribute_is_exact() {
     let mut s = seg("f.bin", 1, 1, "<id@x>");
     s.bytes = 123_456;
-    let xml = generate(&["alt.test".into()], &[s], &no_meta(), ObfuscateMode::None).unwrap();
+    let xml = generate(&["alt.test".into()], &[s], &no_meta(), ObfuscateMode::None);
     assert!(xml.contains("bytes=\"123456\""));
 }
 
@@ -416,8 +407,7 @@ fn date_attribute_is_a_nonzero_number() {
         &[seg("f.bin", 1, 1, "<id@x>")],
         &no_meta(),
         ObfuscateMode::None,
-    )
-    .unwrap();
+    );
     // Extract the date="..." value from the <file> element.
     let date_str = xml
         .lines()
@@ -435,7 +425,7 @@ fn tags_are_emitted_in_order() {
         tags: vec!["hd".into(), "2024".into(), "dts".into()],
         ..Default::default()
     };
-    let xml = generate(&["alt.test".into()], &[], &meta, ObfuscateMode::None).unwrap();
+    let xml = generate(&["alt.test".into()], &[], &meta, ObfuscateMode::None);
     assert!(xml.contains("<meta type=\"tag\">hd</meta>"));
     assert!(xml.contains("<meta type=\"tag\">2024</meta>"));
     assert!(xml.contains("<meta type=\"tag\">dts</meta>"));
@@ -451,13 +441,13 @@ fn tag_xml_special_characters_are_escaped() {
         tags: vec!["a&b<c>".into()],
         ..Default::default()
     };
-    let xml = generate(&["alt.test".into()], &[], &meta, ObfuscateMode::None).unwrap();
+    let xml = generate(&["alt.test".into()], &[], &meta, ObfuscateMode::None);
     assert!(xml.contains("<meta type=\"tag\">a&amp;b&lt;c&gt;</meta>"));
 }
 
 #[test]
 fn empty_tags_emit_no_tag_meta() {
-    let xml = generate(&["alt.test".into()], &[], &no_meta(), ObfuscateMode::None).unwrap();
+    let xml = generate(&["alt.test".into()], &[], &no_meta(), ObfuscateMode::None);
     assert!(!xml.contains("type=\"tag\""));
 }
 
@@ -476,7 +466,7 @@ fn only_password_meta_emits_head_without_name_or_category() {
         yenc_version: None,
         yenc_cipher: None,
     };
-    let xml = generate(&["alt.test".into()], &[], &meta, ObfuscateMode::None).unwrap();
+    let xml = generate(&["alt.test".into()], &[], &meta, ObfuscateMode::None);
     assert!(xml.contains("<meta type=\"password\">hunter2</meta>"));
     assert!(!xml.contains("type=\"title\""));
     assert!(!xml.contains("type=\"category\""));
@@ -505,7 +495,7 @@ fn parse_round_trips_generate() {
         yenc_version: None,
         yenc_cipher: None,
     };
-    let xml = generate(&groups, &segs, &meta, ObfuscateMode::None).unwrap();
+    let xml = generate(&groups, &segs, &meta, ObfuscateMode::None);
     let parsed = parse(&xml).expect("parse must succeed");
 
     assert_eq!(parsed.poster, "poster <p@x>");
@@ -528,7 +518,7 @@ fn parse_multi_file_nzb_preserves_all_segments() {
         seg("ep01.mkv", 2, 2, "<e1p2@x>"),
         seg("ep02.mkv", 1, 1, "<e2p1@x>"),
     ];
-    let xml = generate(&groups, &segs, &no_meta(), ObfuscateMode::None).unwrap();
+    let xml = generate(&groups, &segs, &no_meta(), ObfuscateMode::None);
     let parsed = parse(&xml).expect("parse must succeed");
 
     assert_eq!(parsed.segments.len(), 3);
@@ -542,7 +532,7 @@ fn parse_multi_file_nzb_preserves_all_segments() {
 #[test]
 fn parse_strips_angle_brackets_and_re_adds_them() {
     let segs = vec![seg("f.bin", 1, 1, "<msgid@host>")];
-    let xml = generate(&["alt.test".into()], &segs, &no_meta(), ObfuscateMode::None).unwrap();
+    let xml = generate(&["alt.test".into()], &segs, &no_meta(), ObfuscateMode::None);
     let parsed = parse(&xml).expect("parse must succeed");
     // message_id must carry angle brackets.
     assert_eq!(parsed.segments[0].message_id, "<msgid@host>");
@@ -700,34 +690,6 @@ fn wire_subjects_empty_when_no_segments() {
     assert_eq!(wire_subjects(&[]), Vec::<(String, String)>::new());
 }
 
-// ── SegmentIdentity domain tests ──────────────────
-
-#[test]
-fn segment_identity_new_enforces_one_based_uint32() {
-    // Valid: ordinal 1 of 2, part 1 -> segment_index 1
-    let id = SegmentIdentity::new(1, 2, 1, 1).unwrap();
-    assert_eq!(id.file_ordinal, 1);
-    assert_eq!(id.total_files, 2);
-    assert_eq!(id.part_number, 1);
-    assert_eq!(id.segment_index, 1);
-
-    // Valid: ordinal 2 of 2, part 1, explicit segment_index 4
-    let id2 = SegmentIdentity::new(2, 2, 1, 4).unwrap();
-    assert_eq!(id2.file_ordinal, 2);
-    assert_eq!(id2.segment_index, 4);
-
-    // Reject 0 file_ordinal
-    assert!(SegmentIdentity::new(0, 2, 1, 1).is_none());
-    // Reject 0 total_files
-    assert!(SegmentIdentity::new(1, 0, 1, 1).is_none());
-    // Reject 0 part_number
-    assert!(SegmentIdentity::new(1, 2, 0, 1).is_none());
-    // Reject 0 segment_index
-    assert!(SegmentIdentity::new(1, 2, 1, 0).is_none());
-    // Reject file_ordinal > total_files
-    assert!(SegmentIdentity::new(3, 2, 1, 1).is_none());
-}
-
 #[test]
 fn parse_file_counter_extracts_ordinal_and_total() {
     assert_eq!(
@@ -811,195 +773,51 @@ fn parse_handles_mixed_counters_leaving_identity_unset() {
 
     let parsed = parse(xml).unwrap();
     assert_eq!(parsed.segments.len(), 2);
-    for seg in &parsed.segments {
-        assert!(seg.segment_identity.is_none());
-    }
 }
 
 #[test]
-fn generate_rejects_inconsistent_declared_total_parts_within_file_group() {
+fn generate_tolerates_inconsistent_declared_total_parts_within_file_group() {
+    // Upstream `generate` is a pure serializer: it does not re-validate the
+    // caller's segment groups (see plan PE-5).
     let s1 = seg("file.bin", 1, 3, "<id1@x>");
     let s2 = seg("file.bin", 2, 2, "<id2@x>");
-    let res = generate(
+    let _xml = generate(
         &["alt.test".into()],
         &[s1, s2],
         &no_meta(),
         ObfuscateMode::None,
     );
-    assert!(res.is_err());
-    let err = res.unwrap_err().to_string();
-    assert!(err.contains("inconsistent declared total parts"));
 }
 
 #[test]
-fn generate_rejects_inconsistent_file_counter_within_file_group() {
+fn generate_tolerates_inconsistent_file_counter_within_file_group() {
+    // Upstream `generate` is a pure serializer: it does not re-validate the
+    // caller's segment groups (see plan PE-5).
     let mut s1 = seg("file.bin", 1, 2, "<id1@x>");
     s1.file_index = 1;
     s1.total_files = 2;
     let mut s2 = seg("file.bin", 2, 2, "<id2@x>");
     s2.file_index = 2;
     s2.total_files = 2;
-    let res = generate(
+    let _xml = generate(
         &["alt.test".into()],
         &[s1, s2],
         &no_meta(),
         ObfuscateMode::None,
     );
-    assert!(res.is_err());
-    let err = res.unwrap_err().to_string();
-    assert!(err.contains("inconsistent file counter"));
-}
-
-#[test]
-fn generate_rejects_mixed_segment_identity_presence_within_file_group() {
-    let mut s1 = seg("file.bin", 1, 2, "<id1@x>");
-    s1.segment_identity = SegmentIdentity::new(1, 1, 1, 1);
-    let s2 = seg("file.bin", 2, 2, "<id2@x>");
-    let res = generate(
-        &["alt.test".into()],
-        &[s1, s2],
-        &no_meta(),
-        ObfuscateMode::None,
-    );
-    assert!(res.is_err());
-    let err = res.unwrap_err().to_string();
-    assert!(err.contains("inconsistent segment identity presence"));
-}
-
-#[test]
-fn generate_rejects_inconsistent_file_ordinal_in_segment_identity() {
-    let mut s1 = seg("file.bin", 1, 2, "<id1@x>");
-    s1.segment_identity = SegmentIdentity::new(1, 2, 1, 1);
-    let mut s2 = seg("file.bin", 2, 2, "<id2@x>");
-    s2.segment_identity = SegmentIdentity::new(2, 2, 2, 2);
-    let res = generate(
-        &["alt.test".into()],
-        &[s1, s2],
-        &no_meta(),
-        ObfuscateMode::None,
-    );
-    assert!(res.is_err());
-    let err = res.unwrap_err().to_string();
-    assert!(err.contains("inconsistent file ordinal"));
-}
-
-#[test]
-fn generate_allows_non_contiguous_or_sparse_global_segment_index() {
-    let mut s1 = seg("file.bin", 1, 2, "<id1@x>");
-    s1.segment_identity = SegmentIdentity::new(1, 1, 1, 11);
-    let mut s2 = seg("file.bin", 2, 2, "<id2@x>");
-    s2.segment_identity = SegmentIdentity::new(1, 1, 2, 14);
-    let res = generate(
-        &["alt.test".into()],
-        &[s1, s2],
-        &no_meta(),
-        ObfuscateMode::None,
-    );
-    assert!(res.is_ok());
-}
-
-#[test]
-fn generate_rejects_conflicting_file_ordinals_across_different_files() {
-    let mut s1 = seg("f1.bin", 1, 1, "<id1@x>");
-    s1.segment_identity = SegmentIdentity::new(1, 2, 1, 1);
-    let mut s2 = seg("f2.bin", 1, 1, "<id2@x>");
-    s2.segment_identity = SegmentIdentity::new(1, 2, 1, 2);
-    let res = generate(
-        &["alt.test".into()],
-        &[s1, s2],
-        &no_meta(),
-        ObfuscateMode::None,
-    );
-    assert!(res.is_err());
-    let err = res.unwrap_err().to_string();
-    assert!(err.contains("conflicting file ordinal"));
-}
-
-#[test]
-fn generate_succeeds_for_valid_identity_bearing_multi_file_release() {
-    let mut s1 = seg("f1.bin", 1, 2, "<id1@x>");
-    s1.file_index = 1;
-    s1.total_files = 2;
-    s1.segment_identity = SegmentIdentity::new(1, 2, 1, 1);
-
-    let mut s2 = seg("f1.bin", 2, 2, "<id2@x>");
-    s2.file_index = 1;
-    s2.total_files = 2;
-    s2.segment_identity = SegmentIdentity::new(1, 2, 2, 2);
-
-    let mut s3 = seg("f2.bin", 1, 1, "<id3@x>");
-    s3.file_index = 2;
-    s3.total_files = 2;
-    s3.segment_identity = SegmentIdentity::new(2, 2, 1, 3);
-
-    let res = generate(
-        &["alt.test".into()],
-        &[s1, s2, s3],
-        &no_meta(),
-        ObfuscateMode::None,
-    );
-    assert!(res.is_ok());
-    let xml = res.unwrap();
-    assert!(xml.contains("[1/2] - &quot;f1.bin&quot;"));
-    assert!(xml.contains("[2/2] - &quot;f2.bin&quot;"));
 }
 
 #[test]
 fn generate_succeeds_for_ordinary_counter_off_groups_without_identity() {
     let s1 = seg("f1.bin", 1, 1, "<id1@x>");
     let s2 = seg("f2.bin", 1, 1, "<id2@x>");
-    let res = generate(
+    let xml = generate(
         &["alt.test".into()],
         &[s1, s2],
         &no_meta(),
         ObfuscateMode::None,
     );
-    assert!(res.is_ok());
-    let xml = res.unwrap();
     assert!(!xml.contains('['));
     assert!(xml.contains("&quot;f1.bin&quot; yEnc (1/1)"));
     assert!(xml.contains("&quot;f2.bin&quot; yEnc (1/1)"));
-}
-
-#[test]
-fn generate_rejects_incomplete_segment_set_for_identity_bearing_file() {
-    let mut s1 = seg("file.bin", 1, 2, "<id1@x>");
-    s1.file_index = 1;
-    s1.total_files = 1;
-    s1.segment_identity = SegmentIdentity::new(1, 1, 1, 1);
-    let m = NzbMeta {
-        yenc_encrypted: true,
-        ..no_meta()
-    };
-    let res = generate(&["alt.test".into()], &[s1], &m, ObfuscateMode::None);
-    assert!(res.is_err());
-    let err = res.unwrap_err().to_string();
-    assert!(err.contains("incomplete segment set for identity-bearing file"));
-}
-
-#[test]
-fn generate_allows_incomplete_file_set_for_identity_bearing_release() {
-    let mut s1 = seg("f1.bin", 1, 1, "<id1@x>");
-    s1.file_index = 1;
-    s1.total_files = 2;
-    s1.segment_identity = SegmentIdentity::new(1, 2, 1, 1);
-
-    let res = generate(&["alt.test".into()], &[s1], &no_meta(), ObfuscateMode::None);
-    assert!(res.is_ok());
-}
-
-#[test]
-fn generate_rejects_discontinuous_file_segments() {
-    let s1 = seg("f1.bin", 1, 2, "<id1@x>");
-    let s2 = seg("f2.bin", 1, 1, "<id2@x>");
-    let s3 = seg("f1.bin", 2, 2, "<id3@x>");
-    let res = generate(
-        &["alt.test".into()],
-        &[s1, s2, s3],
-        &no_meta(),
-        ObfuscateMode::None,
-    );
-    assert!(res.is_err());
-    let err = res.unwrap_err().to_string();
-    assert!(err.contains("segments for file `f1.bin` are not contiguous in input"));
 }

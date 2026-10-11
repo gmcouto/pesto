@@ -4,15 +4,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
-use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
-/// Immutable per-segment identity for encryption nonce derivation.
-///
-/// Carries the file ordinal (`file_ordinal`), total files in the release
-/// (`total_files`), the segment's declared part number (`part_number`), and
-/// the `segment_index` embedded in the article bootstrap (the `=yencryption`
-/// `index=` token and, in combined mode, Line 1 bytes 16..19).
+/// The globally unique segment index for one segment, embedded in the article
+/// bootstrap (the `=yencryption` `index=` token and Line 1 bytes 16..19).
 ///
 /// Uploaders allocate indices continuously from 1 across the whole release,
 /// skipping every value forbidden by the index framing rule (yEnc Body
@@ -20,62 +15,14 @@ use tracing::{debug, info, warn};
 /// whose big-endian `uint32_be` encoding contains a `0x0A` (LF) or `0x0D`
 /// (CR) byte, because such bytes would split Line 1 on the wire. The
 /// production allocator is [`super::ReleaseLayout::segment_identity`], backed
-/// by [`nth_safe_segment_index`]. Construction is only through
-/// [`SegmentIdentity::new`], which enforces the full contract and returns
-/// `None` on any violation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct SegmentIdentity {
-    /// 1-based file position in the release (`N` in `[N/M]`).
-    pub file_ordinal: u32,
-    /// Total file count in the release (`M` in `[N/M]`).
-    pub total_files: u32,
-    /// 1-based part (segment) number within this file.
-    pub part_number: u32,
-    /// Globally unique segment index across the entire release.
-    pub segment_index: u32,
-}
-
-impl SegmentIdentity {
-    /// Construct a checked identity from an explicit segment index.
-    ///
-    /// Requires `part_number > 0` and a `segment_index` permitted by the
-    /// index framing rule (non-zero, no big-endian byte equal to `0x0A` or
-    /// `0x0D`). Enforces two legal geometry forms:
-    /// - Counted geometry: `total_files > 0 && file_ordinal >= 1 && file_ordinal <= total_files`.
-    /// - Uncounted geometry: exactly `file_ordinal == 0 && total_files == 0` (used for imported
-    ///   NZBs and obfuscated releases where release counters are omitted).
-    ///
-    /// Rejects mixed forms (e.g. `file_ordinal > 0 && total_files == 0` or
-    /// `file_ordinal == 0 && total_files > 0`) by returning `None`.
-    pub fn new(
-        file_ordinal: u32,
-        total_files: u32,
-        part_number: u32,
-        segment_index: u32,
-    ) -> Option<Self> {
-        if part_number == 0 || !is_safe_segment_index(segment_index) {
-            return None;
-        }
-        if total_files > 0 {
-            if file_ordinal < 1 || file_ordinal > total_files {
-                return None;
-            }
-        } else if file_ordinal != 0 {
-            return None;
-        }
-        Some(SegmentIdentity {
-            file_ordinal,
-            total_files,
-            part_number,
-            segment_index,
-        })
-    }
-}
+/// by [`nth_safe_segment_index`].
+pub type SegmentIdentity = u32;
 
 /// Index framing rule (yEnc Body Encryption Standard v1.2 §8): `0` is never
 /// a valid index, and any index whose big-endian
 /// `uint32_be` encoding contains a `0x0A` (LF) or `0x0D` (CR) byte would split
 /// Line 1 on the wire and is forbidden.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn is_safe_segment_index(segment_index: u32) -> bool {
     segment_index != 0
         && segment_index
@@ -211,10 +158,6 @@ pub struct PostedSegment {
     /// alone, long after `Shared` is gone.
     pub file_index: u32,
     pub total_files: u32,
-    /// Immutable segment identity across the entire release.
-    /// `Some` for live and planned upload runs; `None` for ordinary parsed NZB
-    /// segments that do not carry encryption identity metadata.
-    pub segment_identity: Option<SegmentIdentity>,
 }
 
 /// A segment that failed to post during the upload run. Carries enough
@@ -258,9 +201,8 @@ pub struct FailedTask {
     /// end-of-run retry can rebuild the identical subject.
     pub file_index: u32,
     pub total_files: u32,
-    /// Immutable segment identity across the entire release, preserved from
-    /// the original planned PostTask so retries use the identical identity.
-    pub segment_identity: SegmentIdentity,
+    /// Segment index across the release for encrypted uploads.
+    pub segment_index: u32,
 }
 
 /// The result of a posting run.
@@ -435,11 +377,6 @@ mod index_framing_tests {
     #[test]
     fn new_rejects_all_four_forbidden_indices() {
         for idx in [10u32, 13, 266, 269] {
-            assert!(
-                SegmentIdentity::new(1, 1, 1, idx).is_none(),
-                "new must reject forbidden index {idx}"
-            );
-
             assert!(!is_safe_segment_index(idx));
         }
         // Neighbors remain valid.

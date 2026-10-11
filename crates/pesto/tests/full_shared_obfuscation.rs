@@ -187,8 +187,7 @@ async fn full_shared_obfuscation_uses_one_prefix_across_all_files() {
         &outcome.segments,
         &pesto::nzb::NzbMeta::default(),
         config.obfuscate,
-    )
-    .unwrap();
+    );
     for rel in &expected {
         assert!(
             nzb.contains(&format!("subject=\"&quot;{rel}&quot;")),
@@ -807,8 +806,7 @@ async fn light_obfuscation_nzb_subject_mirrors_the_wire_subject() {
         &outcome.segments,
         &pesto::nzb::NzbMeta::default(),
         config.obfuscate,
-    )
-    .unwrap();
+    );
     assert!(
         !nzb.contains("movie.mkv"),
         "the real filename must not appear in a light NZB"

@@ -76,9 +76,6 @@ pub(super) fn run_merge_season(
         let mut combined_segments: Vec<pesto::poster::PostedSegment> = Vec::new();
         let mut poster = String::new();
         let mut all_groups: Vec<String> = Vec::new();
-        // WR-04-R4: archive (RAR/7z extraction) passwords of unencrypted
-        // sources must survive the merge.
-        let mut shared_archive_password: Option<String> = None;
 
         for src in &sources {
             let content = std::fs::read_to_string(src)
@@ -86,26 +83,11 @@ pub(super) fn run_merge_season(
             let parsed = pesto::nzb::parse(&content)
                 .with_context(|| format!("parsing {}", src.display()))?;
 
-            let is_this_encrypted = parsed.meta.yenc_encrypted
-                || parsed.segments.iter().any(|s| s.segment_identity.is_some());
-
-            if is_this_encrypted {
+            if parsed.meta.yenc_encrypted {
                 anyhow::bail!(
                     "cannot merge encrypted NZB `{}`: merging encrypted NZBs is not supported",
                     src.display()
                 );
-            }
-
-            if let Some(ref pwd) = parsed.meta.password {
-                // WR-04-R4: keep the archive password of unencrypted sources.
-                if let Some(ref existing) = shared_archive_password {
-                    anyhow::ensure!(
-                        existing == pwd,
-                        "cannot merge NZBs with conflicting archive passwords"
-                    );
-                } else {
-                    shared_archive_password = Some(pwd.clone());
-                }
             }
 
             let ep_name = src
@@ -138,16 +120,14 @@ pub(super) fn run_merge_season(
             name: display_name
                 .map(str::to_string)
                 .or_else(|| Some(key.clone())),
-            password: shared_archive_password,
+            password: None,
             category: None,
             tmdb_id: None,
             imdb_id: None,
             tvdb_id: None,
             mal_id: None,
             tags: nzb_tags.clone(),
-            yenc_encrypted: false,
-            yenc_version: None,
-            yenc_cipher: None,
+            ..Default::default()
         };
         // Segments here come from `nzb::parse`, which always leaves
         // `wire_name` empty (see its doc comment) — there is no live wire
@@ -159,7 +139,7 @@ pub(super) fn run_merge_season(
             &combined_segments,
             &meta,
             pesto::config::ObfuscateMode::None,
-        )?;
+        );
 
         std::fs::write(&output_path, &xml)
             .with_context(|| format!("writing {}", output_path.display()))?;

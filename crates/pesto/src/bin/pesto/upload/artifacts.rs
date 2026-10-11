@@ -90,7 +90,7 @@ pub(crate) async fn write(request: ArtifactRequest<'_>) -> Result<Option<PathBuf
         &outcome.segments,
         &metadata,
         config.obfuscate,
-    )?;
+    );
     tokio::fs::write(&archive_path, &xml)
         .await
         .with_context(|| format!("writing nzb file `{}`", archive_path.display()))?;

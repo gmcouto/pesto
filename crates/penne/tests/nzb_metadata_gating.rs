@@ -17,7 +17,6 @@ use penne::nzb::{download_decryptor, load};
 use penne::queue::build;
 use pesto::crypto::kdf::EncryptionSession;
 use pesto::crypto::{crypto_error_kind_of, CryptoErrorKind, UploadEncryptionAdapter};
-use pesto::poster::SegmentIdentity;
 use pesto::yenc::PartSpec;
 use tempfile::NamedTempFile;
 
@@ -55,8 +54,6 @@ fn valid_article(password: &str) -> Vec<u8> {
     let salt = pesto::crypto::control::generate_alphabet_salt();
     let session = Arc::new(EncryptionSession::new(password, salt).unwrap());
     let uploader = UploadEncryptionAdapter::new(session);
-    let identity = SegmentIdentity::new(1, 1, 1, 1)
-        .expect("file 1/1, part 1, index 1 must form a valid identity");
     let payload = b"Gating payload that must never reach disk";
     let mut encoded_body = Vec::new();
     let encoded = uploader
@@ -71,7 +68,7 @@ fn valid_article(password: &str) -> Vec<u8> {
             payload,
             128,
             None,
-            identity,
+            1u32,
             &mut encoded_body,
         )
         .expect("encode article failed");

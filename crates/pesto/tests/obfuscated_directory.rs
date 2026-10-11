@@ -159,8 +159,7 @@ async fn full_obfuscation_randomises_subjects_but_keeps_paths_in_nzb() {
         &outcome.segments,
         &pesto::nzb::NzbMeta::default(),
         config.obfuscate,
-    )
-    .unwrap();
+    );
     for rel in &expected {
         assert!(
             nzb.contains(&format!("subject=\"&quot;{rel}&quot;")),
@@ -204,8 +203,7 @@ async fn full_obfuscation_nzb_reflects_random_dates() {
         &outcome.segments,
         &pesto::nzb::NzbMeta::default(),
         config.obfuscate,
-    )
-    .unwrap();
+    );
 
     // Collect all date="..." values from the NZB.
     let mut dates: Vec<u64> = Vec::new();

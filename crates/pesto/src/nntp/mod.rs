@@ -33,8 +33,6 @@ use response::with_hint;
 pub use response::{classify_error, ErrorHint, Response};
 use tls::tls_config;
 
-const MAX_ARTICLE_BODY_SIZE: usize = 32 * 1024 * 1024;
-
 /// Read + write stream, in either plain or TLS form, behind a trait object so
 /// [`Connection`] does not need to be generic.
 trait Stream: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
@@ -459,47 +457,21 @@ impl Connection {
         let mut out = Vec::new();
         loop {
             let mut line = Vec::new();
-            tokio::time::timeout(self.read_timeout, async {
-                loop {
-                    let available = self.stream.fill_buf().await.context("reading NNTP body")?;
-                    if available.is_empty() {
-                        bail!("NNTP connection closed by server while reading body");
-                    }
-                    let consumed = available
-                        .iter()
-                        .position(|&byte| byte == b'\n')
-                        .map_or(available.len(), |position| position + 1);
-                    let max_wire_line = MAX_ARTICLE_BODY_SIZE
-                        .saturating_sub(out.len())
-                        .saturating_add(1)
-                        .max(3);
-                    if line.len().saturating_add(consumed) > max_wire_line {
-                        bail!("NNTP article body exceeded maximum allowed size");
-                    }
-                    line.extend_from_slice(&available[..consumed]);
-                    self.stream.consume(consumed);
-                    if line.ends_with(b"\n") {
-                        return Ok::<(), anyhow::Error>(());
-                    }
-                }
-            })
-            .await
-            .map_err(|_| {
-                anyhow!(
-                    "NNTP read timed out after {}s (connection likely dead)",
-                    self.read_timeout.as_secs()
-                )
-            })??;
+            let n =
+                tokio::time::timeout(self.read_timeout, self.stream.read_until(b'\n', &mut line))
+                    .await
+                    .map_err(|_| {
+                        anyhow!(
+                            "NNTP read timed out after {}s (connection likely dead)",
+                            self.read_timeout.as_secs()
+                        )
+                    })?
+                    .context("reading NNTP body")?;
+            if n == 0 {
+                bail!("NNTP connection closed by server while reading body");
+            }
             if is_dot_terminator(&line) {
                 break;
-            }
-            let decoded_len = if line.starts_with(b"..") {
-                line.len() - 1
-            } else {
-                line.len()
-            };
-            if out.len().saturating_add(decoded_len) > MAX_ARTICLE_BODY_SIZE {
-                bail!("NNTP article body exceeded maximum allowed size");
             }
             if let Some(rest) = line.strip_prefix(b"..") {
                 out.push(b'.');

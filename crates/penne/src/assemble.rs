@@ -339,8 +339,6 @@ mod tests {
     fn queued_file(name: &str, parts: &[u32]) -> QueuedFile {
         QueuedFile {
             name: name.to_string(),
-            file_ordinal: None,
-            total_files: None,
             segments: parts
                 .iter()
                 .map(|&p| QueuedSegment {

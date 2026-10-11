@@ -28,24 +28,15 @@ pub(crate) fn season_pack_skip_message(
     }
 }
 
-/// Returns true if season pack generation is allowed given encryption configuration.
-/// Encrypted season consolidation is rejected because individual episode uploads
-/// use independent session salts and segment indices.
-pub(crate) fn is_season_encryption_supported(is_encrypted: bool) -> bool {
-    !is_encrypted
-}
-
-pub(crate) const ENCRYPTED_SEASON_UNSUPPORTED_MSG: &str =
-    "encrypted season consolidation is not supported: individual episode uploads use independent session salts and segment indices; individual per-episode NZBs have been generated";
-
-/// Preflight check for season mode uploads: rejects encrypted season consolidation
-/// before any episode upload or NNTP transfer begins.
+/// Returns an error when encrypted season consolidation is requested: it is
+/// rejected because individual episode uploads use independent session salts
+/// and segment indices.
 pub(crate) fn check_season_encryption_preflight(
     folder_mode: crate::app::FolderMode,
     is_encrypted: bool,
 ) -> Result<(), &'static str> {
     if folder_mode == crate::app::FolderMode::Season && is_encrypted {
-        Err(ENCRYPTED_SEASON_UNSUPPORTED_MSG)
+        Err("encrypted season consolidation is not supported: individual episode uploads use independent session salts and segment indices; individual per-episode NZBs have been generated")
     } else {
         Ok(())
     }
@@ -54,16 +45,9 @@ pub(crate) fn check_season_encryption_preflight(
 #[cfg(test)]
 mod season_nzb_gate_tests {
     use super::{
-        check_season_encryption_preflight, is_season_encryption_supported,
-        season_pack_skip_message, should_write_season_pack, ENCRYPTED_SEASON_UNSUPPORTED_MSG,
+        check_season_encryption_preflight, season_pack_skip_message, should_write_season_pack,
     };
     use crate::app::FolderMode;
-
-    #[test]
-    fn test_season_encryption_rejection() {
-        assert!(is_season_encryption_supported(false));
-        assert!(!is_season_encryption_supported(true));
-    }
 
     #[test]
     fn test_check_season_encryption_preflight() {
@@ -73,10 +57,6 @@ mod season_nzb_gate_tests {
         assert!(check_season_encryption_preflight(FolderMode::PerFile, true).is_ok());
         assert!(check_season_encryption_preflight(FolderMode::Season, false).is_ok());
         assert!(check_season_encryption_preflight(FolderMode::Season, true).is_err());
-        assert_eq!(
-            check_season_encryption_preflight(FolderMode::Season, true),
-            Err(ENCRYPTED_SEASON_UNSUPPORTED_MSG)
-        );
     }
 
     /// T16b: production `should_write_season_pack` is what the Season

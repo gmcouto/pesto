@@ -183,8 +183,7 @@ async fn posts_every_segment_to_a_mock_server() {
         &outcome.segments,
         &pesto::nzb::NzbMeta::default(),
         ObfuscateMode::None,
-    )
-    .unwrap();
+    );
     assert_eq!(nzb.matches("<segment ").count(), 3);
     assert!(nzb.contains("<file "));
 }
@@ -724,7 +723,6 @@ async fn resume_reuses_the_full_shared_prefix_across_runs() {
                 date: None,
                 unix_date: None,
             }),
-            segment_identity: None,
         },
     );
     prior.set_release_identity(
@@ -857,7 +855,7 @@ async fn resume_replays_a_spooled_article_under_its_original_message_id() {
 }
 
 #[tokio::test]
-async fn pst3_spool_replay_preserves_identity_and_invalidation_clears_spool() {
+async fn spool_replay_preserves_identity_and_invalidation_clears_spool() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let posts = Arc::new(AtomicUsize::new(0));
@@ -890,28 +888,23 @@ async fn pst3_spool_replay_preserves_identity_and_invalidation_clears_spool() {
     ));
     resume_state.save(&state_path).unwrap();
 
-    let seg_id = pesto::poster::SegmentIdentity::new(1, 1, 1, 1).unwrap();
-    let metadata = pesto::spool::SpoolMetadata {
-        wire_identity: Some(pesto::resume::PersistedWireIdentity {
-            subject_name: "replay_pst3.bin".into(),
-            yenc_name: "replay_pst3.bin".into(),
-            from: config.from.clone(),
-            date: None,
-            unix_date: None,
-        }),
-        segment_identity: Some(seg_id),
-        session_salt: Some(salt),
-        layout_fingerprint: Some(layout.fingerprint()),
-    };
+    let wire_identity = Some(pesto::resume::PersistedWireIdentity {
+        subject_name: "replay_pst3.bin".into(),
+        yenc_name: "replay_pst3.bin".into(),
+        from: config.from.clone(),
+        date: None,
+        unix_date: None,
+    });
 
-    pesto::spool::write_with_metadata(
+    #[allow(unused_imports)]
+    pesto::spool::write_with_identity(
         &spool_dir,
         "replay_pst3.bin",
         1,
         "pst3-exact@spool.test",
         b"Message-ID: <pst3-exact@spool.test>\r\nSubject: test\r\n",
         b"=ybegin line=128 size=100 name=replay_pst3.bin\r\nfake-body\r\n=yend size=100 crc32=00000000\r\n",
-        &metadata,
+        &wire_identity.clone().unwrap(),
     )
     .await
     .unwrap();
@@ -928,7 +921,6 @@ async fn pst3_spool_replay_preserves_identity_and_invalidation_clears_spool() {
     assert!(outcome.failures.is_empty());
     assert_eq!(outcome.segments.len(), 1);
     assert_eq!(outcome.segments[0].message_id, "pst3-exact@spool.test");
-    assert_eq!(outcome.segments[0].segment_identity, Some(seg_id));
 
     // Verify layout mismatch invalidates spool directory atomically
     let mut config2 = config.clone();
@@ -943,14 +935,15 @@ async fn pst3_spool_replay_preserves_identity_and_invalidation_clears_spool() {
     ));
     state2.save(&resume_state_path2).unwrap();
 
-    pesto::spool::write_with_metadata(
+    #[allow(unused_imports)]
+    pesto::spool::write_with_identity(
         &spool_dir2,
         "replay_pst3.bin",
         1,
         "stale@spool.test",
         b"Message-ID: <stale@spool.test>\r\nSubject: test\r\n",
         b"=ybegin line=128 size=100 name=replay_pst3.bin\r\nfake-body\r\n=yend size=100 crc32=00000000\r\n",
-        &metadata,
+        &wire_identity.clone().unwrap(),
     )
     .await
     .unwrap();

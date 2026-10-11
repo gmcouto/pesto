@@ -30,19 +30,10 @@ struct RawSegment {
 /// exclusively from each article's bootstrap at download time (Body Encryption
 /// Standard v1.2 §8).
 pub fn parse(content: &str) -> Result<ParsedNzb> {
-    parse_internal(content, false)
+    parse_internal(content)
 }
 
-/// Parse an encrypted `.nzb` document.
-///
-/// Requires encryption provenance (`<meta type="yenc_encrypted">true</meta>`).
-/// Segment identity is bootstrap-only (Body Encryption Standard v1.2 §8):
-/// the NZB carries no encryption-specific segment data.
-pub fn parse_encrypted(content: &str) -> Result<ParsedNzb> {
-    parse_internal(content, true)
-}
-
-fn parse_internal(content: &str, force_encrypted: bool) -> Result<ParsedNzb> {
+fn parse_internal(content: &str) -> Result<ParsedNzb> {
     let mut poster = String::new();
     let mut groups: Vec<String> = Vec::new();
     let mut meta = NzbMeta::default();
@@ -176,9 +167,8 @@ fn parse_internal(content: &str, force_encrypted: bool) -> Result<ParsedNzb> {
         }
     }
 
-    // Encryption provenance: explicit `yenc_encrypted` meta (v1.2 §8), or —
-    // for `parse_encrypted`'s caller contract — forced.
-    let is_encrypted = force_encrypted || explicit_yenc_encrypted;
+    // Encryption provenance: explicit `yenc_encrypted` meta (v1.2 §8).
+    let is_encrypted = explicit_yenc_encrypted;
 
     if is_encrypted {
         // Fail-closed gating (Body Encryption Standard v1.2 §8): a
@@ -231,7 +221,6 @@ fn parse_internal(content: &str, force_encrypted: bool) -> Result<ParsedNzb> {
             server_idx: 0,
             file_index: raw.file_ordinal,
             total_files: raw.total_files,
-            segment_identity: None,
         });
     }
 
@@ -316,7 +305,7 @@ pub(super) fn strip_part_suffix(subject: &str) -> String {
 ///
 /// Returns `None` when the prefix is absent, malformed, or contains zero
 /// values — the subject is then treated as ordinary with no counter.
-pub fn parse_file_counter(s: &str) -> Option<(u32, u32, &str)> {
+pub(super) fn parse_file_counter(s: &str) -> Option<(u32, u32, &str)> {
     let rest = s.strip_prefix('[')?;
     let (counter, after) = rest.split_once(']')?;
     let (n_str, m_str) = counter.split_once('/')?;

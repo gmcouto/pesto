@@ -121,8 +121,6 @@ mod tests {
     fn file_with_segments(name: &str, sizes: &[u64]) -> QueuedFile {
         QueuedFile {
             name: name.to_string(),
-            file_ordinal: None,
-            total_files: None,
             segments: sizes
                 .iter()
                 .enumerate()

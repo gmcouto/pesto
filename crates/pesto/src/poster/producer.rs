@@ -475,10 +475,10 @@ pub(super) async fn producer(
                         if let Some(tx) = &tx_opt {
                             // Send buf to the worker; the worker will return it to
                             // the pool (Phase 12b) after encoding the article.
-                            let identity = shared
+                            let segment_index = shared
                                 .release_layout
                                 .segment_identity(meta.release_ordinal, i)
-                                .expect("valid segment identity for planned data file");
+                                .expect("valid segment index for planned data file");
                             if tx
                                 .send(make_task(
                                     meta.clone(),
@@ -486,7 +486,7 @@ pub(super) async fn producer(
                                     total_parts,
                                     offset,
                                     buf,
-                                    identity,
+                                    segment_index,
                                     file_crc32,
                                     &shared.config,
                                 ))
@@ -725,10 +725,6 @@ pub(super) async fn producer(
                 file.write_all(&pkt).await.with_context(|| {
                     format!("writing PAR2 recovery volume `{}`", vol_path.display())
                 })?;
-                file.flush().await.with_context(|| {
-                    format!("flushing PAR2 recovery volume `{}`", vol_path.display())
-                })?;
-                drop(file);
                 par2_materialized_bytes += pkt.len() as u64;
                 shared.emit(crate::progress::ProgressEvent::Par2SliceWritten);
 

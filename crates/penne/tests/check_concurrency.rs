@@ -123,8 +123,6 @@ async fn multiple_connections_to_one_server_run_concurrently() {
     let queue = DownloadQueue {
         files: vec![QueuedFile {
             name: "movie.bin".to_string(),
-            file_ordinal: None,
-            total_files: None,
             segments,
         }],
     };

@@ -167,9 +167,7 @@ fn already_exists_rejects_genuine_failures() {
 fn yenc_body_has_leading_dot_detects_first_and_later_lines() {
     assert!(yenc_body_has_leading_dot(b".hidden\r\n"));
     assert!(yenc_body_has_leading_dot(b"ok\r\n.bad\r\n"));
-    assert!(yenc_body_has_leading_dot(b"ok\n.bad\n"));
     assert!(!yenc_body_has_leading_dot(b"ok\r\na.b\r\n"));
-    assert!(!yenc_body_has_leading_dot(b"ok\na.b\n"));
     assert!(!yenc_body_has_leading_dot(b""));
 }
 
@@ -524,60 +522,6 @@ async fn body_returns_none_on_430() {
 }
 
 #[tokio::test]
-async fn body_rejects_article_larger_than_transport_limit() {
-    let (client, mut server) = tokio::io::duplex(64 * 1024);
-    let mut conn = Connection::from_stream(client);
-    let writer = tokio::spawn(async move {
-        server
-            .write_all(b"222 0 <large@host> body\r\n")
-            .await
-            .unwrap();
-        let chunk = vec![b'x'; 64 * 1024 - 2];
-        for _ in 0..=(MAX_ARTICLE_BODY_SIZE / chunk.len()) {
-            server.write_all(&chunk).await.unwrap();
-            server.write_all(b"\r\n").await.unwrap();
-        }
-        server.write_all(b".\r\n").await.unwrap();
-    });
-
-    let err = conn.body("large@host").await.unwrap_err();
-    assert!(
-        err.to_string()
-            .contains("NNTP article body exceeded maximum allowed size"),
-        "unexpected error: {err:#}"
-    );
-    writer.abort();
-}
-
-#[tokio::test]
-async fn body_rejects_unterminated_line_at_transport_limit() {
-    let (client, mut server) = tokio::io::duplex(64 * 1024);
-    let mut conn = Connection::from_stream(client);
-    let writer = tokio::spawn(async move {
-        server
-            .write_all(b"222 0 <large@host> body\r\n")
-            .await
-            .unwrap();
-        let chunk = vec![b'x'; 64 * 1024];
-        for _ in 0..=(MAX_ARTICLE_BODY_SIZE / chunk.len()) {
-            server.write_all(&chunk).await.unwrap();
-        }
-        std::future::pending::<()>().await;
-    });
-
-    let result = tokio::time::timeout(Duration::from_secs(5), conn.body("large@host")).await;
-    writer.abort();
-    let err = result
-        .expect("unterminated line must be rejected while the stream remains open")
-        .unwrap_err();
-    assert!(
-        err.to_string()
-            .contains("NNTP article body exceeded maximum allowed size"),
-        "unexpected error: {err:#}"
-    );
-}
-
-#[tokio::test]
 async fn head_returns_header_block_on_221() {
     let (mut conn, _server) = mock_conn(
         b"221 0 <mid@host> headers follow\r\n\
@@ -839,59 +783,4 @@ async fn salt_leading_dot_line1_bootstrap_survives_stuffed_round_trip() {
         crate::crypto::control::extract_bootstrap_from_line1(line1).unwrap();
     assert_eq!(&extracted_salt[..], &salt[..]);
     assert_eq!(extracted_index, 1);
-}
-
-#[tokio::test]
-async fn dot_stripped_line1_bootstrap_is_detectable_corruption() {
-    // Companion negative case: a NON-conformant hop strips the leading dot
-    // from the stuffed Line 1 (the '..' became '.'), which corrupts the
-    // bootstrap: unstuffing then yields a Line 1 whose first byte is a
-    // duplicate salt byte instead of 0x2E — the salt no longer round-trips.
-    // This documents why unstuffing must precede line splitting AND why the
-    // producer must stuff in the first place (Transport boundary bullet).
-    let mut salt = [0x41u8; 16];
-    salt[0] = 0x2E;
-    let mut line1_prefix = salt.to_vec();
-    line1_prefix.extend_from_slice(&1u32.to_be_bytes());
-    let original_body = {
-        let mut b = line1_prefix.clone();
-        b.extend_from_slice(b"=ybegin-stuffed-content-sim\r\npayload\r\n=yend size=29\r\n");
-        b
-    };
-
-    // Simulate the corruption: a producer that does NOT dot-stuff sends the
-    // body verbatim (Line 1 begins with the 0x2E salt byte), and a server
-    // hop then strips what it sees as a stray leading dot — deleting
-    // salt[0] and shifting every bootstrap byte left by one.
-    let stripped: Vec<u8> = original_body[1..].to_vec();
-    assert_eq!(
-        &stripped[..1],
-        b"A",
-        "after the corrupting strip, Line 1 begins with salt[1] (0x41), not the '.' salt byte"
-    );
-
-    // The receive path's unstuffing cannot repair this (the line no longer
-    // starts with '..'), so bootstrap extraction either rejects the shifted
-    // bootstrap outright (0x00 slid into the salt window) or recovers a
-    // WRONG salt — either way the corruption is detectable, never silently
-    // accepted.
-    let mut response = b"222 0 <t9b> body\r\n".to_vec();
-    response.extend_from_slice(&stripped);
-    response.extend_from_slice(b".\r\n");
-    let (mut rx_conn, _rx_server) = mock_conn(&response).await;
-    let received = rx_conn.body("<t9b>").await.unwrap().unwrap();
-
-    let first_line_end = received.windows(2).position(|w| w == b"\r\n").unwrap();
-    let line1 = &received[..first_line_end];
-    // The shift slides the index's leading 0x00 byte into the salt window:
-    // extraction rejects it outright with INVALID_SALT_CHARACTER. That is
-    // the corruption signature — a dot-stripped Line 1 can NEVER yield the
-    // original salt, so the failure is loud rather than a silent wrong-key
-    // authentication failure downstream.
-    let err = crate::crypto::control::extract_bootstrap_from_line1(line1)
-        .expect_err("dot-stripped bootstrap must be rejected, never silently accepted");
-    assert!(
-        err.to_string().contains("INVALID_SALT_CHARACTER"),
-        "expected INVALID_SALT_CHARACTER for the shifted salt window, got: {err}"
-    );
 }

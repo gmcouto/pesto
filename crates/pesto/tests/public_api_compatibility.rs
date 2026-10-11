@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use pesto::config::{FileConfig, ObfuscateMode, Overrides};
 use pesto::nzb::{generate, NzbMeta};
-use pesto::poster::{FailedTask, PostedSegment, SegmentIdentity};
+use pesto::poster::{FailedTask, PostedSegment};
 
 #[test]
 fn test_nzb_meta_public_api_defaults() {
@@ -46,14 +46,12 @@ fn test_posted_segment_public_api_construction() {
         server_idx: 0,
         file_index: 1,
         total_files: 1,
-        segment_identity: SegmentIdentity::new(1, 1, 1, 1),
     };
 
     assert_eq!(seg.file_name, "test.bin");
     assert_eq!(seg.part, 1);
     assert_eq!(seg.total, 1);
     assert_eq!(seg.bytes, 1024);
-    assert!(seg.segment_identity.is_some());
 }
 
 #[test]
@@ -76,13 +74,13 @@ fn test_failed_task_public_api_construction() {
         full_crc32: 0x12345678,
         file_index: 1,
         total_files: 1,
-        segment_identity: SegmentIdentity::new(1, 1, 1, 1).unwrap(),
+        segment_index: 1,
     };
 
     assert_eq!(task.file_name, "test.bin");
     assert_eq!(task.part, 1);
     assert_eq!(task.total, 1);
-    assert_eq!(task.segment_identity.segment_index, 1);
+    assert_eq!(task.segment_index, 1);
 }
 
 #[test]
@@ -120,16 +118,10 @@ fn test_nzb_generate_public_signature() {
         server_idx: 0,
         file_index: 0,
         total_files: 0,
-        segment_identity: None,
     };
     let meta = NzbMeta::default();
 
-    let result = generate(&groups, &[seg], &meta, ObfuscateMode::None);
-    assert!(
-        result.is_ok(),
-        "NZB generation with default meta must succeed"
-    );
-    let xml = result.unwrap();
+    let xml = generate(&groups, &[seg], &meta, ObfuscateMode::None);
     assert!(xml.contains("<nzb"));
     assert!(!xml.contains("yenc_encrypted"));
 }

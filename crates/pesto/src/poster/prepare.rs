@@ -18,10 +18,8 @@ use parmesan::packet;
 
 use super::connections::split_connections;
 use super::file_md5_16k;
-use super::identity::{
-    normalize_client_path, obfuscated_yenc_name, par2_release_base, resolve_date,
-};
-use super::outcome::{nth_safe_segment_index, SegmentIdentity};
+use super::identity::{normalize_client_path, obfuscated_yenc_name, resolve_date};
+use super::outcome::nth_safe_segment_index;
 use super::par2::par2_geometry;
 use super::FileMeta;
 
@@ -212,7 +210,7 @@ pub(super) async fn prepare_inputs(
             let file_fp = crate::resume::FileFingerprint { size, mtime };
             let mut state = resume.lock().unwrap();
             if !state.file_matches(&real_name, &file_fp) {
-                if state.session_identity().is_some() {
+                if state.session_salt().is_some() {
                     eprintln!(
                         "resume: `{real_name}` changed size or modification time since the \
                          saved session state was recorded — invalidating entire session"
@@ -237,9 +235,6 @@ pub(super) async fn prepare_inputs(
                          PAR2 volumes, since recovery data no longer matches this file"
                     );
                     state.forget_all_segments();
-                    if let Some(dir) = spool_dir {
-                        crate::spool::remove_all(dir);
-                    }
                 } else {
                     eprintln!(
                         "resume: `{real_name}` changed size or modification time since the \
@@ -329,11 +324,6 @@ pub(super) async fn prepare_inputs(
             from,
             date,
             size: md.len(),
-            mtime: md
-                .modified()
-                .ok()
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_secs()),
             // Assigned below, once `metas`' final posting order is settled —
             // see the natural order pass after the File-ID sort.
             release_ordinal: 0,
@@ -405,10 +395,6 @@ pub struct LayoutEntry {
     pub release_ordinal: u32,
     pub part_count: u32,
     pub prefix_parts: u64,
-    #[serde(default)]
-    pub file_name: Option<String>,
-    #[serde(default)]
-    pub fingerprint: Option<crate::resume::FileFingerprint>,
 }
 
 /// An immutable, complete release layout computed before concurrent task dispatch.
@@ -431,28 +417,11 @@ impl ReleaseLayout {
     /// - Every file has `part_count >= 1`
     /// - Cumulative segments and individual indices do not overflow `u32::MAX`
     pub fn from_parts(total_files: u32, parts: &[(u32, u32)]) -> Result<Self> {
-        let detailed: Vec<(
-            u32,
-            u32,
-            Option<String>,
-            Option<crate::resume::FileFingerprint>,
-        )> = parts
-            .iter()
-            .map(|&(ord, count)| (ord, count, None, None))
-            .collect();
-        Self::from_detailed_parts(total_files, &detailed)
+        Self::from_detailed_parts(total_files, parts)
     }
 
-    /// Construct a ReleaseLayout from a slice with file name and fingerprint details.
-    pub fn from_detailed_parts(
-        total_files: u32,
-        parts: &[(
-            u32,
-            u32,
-            Option<String>,
-            Option<crate::resume::FileFingerprint>,
-        )],
-    ) -> Result<Self> {
+    /// Construct a ReleaseLayout from a slice of `(release_ordinal, part_count)`.
+    pub fn from_detailed_parts(total_files: u32, parts: &[(u32, u32)]) -> Result<Self> {
         if total_files == 0 {
             bail!("release layout cannot have 0 total files");
         }
@@ -465,12 +434,12 @@ impl ReleaseLayout {
         }
 
         let mut sorted = parts.to_vec();
-        sorted.sort_by_key(|&(ord, _, _, _)| ord);
+        sorted.sort_by_key(|&(ord, _)| ord);
 
         let mut entries = Vec::with_capacity(sorted.len());
         let mut prefix_parts = 0u64;
 
-        for (expected_idx, &(ord, count, ref name, ref fp)) in sorted.iter().enumerate() {
+        for (expected_idx, &(ord, count)) in sorted.iter().enumerate() {
             let expected_ord = expected_idx as u32 + 1;
             if ord != expected_ord {
                 bail!("release layout missing or non-contiguous ordinal: expected {expected_ord}, got {ord}");
@@ -482,8 +451,6 @@ impl ReleaseLayout {
                 release_ordinal: ord,
                 part_count: count,
                 prefix_parts,
-                file_name: name.clone(),
-                fingerprint: *fp,
             });
             prefix_parts = prefix_parts
                 .checked_add(u64::from(count))
@@ -551,7 +518,8 @@ impl ReleaseLayout {
         }
     }
 
-    /// Compute the [`SegmentIdentity`] for a given file ordinal and part number.
+    /// Compute the globally unique [`SegmentIdentity`] (segment index) for a
+    /// given file ordinal and part number.
     ///
     /// This is the CENTRAL segment-index allocator: the raw 1-based rank
     /// (`prefix_parts + part_number`) is mapped release-wide through
@@ -562,27 +530,13 @@ impl ReleaseLayout {
     /// path) goes through this method, so all consumers receive safe,
     /// monotonic, injective indices. Identity is finalized here BEFORE any
     /// salt/KDF derivation happens downstream.
-    ///
-    /// Resume policy (see `crate::resume::SEGMENT_INDEX_ALLOCATOR_VERSION`):
-    /// sessions persisted by a different allocator version fail closed at
-    /// resume rather than being silently re-mapped.
-    pub fn segment_identity(
-        &self,
-        release_ordinal: u32,
-        part_number: u32,
-    ) -> Option<SegmentIdentity> {
+    pub fn segment_identity(&self, release_ordinal: u32, part_number: u32) -> Option<u32> {
         let entry = self.entry(release_ordinal)?;
         if part_number == 0 || part_number > entry.part_count {
             return None;
         }
         let rank = entry.prefix_parts.checked_add(u64::from(part_number))?;
-        let segment_index = nth_safe_segment_index(rank)?;
-        Some(SegmentIdentity {
-            file_ordinal: release_ordinal,
-            total_files: self.total_files,
-            part_number,
-            segment_index,
-        })
+        nth_safe_segment_index(rank)
     }
 
     /// Build the release layout from prepared input files and PAR2 configuration.
@@ -599,29 +553,18 @@ impl ReleaseLayout {
             let segs = yenc::segments(meta.size, article_size);
             let part_count =
                 u32::try_from(segs.len()).context("data file part count exceeds u32")?;
-            let fp = crate::resume::FileFingerprint {
-                size: meta.size,
-                mtime: meta.mtime,
-            };
-            parts_list.push((
-                meta.release_ordinal,
-                part_count,
-                Some(meta.real_name.clone()),
-                Some(fp),
-            ));
+            parts_list.push((meta.release_ordinal, part_count));
         }
 
         let par2_file_count = if recovery_count > 0 {
             let publish_index = config.obfuscate.policy().publish_par2_index;
             let base_len = par2_base_packets_len(metas, par2_slice_size);
-            let base_name = metas.first().map(|m| par2_release_base(&m.real_name));
 
             if publish_index {
                 let index_ordinal = metas.len() as u32 + 1;
                 let index_parts = u32::try_from(yenc::segments(base_len, article_size).len())
                     .context("PAR2 index part count exceeds u32")?;
-                let index_name = base_name.map(layout::index_name);
-                parts_list.push((index_ordinal, index_parts, index_name, None));
+                parts_list.push((index_ordinal, index_parts));
             }
 
             let volumes = layout::plan_volumes(recovery_count as u32);
@@ -631,8 +574,7 @@ impl ReleaseLayout {
                 let vol_len = par2_volume_len(base_len, vol.count, par2_slice_size);
                 let vol_parts = u32::try_from(yenc::segments(vol_len, article_size).len())
                     .context("PAR2 volume part count exceeds u32")?;
-                let vol_name = base_name.map(|base| layout::volume_name(base, *vol));
-                parts_list.push((vol_ordinal, vol_parts, vol_name, None));
+                parts_list.push((vol_ordinal, vol_parts));
             }
 
             usize::from(publish_index) + volumes.len()
@@ -792,26 +734,22 @@ pub(super) async fn prepare_resources(
         par2_slice_size,
     )?);
 
-    if let Some(resume) = resume_arc {
-        let mut state = resume.lock().unwrap();
-        let was_invalidated = state.take_session_invalidated();
-        let valid = state.validate_session(&release_layout);
-        if was_invalidated || !valid {
-            if !valid {
-                eprintln!(
-                    "resume: release layout changed since the saved state was recorded \
-                     — clearing session identity, records, and spool"
-                );
+    if config.encrypt_password.is_some() {
+        if let Some(resume) = resume_arc {
+            let mut state = resume.lock().unwrap();
+            let was_invalidated = state.take_session_invalidated();
+            let valid = state.validate_session(&release_layout);
+            if was_invalidated || !valid {
+                if !valid {
+                    eprintln!(
+                        "resume: release layout changed since the saved state was recorded \
+                         — clearing session identity, records, and spool"
+                    );
+                }
+                if let Some(dir) = spool_dir {
+                    crate::spool::remove_all(dir);
+                }
             }
-            if let Some(dir) = spool_dir {
-                crate::spool::remove_all(dir);
-            }
-        }
-        if state.session_identity().is_none() {
-            state.set_session_identity(crate::resume::UploadSessionIdentity::new(
-                None,
-                (*release_layout).clone(),
-            ));
         }
     }
 

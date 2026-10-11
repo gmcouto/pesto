@@ -16,14 +16,6 @@ pub fn load(path: &Path) -> Result<ParsedNzb> {
     pesto::nzb::parse(&contents).with_context(|| format!("parsing {}", path.display()))
 }
 
-/// Read and parse an encrypted `.nzb` file from disk, treating it as encrypted
-/// (see [`pesto::nzb::parse_encrypted`]).
-pub fn load_encrypted(path: &Path) -> Result<ParsedNzb> {
-    let contents =
-        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-    pesto::nzb::parse_encrypted(&contents).with_context(|| format!("parsing {}", path.display()))
-}
-
 /// Construct a transport decryption adapter from NZB metadata.
 ///
 /// Decryption is activated strictly when `meta.yenc_encrypted` is true.
@@ -99,7 +91,6 @@ mod tests {
                 server_idx: 0,
                 file_index: 0,
                 total_files: 0,
-                segment_identity: None,
             },
             pesto::poster::PostedSegment {
                 file_name: "a.bin".into(),
@@ -118,7 +109,6 @@ mod tests {
                 server_idx: 0,
                 file_index: 0,
                 total_files: 0,
-                segment_identity: None,
             },
         ];
         let xml = pesto::nzb::generate(
@@ -126,8 +116,7 @@ mod tests {
             &segments,
             &pesto::nzb::NzbMeta::default(),
             pesto::config::ObfuscateMode::None,
-        )
-        .unwrap();
+        );
 
         let mut file = tempfile::NamedTempFile::new().unwrap();
         file.write_all(xml.as_bytes()).unwrap();

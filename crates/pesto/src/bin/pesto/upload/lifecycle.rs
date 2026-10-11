@@ -299,12 +299,11 @@ pub(crate) async fn run_single_upload(
     // gap; POST failures and Inconclusive always block.
     let has_confirmed_missing = !check_missing.is_empty() && !config.dry_run && !config.par2_only;
     let has_inconclusive = !check_inconclusive.is_empty() && !config.dry_run && !config.par2_only;
-    let allow_incomplete = config.allow_incomplete_nzb && config.encrypt_password.is_none();
     let has_unrecoverable_failures = pesto::poster::nzb_write_decision(
         has_post_failures,
         has_confirmed_missing,
         has_inconclusive,
-        allow_incomplete,
+        config.allow_incomplete_nzb,
     ) == pesto::poster::NzbWriteDecision::Refuse;
     let files_str = || {
         entry_paths

@@ -9,9 +9,8 @@ use super::adapter::{
     UploadEncryptionAdapter,
 };
 use super::body::{decrypt_body, encrypt_body};
-use super::control::{self, extract_salt_from_line1, ff1_decrypt_line, ff1_encrypt_line};
+use super::control::{self, extract_bootstrap_from_line1, ff1_decrypt_line, ff1_encrypt_line};
 use super::kdf::EncryptionSession;
-use crate::poster::SegmentIdentity;
 use crate::yenc::{self, PartSpec};
 
 fn hex_decode(s: &str) -> Vec<u8> {
@@ -549,7 +548,7 @@ fn test_malformed_inputs_rejection() {
                     let salt_bytes = hex_decode(salt_hex);
                     // construct a line1 with 16-byte salt + minimal content
                     let line1 = [salt_bytes.as_slice(), b"=ybegin line=128 size=18"].concat();
-                    let res = extract_salt_from_line1(&line1);
+                    let res = extract_bootstrap_from_line1(&line1);
                     assert!(res.is_err(), "vector {id} expected error {expected_err}");
                     let err_msg = res.unwrap_err().to_string();
                     assert!(
@@ -569,7 +568,7 @@ fn test_malformed_inputs_rejection() {
                     );
                 } else if let Some(line1_hex) = vec.get("line1_hex").and_then(|v| v.as_str()) {
                     let bytes = hex_decode(line1_hex);
-                    let res = extract_salt_from_line1(&bytes);
+                    let res = extract_bootstrap_from_line1(&bytes);
                     assert!(res.is_err(), "vector {id} expected error {expected_err}");
                     let err_msg = res.unwrap_err().to_string();
                     assert!(
@@ -610,7 +609,7 @@ fn test_malformed_inputs_rejection() {
                     total: 1,
                     offset: 0,
                 };
-                let identity = SegmentIdentity::new(1, 1, line1_idx, line1_idx).unwrap();
+                let segment_index = line1_idx;
                 let mut body = Vec::new();
                 let enc = upload_adapter
                     .encode_article(
@@ -620,7 +619,7 @@ fn test_malformed_inputs_rejection() {
                         payload,
                         128,
                         None,
-                        identity,
+                        segment_index,
                         &mut body,
                     )
                     .unwrap();
@@ -671,7 +670,7 @@ fn test_adapter_contracts() {
         total: 1,
         offset: 0,
     };
-    let identity = SegmentIdentity::new(1, 1, 1, 1).unwrap();
+    let segment_index = 1;
 
     let mut body = Vec::new();
     let encoded = upload_adapter
@@ -682,7 +681,7 @@ fn test_adapter_contracts() {
             payload,
             128,
             None,
-            identity,
+            segment_index,
             &mut body,
         )
         .expect("encode_article failed");
@@ -713,7 +712,7 @@ fn test_adapter_multipart_roundtrip() {
         total: 5,
         offset: 1024,
     };
-    let identity = SegmentIdentity::new(1, 5, 2, 2).unwrap();
+    let segment_index = 2;
 
     let mut body = Vec::new();
     let encoded = upload_adapter
@@ -724,7 +723,7 @@ fn test_adapter_multipart_roundtrip() {
             &payload,
             128,
             Some(0x12345678),
-            identity,
+            segment_index,
             &mut body,
         )
         .expect("encode_article failed");
@@ -786,7 +785,7 @@ fn test_upload_adapter_encapsulation() {
     let salt = [0x55u8; 16];
     let session = Arc::new(EncryptionSession::new("encapsulation-test-pass", salt).unwrap());
     let adapter = UploadEncryptionAdapter::new(session.clone());
-    let identity = SegmentIdentity::new(1, 1, 1, 1).unwrap();
+    let segment_index = 1;
 
     let mut encrypted_buf = Vec::new();
     let encrypted_part = adapter
@@ -797,7 +796,7 @@ fn test_upload_adapter_encapsulation() {
             payload,
             128,
             None,
-            identity,
+            segment_index,
             &mut encrypted_buf,
         )
         .expect("encrypted encode failed");
@@ -831,7 +830,8 @@ fn test_generate_alphabet_salt_properties() {
         let mut line1 = Vec::new();
         line1.extend_from_slice(&salt);
         line1.extend_from_slice(b"=ybegin part=1\r\n");
-        let extracted = extract_salt_from_line1(&line1).expect("extract salt should succeed");
+        let (extracted, _) =
+            extract_bootstrap_from_line1(&line1).expect("extract salt should succeed");
         assert_eq!(extracted, salt);
     }
 }
@@ -850,7 +850,7 @@ fn test_adapter_strict_header_order() {
         total: 1,
         offset: 0,
     };
-    let identity_single = SegmentIdentity::new(1, 1, 1, 1).unwrap();
+    let segment_index_single = 1u32;
     let mut body_single = Vec::new();
     let enc_single = upload_adapter
         .encode_article(
@@ -860,7 +860,7 @@ fn test_adapter_strict_header_order() {
             payload,
             128,
             None,
-            identity_single,
+            segment_index_single,
             &mut body_single,
         )
         .unwrap();
@@ -881,7 +881,7 @@ fn test_adapter_strict_header_order() {
         total: 2,
         offset: 0,
     };
-    let identity_multi = SegmentIdentity::new(1, 2, 1, 1).unwrap();
+    let segment_index_multi = 1u32;
     let mut body_multi = Vec::new();
     let enc_multi = upload_adapter
         .encode_article(
@@ -891,7 +891,7 @@ fn test_adapter_strict_header_order() {
             payload,
             128,
             None,
-            identity_multi,
+            segment_index_multi,
             &mut body_multi,
         )
         .unwrap();
@@ -917,7 +917,7 @@ fn test_adapter_ciphertext_crc_validation() {
         total: 1,
         offset: 0,
     };
-    let identity = SegmentIdentity::new(1, 1, 1, 1).unwrap();
+    let segment_index = 1;
     let mut body = Vec::new();
     let enc = upload_adapter
         .encode_article(
@@ -927,7 +927,7 @@ fn test_adapter_ciphertext_crc_validation() {
             payload,
             128,
             None,
-            identity,
+            segment_index,
             &mut body,
         )
         .unwrap();
@@ -946,8 +946,7 @@ fn test_adapter_ciphertext_crc_validation() {
     // Tamper with the =yend crc in the wire
     // Note: line 1, 2, and =yend are FF1 encrypted.
     // If we decrypt the control lines, tamper the yend crc, and re-encrypt, we can verify that ciphertext CRC mismatch fails before body decryption.
-    let restored =
-        control::decrypt_yenc_control_lines(&session, identity.segment_index, &enc.body).unwrap();
+    let restored = control::decrypt_yenc_control_lines(&session, segment_index, &enc.body).unwrap();
     let text = String::from_utf8_lossy(&restored);
     // Mutate the crc32= in =yend
     let tampered_text = if let Some(idx) = text.find("crc32=") {
@@ -957,12 +956,9 @@ fn test_adapter_ciphertext_crc_validation() {
     } else {
         panic!("missing crc32 in yend");
     };
-    let re_encrypted = control::encrypt_yenc_control_lines(
-        &session,
-        identity.segment_index,
-        tampered_text.as_bytes(),
-    )
-    .unwrap();
+    let re_encrypted =
+        control::encrypt_yenc_control_lines(&session, segment_index, tampered_text.as_bytes())
+            .unwrap();
     let err = download_adapter.decode_article(&re_encrypted).unwrap_err();
     assert!(
         err.to_string().contains("ciphertext CRC mismatch")
@@ -1033,7 +1029,7 @@ fn test_adapter_zero_output_rejection_matrix() {
         total: 1,
         offset: 0,
     };
-    let identity = SegmentIdentity::new(1, 1, 1, 1).unwrap();
+    let segment_index = 1;
     let mut body = Vec::new();
     let enc = upload_adapter
         .encode_article(
@@ -1043,7 +1039,7 @@ fn test_adapter_zero_output_rejection_matrix() {
             payload,
             128,
             None,
-            identity,
+            segment_index,
             &mut body,
         )
         .unwrap();
@@ -1065,8 +1061,7 @@ fn test_adapter_zero_output_rejection_matrix() {
     assert!(download_adapter.decode_article(half).is_err());
 
     // 4. Salt mismatch between line 1 and =yencryption fails closed
-    let restored =
-        control::decrypt_yenc_control_lines(&session, identity.segment_index, &enc.body).unwrap();
+    let restored = control::decrypt_yenc_control_lines(&session, segment_index, &enc.body).unwrap();
     let text = String::from_utf8_lossy(&restored);
     if let Some(idx) = text.find("salt=") {
         let mut t = text.into_owned();
@@ -1078,8 +1073,7 @@ fn test_adapter_zero_output_rejection_matrix() {
         };
         t.replace_range(idx + 5..idx + 6, replacement);
         let re_enc =
-            control::encrypt_yenc_control_lines(&session, identity.segment_index, t.as_bytes())
-                .unwrap();
+            control::encrypt_yenc_control_lines(&session, segment_index, t.as_bytes()).unwrap();
         let err = download_adapter.decode_article(&re_enc).unwrap_err();
         assert!(err.to_string().contains("salt mismatch"));
     }
@@ -1101,7 +1095,7 @@ fn test_adapter_zero_output_rejection_matrix() {
 
 #[test]
 fn truncated_wire_line1_is_not_split_on_stray_newline_bytes() {
-    // C2-04 regression: an encrypted wire article whose total length is shorter
+    // An encrypted wire article whose total length is shorter
     // than the 20-byte bootstrap prefix must be treated as a single truncated
     // line 1, not split at a 0x0A byte that happens to fall inside the (absent)
     // prefix. Before the fix, `split_lines_preserving_endings` skipped the
@@ -1264,7 +1258,7 @@ fn header_loop_ff1_error_fails_closed_not_passthrough() {
             payload,
             128,
             None,
-            SegmentIdentity::new(1, 1, 1, segment_index).unwrap(),
+            segment_index,
             &mut body,
         )
         .unwrap();
@@ -1396,7 +1390,7 @@ fn encrypted_segments_normalize_crc_metadata_regression() {
     let payload = b"ciphertext CRC must never leak into verification";
     let uploader = UploadEncryptionAdapter::new(session.clone());
     let mut body = Vec::new();
-    let identity = SegmentIdentity::new(1, 1, 1, 1).unwrap();
+    let segment_index = 1;
     let encoded = uploader
         .encode_article(
             "crc.bin",
@@ -1409,7 +1403,7 @@ fn encrypted_segments_normalize_crc_metadata_regression() {
             payload,
             128,
             Some(0xDEADBEEF), // wire =yend carries a (ciphertext) file CRC
-            identity,
+            segment_index,
             &mut body,
         )
         .unwrap();

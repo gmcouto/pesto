@@ -13,9 +13,7 @@ use crate::app::{self, App};
 use crate::events::{AppEvent, ProgressUpdate};
 
 use super::progress::{extract_progress_update, format_progress_event, write_session_summary};
-use super::season::{
-    check_season_encryption_preflight, is_season_encryption_supported, season_pack_skip_message,
-};
+use super::season::{check_season_encryption_preflight, season_pack_skip_message};
 
 /// Called when the user presses 'u' on the Dashboard.
 /// Delegates the full upload pipeline to `pesto::upload::run_upload`, which
@@ -306,104 +304,82 @@ pub(crate) fn handle_upload_trigger(app: &mut App, tx: mpsc::UnboundedSender<App
             // unlocks it. Per-episode NZBs already followed nzb_write_decision.
             let mut season_nzb = None;
             if folder_mode == app::FolderMode::Season {
-                if !is_season_encryption_supported(config.encrypt_password.is_some()) {
-                    let _ = tx.send(AppEvent::Progress(
-                        "encrypted season consolidation is not supported: individual episode uploads use independent session salts and segment indices; individual per-episode NZBs have been generated".to_string(),
-                    ));
-                } else {
-                    match season_pack_skip_message(
-                        any_cancelled,
-                        folder_ok,
-                        all_segments.is_empty(),
-                    ) {
-                        None => {
-                            if let Some(ref dir) = nzb_out_dir {
-                                let out = dir.join(format!("{label}.nzb"));
-                                let meta = pesto::nzb::NzbMeta {
-                                    name: Some(label.clone()),
-                                    password: config
-                                        .nzb_password
-                                        .clone()
-                                        .or_else(|| config.compress_password.clone()),
-                                    category: config.nzb_category.clone(),
-                                    tmdb_id: config.tmdb_id.clone(),
-                                    imdb_id: config.imdb_id.clone(),
-                                    tvdb_id: config.tvdb_id.as_deref().map(|id| {
-                                        format!(
-                                            "{}/{id}",
-                                            config
-                                                .tvdb_kind
-                                                .unwrap_or(pesto::nzb::TvdbKind::Series)
-                                                .as_str()
-                                        )
-                                    }),
-                                    mal_id: config.mal_id.clone(),
-                                    tags: config.nzb_tags.clone(),
-                                    yenc_encrypted: false,
-                                    yenc_version: None,
-                                    yenc_cipher: None,
-                                };
-                                let mut season_segments = all_segments.clone();
-                                for segment in &mut season_segments {
-                                    segment.segment_identity = None;
-                                }
-                                match pesto::nzb::generate(
-                                    &config.groups,
-                                    &season_segments,
-                                    &meta,
-                                    config.obfuscate,
-                                ) {
-                                    Ok(xml) => match std::fs::write(&out, xml) {
-                                        Ok(()) => {
-                                            let _ = tx.send(AppEvent::Progress(format!(
-                                                "wrote season nzb: {}",
-                                                out.display()
-                                            )));
-                                            let _ = tx.send(AppEvent::CatalogRecord {
-                                                original_name: label.clone(),
-                                                size_bytes: total_size,
-                                                nzb_path: Some(out.clone()),
-                                                duration_s: item_start.elapsed().as_secs_f64(),
-                                            });
+                match season_pack_skip_message(any_cancelled, folder_ok, all_segments.is_empty()) {
+                    None => {
+                        if let Some(ref dir) = nzb_out_dir {
+                            let out = dir.join(format!("{label}.nzb"));
+                            let meta = pesto::nzb::NzbMeta {
+                                name: Some(label.clone()),
+                                password: config
+                                    .nzb_password
+                                    .clone()
+                                    .or_else(|| config.compress_password.clone()),
+                                category: config.nzb_category.clone(),
+                                tmdb_id: config.tmdb_id.clone(),
+                                imdb_id: config.imdb_id.clone(),
+                                tvdb_id: config.tvdb_id.as_deref().map(|id| {
+                                    format!(
+                                        "{}/{id}",
+                                        config
+                                            .tvdb_kind
+                                            .unwrap_or(pesto::nzb::TvdbKind::Series)
+                                            .as_str()
+                                    )
+                                }),
+                                mal_id: config.mal_id.clone(),
+                                tags: config.nzb_tags.clone(),
+                                ..Default::default()
+                            };
+                            let xml = pesto::nzb::generate(
+                                &config.groups,
+                                &all_segments,
+                                &meta,
+                                config.obfuscate,
+                            );
+                            match std::fs::write(&out, xml) {
+                                Ok(()) => {
+                                    let _ = tx.send(AppEvent::Progress(format!(
+                                        "wrote season nzb: {}",
+                                        out.display()
+                                    )));
+                                    let _ = tx.send(AppEvent::CatalogRecord {
+                                        original_name: label.clone(),
+                                        size_bytes: total_size,
+                                        nzb_path: Some(out.clone()),
+                                        duration_s: item_start.elapsed().as_secs_f64(),
+                                    });
 
-                                            // Run post-upload hooks on the combined season pack so
-                                            // it reaches the indexer just like each episode does.
-                                            // Per-episode hooks run inside `run_upload`; this NZB is
-                                            // written here, outside that pipeline, so without this
-                                            // the season pack is posted but never sent on. Skip when
-                                            // an episode failed — an incomplete pack must not be
-                                            // forwarded to the indexer (matches run_upload, which
-                                            // only runs hooks when there were no failures).
-                                            if folder_ok {
-                                                run_season_hooks(
-                                                    &config, path, &label, &out, total_size, &tx,
-                                                )
-                                                .await;
-                                            }
-                                            season_nzb = Some(out);
-                                        }
-                                        Err(e) => {
-                                            let _ = tx.send(AppEvent::UploadError(format!(
-                                                "season nzb write: {e}"
-                                            )));
-                                            folder_ok = false;
-                                        }
-                                    },
-                                    Err(e) => {
-                                        let _ = tx.send(AppEvent::UploadError(format!(
-                                            "season nzb generation: {e}"
-                                        )));
-                                        folder_ok = false;
+                                    // Run post-upload hooks on the combined season pack so
+                                    // it reaches the indexer just like each episode does.
+                                    // Per-episode hooks run inside `run_upload`; this NZB is
+                                    // written here, outside that pipeline, so without this
+                                    // the season pack is posted but never sent on. Skip when
+                                    // an episode failed — an incomplete pack must not be
+                                    // forwarded to the indexer (matches run_upload, which
+                                    // only runs hooks when there were no failures).
+                                    if folder_ok {
+                                        run_season_hooks(
+                                            &config, path, &label, &out, total_size, &tx,
+                                        )
+                                        .await;
                                     }
+
+                                    season_nzb = Some(out);
+                                }
+                                Err(e) => {
+                                    let _ = tx.send(AppEvent::UploadError(format!(
+                                        "season nzb write: {e}"
+                                    )));
+                                    folder_ok = false;
                                 }
                             }
                         }
-                        Some(msg) => {
-                            if any_cancelled {
-                                let _ = tx.send(AppEvent::Progress(msg.to_string()));
-                            } else {
-                                let _ = tx.send(AppEvent::UploadError(msg.to_string()));
-                            }
+                    }
+                    Some(msg) => {
+                        if any_cancelled {
+                            let _ = tx.send(AppEvent::Progress(msg.to_string()));
+                        } else {
+                            let _ = tx.send(AppEvent::UploadError(msg.to_string()));
                         }
                     }
                 }

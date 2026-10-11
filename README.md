@@ -570,8 +570,8 @@ Generated NZBs strictly conform to the standard NZB 1.1 DTD without custom
 XML attributes on `<segment>` elements, including only `<meta type="yenc_encrypted">true</meta>`
 and `<meta type="password">` in `<head>`.
 
-Encrypted releases are fully interoperable with all conforming downloaders across the
-ecosystem, including Penne, Sugo, SABnzbd, and NZBGet.
+Conforming downloaders detect `yenc_encrypted` and decrypt using the password
+in `<meta type="password">`.
 
 ### CLI usage
 

@@ -64,8 +64,6 @@ mod tests {
         DownloadQueue {
             files: vec![QueuedFile {
                 name: "f.bin".to_string(),
-                file_ordinal: None,
-                total_files: None,
                 segments: sizes
                     .iter()
                     .enumerate()
@@ -84,8 +82,6 @@ mod tests {
         let mut queue = queue_with_bytes(&[100, 200]);
         queue.files.push(QueuedFile {
             name: "g.bin".to_string(),
-            file_ordinal: None,
-            total_files: None,
             segments: vec![QueuedSegment {
                 message_id: "id-g@test".to_string(),
                 part: 1,

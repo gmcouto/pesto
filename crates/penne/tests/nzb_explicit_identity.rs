@@ -45,12 +45,6 @@ fn encrypted_nzb_queues_plain_segments_without_identity() {
     let temp = write_temp_nzb(xml);
     let parsed = load(temp.path()).expect("Penne NZB load must succeed");
     assert!(parsed.meta.yenc_encrypted, "must be marked yenc_encrypted");
-    for seg in &parsed.segments {
-        assert!(
-            seg.segment_identity.is_none(),
-            "identity is never derived from the NZB"
-        );
-    }
 
     let queue = build(&parsed);
     assert_eq!(queue.files.len(), 1);

@@ -38,16 +38,18 @@ use identity::{
     resolve_date,
 };
 mod outcome;
+#[cfg(test)]
+pub(crate) use outcome::is_safe_segment_index;
 pub use outcome::{
-    is_safe_segment_index, nth_safe_segment_index, nzb_write_decision, should_write_season_nzb,
-    FailedTask, NzbWriteDecision, PostOutcome, PostedSegment, SegmentIdentity,
+    nzb_write_decision, should_write_season_nzb, FailedTask, NzbWriteDecision, PostOutcome,
+    PostedSegment, SegmentIdentity,
 };
 mod options;
 mod orchestrator;
 mod pipeline;
 mod prepare;
 pub use orchestrator::post_files_inner_with_release_prefix;
-pub use prepare::{LayoutEntry, ReleaseLayout};
+pub use prepare::ReleaseLayout;
 mod producer;
 mod result;
 pub use result::repost_failed_tasks;
@@ -72,8 +74,6 @@ struct FileMeta {
     /// Fixed dates have `Some` RFC but `None` timestamp.
     date: (Option<String>, Option<u64>),
     size: u64,
-    /// Modification time (unix timestamp in seconds) if known.
-    mtime: Option<u64>,
     /// 1-based position in the release order (natural order for data files,
     /// followed by PAR2 index and volumes). Always assigned.
     release_ordinal: u32,
@@ -447,10 +447,10 @@ async fn post_data_files(
             };
 
             i += 1;
-            let identity = shared
+            let segment_index = shared
                 .release_layout
                 .segment_identity(meta.release_ordinal, i)
-                .expect("valid segment identity for planned data file");
+                .expect("valid segment index for planned data file");
             if tx
                 .send(make_task(
                     meta.clone(),
@@ -458,7 +458,7 @@ async fn post_data_files(
                     total_parts,
                     offset,
                     buf,
-                    identity,
+                    segment_index,
                     file_crc32,
                     &shared.config,
                 ))
@@ -542,7 +542,6 @@ async fn push_par2_file(
         from,
         date,
         size,
-        mtime: None,
         release_ordinal,
         file_index: if shared.config.file_counter {
             release_ordinal
@@ -565,10 +564,10 @@ async fn push_par2_file(
         crc.update(&buf);
         let file_crc32 = (i as u32 == last_idx).then(|| crc.finalize());
         let part_number = i as u32 + 1;
-        let identity = shared
+        let segment_index = shared
             .release_layout
             .segment_identity(release_ordinal, part_number)
-            .expect("valid segment identity for planned PAR2 file");
+            .expect("valid segment index for planned PAR2 file");
         if tx
             .send(make_task(
                 meta.clone(),
@@ -576,7 +575,7 @@ async fn push_par2_file(
                 total,
                 offset,
                 buf,
-                identity,
+                segment_index,
                 file_crc32,
                 &shared.config,
             ))
@@ -598,7 +597,7 @@ fn make_task(
     total: u32,
     offset: u64,
     data: Vec<u8>,
-    segment_identity: SegmentIdentity,
+    segment_index: u32,
     file_crc32: Option<u32>,
     config: &Config,
 ) -> PostTask {
@@ -635,7 +634,7 @@ fn make_task(
         total,
         offset,
         data,
-        segment_identity,
+        segment_index,
         subject_name,
         yenc_name,
         from,

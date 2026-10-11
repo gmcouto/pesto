@@ -80,13 +80,6 @@ pub fn decode_part(body: &[u8]) -> Result<DecodedPart> {
 
     let mut idx = ybegin_idx + 1;
     let (begin, end) = if ybegin.total > 1 {
-        while idx < lines.len()
-            && lines[idx].starts_with(b"=y")
-            && !lines[idx].starts_with(b"=ypart")
-            && !lines[idx].starts_with(b"=yend")
-        {
-            idx += 1;
-        }
         let line = *lines
             .get(idx)
             .context("multi-part article is missing its =ypart line")?;
@@ -107,18 +100,8 @@ pub fn decode_part(body: &[u8]) -> Result<DecodedPart> {
         .map(|p| p + idx)
         .context("no =yend line found in article body")?;
 
-    // Pre-allocate bounded by both expected part size and article body length to
-    // prevent unbounded allocation aborts on corrupted or adversarial header values.
-    let expected_len = if end >= begin { end - begin + 1 } else { 0 };
-    let initial_cap = usize::try_from(expected_len)
-        .unwrap_or(usize::MAX)
-        .min(body.len());
-    let mut data = Vec::with_capacity(initial_cap);
+    let mut data = Vec::with_capacity((end.saturating_sub(begin) + 1) as usize);
     for line in &lines[idx..yend_idx] {
-        // COMPAT-02: Standard yEnc parsers must ignore unknown =y control lines gracefully
-        if line.starts_with(b"=y") {
-            continue;
-        }
         decode_data_line(&mut data, line);
     }
 
@@ -161,16 +144,9 @@ fn split_lines(body: &[u8]) -> Vec<&[u8]> {
 fn decode_data_line(out: &mut Vec<u8>, line: &[u8]) {
     let mut i = 0;
     while i < line.len() {
-        if line[i] == b'=' {
-            if i + 1 < line.len() {
-                out.push(line[i + 1].wrapping_sub(64).wrapping_sub(42));
-                i += 2;
-            } else {
-                // yEnc 1.3 draft §3: '=' is exclusively an escape prefix and must
-                // not appear unescaped or split across line boundaries. A lone '='
-                // at the end of a line is a malformed/truncated escape sequence.
-                i += 1;
-            }
+        if line[i] == b'=' && i + 1 < line.len() {
+            out.push(line[i + 1].wrapping_sub(64).wrapping_sub(42));
+            i += 2;
         } else {
             out.push(line[i].wrapping_sub(42));
             i += 1;
@@ -429,78 +405,5 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("=ypart"));
-    }
-
-    #[test]
-    fn test_standard_decoder_ignores_yencryption() {
-        let payload = b"standard yenc payload bytes with some varied content 1234567890".to_vec();
-        let encoded = encode_part(
-            "test_file.bin",
-            payload.len() as u64,
-            PartSpec {
-                number: 1,
-                total: 1,
-                offset: 0,
-            },
-            &payload,
-            128,
-            None,
-        );
-
-        // Inject =yencryption line after =ybegin
-        let mut body = Vec::new();
-        let mut lines = encoded.body.split(|&b| b == b'\n');
-        if let Some(first_line) = lines.next() {
-            body.extend_from_slice(first_line);
-            body.push(b'\n');
-            body.extend_from_slice(
-                b"=yencryption cipher=XChaCha20-Poly1305 salt=1a2b3c4d5e6f7890abcdef1234567890 tag=0cd77ce245a654463f90b945b1d22d5b\r\n",
-            );
-        }
-        for rest in lines {
-            body.extend_from_slice(rest);
-            body.push(b'\n');
-        }
-
-        let decoded = decode_part(&body).expect("decode_part should succeed");
-        assert_eq!(decoded.data, payload);
-        assert!(decoded.crc_matches(), "CRC should match wire CRC");
-    }
-
-    #[test]
-    fn untrusted_huge_ypart_offsets_do_not_trigger_allocation_abort() {
-        // Regression: C1-01. A malformed `=ypart` span far beyond the actual
-        // body size must not drive a `usize::MAX`-scale `Vec::with_capacity`
-        // (which aborts the process via allocator panic). The decoded output
-        // can never exceed the body length, so the pre-allocation is clamped.
-        let body = b"=ybegin part=1 total=2 line=128 size=1000 name=test.bin\r\n\
-                      =ypart begin=1 end=18446744073709551614\r\n\
-                      =yend size=0 part=1\r\n";
-        let decoded = decode_part(body).expect("decode_part must not abort on huge =ypart span");
-        assert!(decoded.data.is_empty());
-    }
-
-    #[test]
-    fn untrusted_huge_single_part_size_does_not_trigger_allocation_abort() {
-        // Regression: C1-02. A single-part `=ybegin size=` far beyond the
-        // actual body size must not drive a `usize::MAX`-scale allocation.
-        let body = b"=ybegin line=128 size=18446744073709551615 name=test.bin\r\n\
-                      =yend size=0 crc32=00000000\r\n";
-        let decoded = decode_part(body).expect("decode_part must not abort on huge =ybegin size");
-        assert!(decoded.data.is_empty());
-    }
-
-    #[test]
-    fn dangling_escape_at_line_end_is_not_decoded_as_data() {
-        // Regression: C1-04. A lone '=' at the end of a data line is a
-        // truncated escape sequence (the encoder never splits an escape pair
-        // across a line boundary), not a raw data byte. It must be discarded,
-        // not decoded as `b'=' - 42`.
-        let body = b"=ybegin line=128 size=1 name=x.bin\r\n\
-                      A=\r\n\
-                      =yend size=1 crc32=00000000\r\n";
-        let decoded = decode_part(body).expect("decode_part must succeed");
-        // Only 'A' decodes (to 0x41 - 42 = 0x17); the dangling '=' contributes nothing.
-        assert_eq!(decoded.data, vec![b'A'.wrapping_sub(42)]);
     }
 }

@@ -177,8 +177,6 @@ async fn multiple_connections_to_one_server_run_concurrently() {
     let queue = DownloadQueue {
         files: vec![QueuedFile {
             name: "movie.bin".to_string(),
-            file_ordinal: None,
-            total_files: None,
             segments,
         }],
     };
@@ -225,7 +223,7 @@ async fn multiple_connections_to_one_server_run_concurrently() {
     // roughly SEGMENTS/CONNECTIONS * DELAY (~160ms). Generous slack for a
     // loaded CI machine.
     assert!(
-        elapsed < DELAY * (SEGMENTS as u32) * 3 / 4,
+        elapsed < DELAY * (SEGMENTS as u32) / 2,
         "took {elapsed:?}, expected well under {:?} if truly sequential",
         DELAY * SEGMENTS as u32
     );
@@ -276,8 +274,6 @@ async fn two_pooled_servers_are_drained_concurrently_as_one_tier() {
     let queue = DownloadQueue {
         files: vec![QueuedFile {
             name: "movie.bin".to_string(),
-            file_ordinal: None,
-            total_files: None,
             segments,
         }],
     };
@@ -344,8 +340,6 @@ async fn progress_events_arrive_while_the_download_is_still_running() {
     let queue = DownloadQueue {
         files: vec![QueuedFile {
             name: "movie.bin".to_string(),
-            file_ordinal: None,
-            total_files: None,
             segments,
         }],
     };
@@ -425,8 +419,6 @@ async fn missing_progress_events_arrive_while_the_download_is_still_running() {
     let queue = DownloadQueue {
         files: vec![QueuedFile {
             name: "movie.bin".to_string(),
-            file_ordinal: None,
-            total_files: None,
             segments,
         }],
     };
@@ -511,8 +503,6 @@ async fn a_file_that_finishes_early_is_assembled_before_the_rest_of_the_queue() 
         files: vec![
             QueuedFile {
                 name: "fast.bin".to_string(),
-                file_ordinal: None,
-                total_files: None,
                 segments: vec![QueuedSegment {
                     message_id: "fast0@test".to_string(),
                     part: 1,
@@ -521,8 +511,6 @@ async fn a_file_that_finishes_early_is_assembled_before_the_rest_of_the_queue() 
             },
             QueuedFile {
                 name: "slow.bin".to_string(),
-                file_ordinal: None,
-                total_files: None,
                 segments: slow_segments,
             },
         ],

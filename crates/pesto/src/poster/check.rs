@@ -31,7 +31,6 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use anyhow::{ensure, Result};
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
@@ -139,7 +138,6 @@ struct Inner {
     first_checks: AtomicUsize,
     first_misses: AtomicUsize,
     resume: Option<Arc<Mutex<ResumeState>>>,
-    encryption_adapter: Option<Arc<crate::crypto::UploadEncryptionAdapter>>,
 }
 
 impl Inner {
@@ -199,24 +197,12 @@ impl Inner {
     /// Replace `results`' entry for `(file_name, part)` — used after a
     /// repost changes an article's Message-ID. Also overwrites the resume
     /// record so a later `--resume` does not re-inject the cursed id.
-    fn splice(&self, seg: &PostedSegment) -> Result<()> {
+    fn splice(&self, seg: &PostedSegment) {
         let mut results = self.results.lock().unwrap();
         if let Some(existing) = results
             .iter_mut()
             .find(|s| s.file_name == seg.file_name && s.part == seg.part)
         {
-            ensure!(
-                existing.segment_identity == seg.segment_identity,
-                "check repost altered logical segment identity for {} part {}",
-                seg.file_name,
-                seg.part
-            );
-            ensure!(
-                (existing.file_index, existing.total_files) == (seg.file_index, seg.total_files),
-                "check repost altered file index or total files for {} part {}",
-                seg.file_name,
-                seg.part
-            );
             *existing = seg.clone();
         }
         drop(results);
@@ -237,11 +223,9 @@ impl Inner {
                         date: seg.date.0.clone(),
                         unix_date: seg.date.1,
                     }),
-                    segment_identity: seg.segment_identity,
                 },
             );
         }
-        Ok(())
     }
 }
 
@@ -361,12 +345,8 @@ pub fn spawn_check_coordinator(
     events: Option<ProgressSender>,
     cancel: Option<Arc<AtomicBool>>,
     check_slots: Vec<ConnectionSlot>,
-    context: (
-        Option<Arc<Mutex<ResumeState>>>,
-        Option<Arc<crate::crypto::UploadEncryptionAdapter>>,
-    ),
+    resume: Option<Arc<Mutex<ResumeState>>>,
 ) -> CheckCoordinatorHandle {
-    let (resume, encryption_adapter) = context;
     let servers: Arc<Vec<_>> = Arc::new(config.all_servers().collect());
     let n_workers = check_slots.len();
     let n_heaps = servers.len().max(1);
@@ -390,7 +370,6 @@ pub fn spawn_check_coordinator(
         first_checks: AtomicUsize::new(0),
         first_misses: AtomicUsize::new(0),
         resume,
-        encryption_adapter,
     });
 
     let (tx, mut rx) = mpsc::unbounded_channel::<PostedSegment>();
@@ -661,15 +640,7 @@ async fn handle_confirmed_miss(
         return;
     }
 
-    match repost_one(
-        &inner.config,
-        slot,
-        &item.seg,
-        &inner.groups,
-        inner.encryption_adapter.as_deref(),
-    )
-    .await
-    {
+    match repost_one(&inner.config, slot, &item.seg, &inner.groups).await {
         Ok(new_seg) => {
             let reposted = inner.reposted_count.fetch_add(1, Ordering::Relaxed) + 1;
             inner.emit(ProgressEvent::CheckReposted {
@@ -690,21 +661,7 @@ async fn handle_confirmed_miss(
                     max_post_retries
                 ),
             });
-            if let Err(e) = inner.splice(&new_seg) {
-                warn!(
-                    file = %new_seg.file_name,
-                    part = new_seg.part,
-                    error = %e,
-                    "check: repost altered segment identity or file counter; discarding replacement"
-                );
-                inner
-                    .still_missing
-                    .lock()
-                    .unwrap()
-                    .push(item.seg.message_id.clone());
-                inner.checked_count.fetch_add(1, Ordering::Relaxed);
-                return;
-            }
+            inner.splice(&new_seg);
             let delay = Duration::from_secs(inner.config.check_delay_secs);
             inner.push_item(QueueItem {
                 ready_at: Instant::now() + delay,
@@ -744,7 +701,7 @@ mod recovery;
 mod repost;
 
 pub(crate) use recovery::recover_missing;
-pub(crate) use repost::{is_post_refusal, repost_one};
+use repost::{is_post_refusal, repost_one};
 
 #[cfg(test)]
 mod tests;

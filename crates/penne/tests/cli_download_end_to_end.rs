@@ -120,7 +120,6 @@ fn segment(file_name: &str, part: u32, total: u32, message_id: &str, size: u64) 
         server_idx: 0,
         file_index: 0,
         total_files: 0,
-        segment_identity: None,
     }
 }
 
@@ -139,8 +138,7 @@ fn write_nzb_named(
         &segments,
         &NzbMeta::default(),
         pesto::config::ObfuscateMode::None,
-    )
-    .unwrap();
+    );
     let nzb_path = dir.join(file_name);
     std::fs::write(&nzb_path, xml).unwrap();
     nzb_path
@@ -897,7 +895,6 @@ fn encrypted_nzb_metadata_round_trip() {
         total: 1,
         offset: 0,
     };
-    let identity = pesto::poster::SegmentIdentity::new(1, 1, 1, 1).unwrap();
     let mut body = Vec::new();
     let encoded = adapter
         .encode_article(
@@ -907,7 +904,7 @@ fn encrypted_nzb_metadata_round_trip() {
             original,
             128,
             None,
-            identity,
+            1u32,
             &mut body,
         )
         .unwrap();
@@ -922,7 +919,6 @@ fn encrypted_nzb_metadata_round_trip() {
     let mut seg = segment("secret.bin", 1, 1, "enc1@test", original.len() as u64);
     seg.file_index = 1;
     seg.total_files = 1;
-    seg.segment_identity = Some(identity);
 
     let groups = vec!["alt.binaries.test".to_string()];
     let nzb_path = dir.path().join("test.nzb");
@@ -931,8 +927,7 @@ fn encrypted_nzb_metadata_round_trip() {
         yenc_encrypted: true,
         ..Default::default()
     };
-    let xml =
-        pesto::nzb::generate(&groups, &[seg], &meta, pesto::config::ObfuscateMode::None).unwrap();
+    let xml = pesto::nzb::generate(&groups, &[seg], &meta, pesto::config::ObfuscateMode::None);
     std::fs::write(&nzb_path, xml).unwrap();
 
     let config_path = write_config(dir.path(), &download_dir, addr.port());
@@ -968,7 +963,6 @@ fn encrypted_nzb_missing_metadata_rejects() {
         total: 1,
         offset: 0,
     };
-    let identity = pesto::poster::SegmentIdentity::new(1, 1, 1, 1).unwrap();
     let mut body = Vec::new();
     let encoded = adapter
         .encode_article(
@@ -978,7 +972,7 @@ fn encrypted_nzb_missing_metadata_rejects() {
             original,
             128,
             None,
-            identity,
+            1u32,
             &mut body,
         )
         .unwrap();
@@ -993,7 +987,6 @@ fn encrypted_nzb_missing_metadata_rejects() {
     let mut seg = segment("secret.bin", 1, 1, "enc2@test", original.len() as u64);
     seg.file_index = 1;
     seg.total_files = 1;
-    seg.segment_identity = Some(identity);
 
     // NZB WITHOUT password metadata
     let groups = vec!["alt.binaries.test".to_string()];
@@ -1003,8 +996,7 @@ fn encrypted_nzb_missing_metadata_rejects() {
         &[seg],
         &NzbMeta::default(),
         pesto::config::ObfuscateMode::None,
-    )
-    .unwrap();
+    );
     std::fs::write(&nzb_path, xml).unwrap();
 
     let config_path = write_config(dir.path(), &download_dir, addr.port());
@@ -1092,9 +1084,6 @@ fn cli_download_encrypted_multipart_round_trip() {
     let part2_data = vec![0x22u8; 1000];
     let full_data = [part1_data.as_slice(), part2_data.as_slice()].concat();
 
-    let id1 = pesto::poster::SegmentIdentity::new(1, 1, 1, 1).unwrap();
-    let id2 = pesto::poster::SegmentIdentity::new(1, 1, 2, 2).unwrap();
-
     let mut body1 = Vec::new();
     let enc1 = adapter
         .encode_article(
@@ -1108,7 +1097,7 @@ fn cli_download_encrypted_multipart_round_trip() {
             &part1_data,
             128,
             None,
-            id1,
+            1u32,
             &mut body1,
         )
         .unwrap();
@@ -1126,7 +1115,7 @@ fn cli_download_encrypted_multipart_round_trip() {
             &part2_data,
             128,
             None,
-            id2,
+            1u32,
             &mut body2,
         )
         .unwrap();
@@ -1142,11 +1131,9 @@ fn cli_download_encrypted_multipart_round_trip() {
     let mut seg1 = segment("multi.bin", 1, 2, "mp1@test", 1000);
     seg1.file_index = 1;
     seg1.total_files = 1;
-    seg1.segment_identity = Some(id1);
     let mut seg2 = segment("multi.bin", 2, 2, "mp2@test", 1000);
     seg2.file_index = 1;
     seg2.total_files = 1;
-    seg2.segment_identity = Some(id2);
 
     let groups = vec!["alt.binaries.test".to_string()];
     let nzb_path = dir.path().join("multipart.nzb");
@@ -1160,8 +1147,7 @@ fn cli_download_encrypted_multipart_round_trip() {
         &[seg1, seg2],
         &meta,
         pesto::config::ObfuscateMode::None,
-    )
-    .unwrap();
+    );
     std::fs::write(&nzb_path, xml).unwrap();
 
     let config_path = write_config(dir.path(), &download_dir, addr.port());

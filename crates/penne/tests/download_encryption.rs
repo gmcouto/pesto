@@ -7,7 +7,6 @@ use std::sync::Arc;
 use pesto::config::ServerEntry;
 use pesto::crypto::kdf::EncryptionSession;
 use pesto::crypto::{DownloadDecryptionAdapter, UploadEncryptionAdapter};
-use pesto::poster::SegmentIdentity;
 use pesto::yenc::{encode_part, PartSpec};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::tcp::OwnedWriteHalf;
@@ -111,7 +110,6 @@ async fn test_download_adapter_encapsulation() {
     let uploader = UploadEncryptionAdapter::new(session.clone());
 
     let payload = b"Plaintext content for Penne download encapsulation test. 1234567890.";
-    let identity = SegmentIdentity::new(1, 1, 1, 1).unwrap();
     let spec = PartSpec {
         number: 1,
         total: 1,
@@ -127,7 +125,7 @@ async fn test_download_adapter_encapsulation() {
             payload,
             128,
             None,
-            identity,
+            1u32,
             &mut encoded_body,
         )
         .expect("upload adapter encode failed");
@@ -140,8 +138,6 @@ async fn test_download_adapter_encapsulation() {
     let queue = DownloadQueue {
         files: vec![QueuedFile {
             name: "encapsulated.bin".to_string(),
-            file_ordinal: Some(1),
-            total_files: Some(1),
             segments: vec![QueuedSegment {
                 message_id: "enc-msg-01".to_string(),
                 part: 1,
@@ -224,8 +220,6 @@ async fn test_download_adapter_encapsulation() {
     let plain_queue = DownloadQueue {
         files: vec![QueuedFile {
             name: "plain.bin".to_string(),
-            file_ordinal: None,
-            total_files: None,
             segments: vec![QueuedSegment {
                 message_id: "plain-msg-01".to_string(),
                 part: 1,
@@ -258,7 +252,6 @@ async fn test_zero_output_on_auth_failure() {
     let uploader = UploadEncryptionAdapter::new(session.clone());
 
     let payload = b"Sensitive payload that must never touch disk if authentication fails!";
-    let identity = SegmentIdentity::new(1, 1, 1, 1).unwrap();
     let spec = PartSpec {
         number: 1,
         total: 1,
@@ -274,7 +267,7 @@ async fn test_zero_output_on_auth_failure() {
             payload,
             128,
             None,
-            identity,
+            1u32,
             &mut valid_body,
         )
         .expect("upload adapter encode failed");
@@ -308,8 +301,6 @@ async fn test_zero_output_on_auth_failure() {
     let queue = DownloadQueue {
         files: vec![QueuedFile {
             name: "sensitive.bin".to_string(),
-            file_ordinal: Some(1),
-            total_files: Some(1),
             segments: vec![QueuedSegment {
                 message_id: "failover-msg-01".to_string(),
                 part: 1,
@@ -361,8 +352,6 @@ async fn test_zero_output_on_auth_failure() {
     let bad_queue = DownloadQueue {
         files: vec![QueuedFile {
             name: "must_not_exist.bin".to_string(),
-            file_ordinal: Some(1),
-            total_files: Some(1),
             segments: vec![QueuedSegment {
                 message_id: "bad-msg-01".to_string(),
                 part: 1,
@@ -428,7 +417,6 @@ async fn test_bad_cache_eviction_and_refetch() {
     let uploader = UploadEncryptionAdapter::new(session.clone());
 
     let payload = b"Payload for testing cache eviction and refetch on corruption!";
-    let identity = SegmentIdentity::new(1, 1, 1, 1).unwrap();
     let spec = PartSpec {
         number: 1,
         total: 1,
@@ -444,7 +432,7 @@ async fn test_bad_cache_eviction_and_refetch() {
             payload,
             128,
             None,
-            identity,
+            1u32,
             &mut valid_body,
         )
         .expect("encode failed");
@@ -464,8 +452,6 @@ async fn test_bad_cache_eviction_and_refetch() {
     let queue = DownloadQueue {
         files: vec![QueuedFile {
             name: "cache_test.bin".to_string(),
-            file_ordinal: Some(1),
-            total_files: Some(1),
             segments: vec![QueuedSegment {
                 message_id: "cache-evict-msg-01".to_string(),
                 part: 1,
@@ -508,7 +494,6 @@ async fn test_tampered_primary_failover_to_secondary() {
     let uploader = UploadEncryptionAdapter::new(session.clone());
 
     let payload = b"Payload for multi-tier failover verification under provider tampering!";
-    let identity = SegmentIdentity::new(1, 1, 1, 1).unwrap();
     let spec = PartSpec {
         number: 1,
         total: 1,
@@ -524,7 +509,7 @@ async fn test_tampered_primary_failover_to_secondary() {
             payload,
             128,
             None,
-            identity,
+            1u32,
             &mut valid_body,
         )
         .expect("encode failed");
@@ -550,8 +535,6 @@ async fn test_tampered_primary_failover_to_secondary() {
     let queue = DownloadQueue {
         files: vec![QueuedFile {
             name: "failover_test.bin".to_string(),
-            file_ordinal: Some(1),
-            total_files: Some(1),
             segments: vec![QueuedSegment {
                 message_id: "tier-failover-01".to_string(),
                 part: 1,
@@ -596,9 +579,6 @@ async fn test_multipart_partial_auth_failure_cleanup() {
     let part1_payload = vec![0x11u8; 500];
     let part2_payload = vec![0x22u8; 500];
 
-    let id1 = SegmentIdentity::new(1, 1, 1, 1).unwrap();
-    let id2 = SegmentIdentity::new(1, 1, 2, 2).unwrap();
-
     let mut body1 = Vec::new();
     let enc1 = uploader
         .encode_article(
@@ -612,7 +592,7 @@ async fn test_multipart_partial_auth_failure_cleanup() {
             &part1_payload,
             128,
             None,
-            id1,
+            1u32,
             &mut body1,
         )
         .unwrap();
@@ -630,7 +610,7 @@ async fn test_multipart_partial_auth_failure_cleanup() {
             &part2_payload,
             128,
             None,
-            id2,
+            1u32,
             &mut body2,
         )
         .unwrap();
@@ -652,8 +632,6 @@ async fn test_multipart_partial_auth_failure_cleanup() {
     let queue = DownloadQueue {
         files: vec![QueuedFile {
             name: "multipart_cleanup.bin".to_string(),
-            file_ordinal: Some(1),
-            total_files: Some(1),
             segments: vec![
                 QueuedSegment {
                     message_id: "mp-msg-01".to_string(),
@@ -734,8 +712,6 @@ async fn test_unencrypted_spoof_rejected_for_encrypted_nzb_segment() {
     let queue = DownloadQueue {
         files: vec![QueuedFile {
             name: "spoofed_decoupled.bin".to_string(),
-            file_ordinal: Some(1),
-            total_files: Some(1),
             segments: vec![QueuedSegment {
                 message_id: "spoof-none-idx-01".to_string(),
                 part: 1,

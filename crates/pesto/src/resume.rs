@@ -174,10 +174,6 @@ pub struct SegmentRecord {
     /// must not silently invent names when a private-mode repost is required.
     #[serde(default)]
     pub wire_identity: Option<PersistedWireIdentity>,
-    /// Exact segment identity within the release layout. Deserializes as `None`
-    /// for pre-schema JSON.
-    #[serde(default)]
-    pub segment_identity: Option<crate::poster::SegmentIdentity>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -189,7 +185,7 @@ pub struct PersistedWireIdentity {
     pub unix_date: Option<u64>,
 }
 
-/// Upload session identity containing an optional opaque 16-byte salt and the
+/// Upload session identity containing an opaque 16-byte salt and the
 /// complete ordered release layout.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UploadSessionIdentity {
@@ -198,27 +194,11 @@ pub struct UploadSessionIdentity {
     pub salt: Option<[u8; 16]>,
     /// The complete ordered release layout.
     pub layout: crate::poster::ReleaseLayout,
-    /// Version of the segment-index allocator that produced this session's
-    /// identities. Sessions persisted by a different (or missing) version are
-    /// fail-closed at resume — see [`ResumeState::validate_session`].
-    #[serde(default)]
-    pub allocator_version: Option<u32>,
 }
-
-/// Current segment-index allocator version. Bump when the safe-index
-/// mapping in `poster::outcome::nth_safe_segment_index` changes shape: the
-/// version is persisted in the resume session record, and a mismatch fails
-/// the session closed (invalidate + explicit error) instead of silently
-/// re-mapping already-posted articles into undecryptable identities.
-pub const SEGMENT_INDEX_ALLOCATOR_VERSION: u32 = 2;
 
 impl UploadSessionIdentity {
     pub fn new(salt: Option<[u8; 16]>, layout: crate::poster::ReleaseLayout) -> Self {
-        Self {
-            salt,
-            layout,
-            allocator_version: Some(SEGMENT_INDEX_ALLOCATOR_VERSION),
-        }
+        Self { salt, layout }
     }
 
     pub fn salt(&self) -> Option<&[u8; 16]> {
@@ -378,26 +358,8 @@ impl ResumeState {
     /// recorded segment has an identity inconsistent with `current_layout`, or
     /// if the session was persisted by a different segment-index allocator
     /// version, the entire session is invalidated and `false` is returned.
-    ///
-    /// Allocator-version policy (fail closed, never silently re-map): sessions
-    /// persisted without a version marker (earlier builds) or by a different
-    /// version carry identities allocated under a different rank→index mapping;
-    /// resuming them would re-post articles whose bootstrap indices no longer
-    /// match the freshly computed layout, producing undecryptable articles. The
-    /// explicit "allocator version changed — restart upload" path below is the
-    /// ONLY sanctioned response.
     pub fn validate_session(&mut self, current_layout: &crate::poster::ReleaseLayout) -> bool {
         if let Some(stored) = &self.session_identity {
-            if stored.allocator_version != Some(SEGMENT_INDEX_ALLOCATOR_VERSION) {
-                eprintln!(
-                    "resume: segment-index allocator version changed since the saved state \
-                     was recorded (stored: {:?}, current: {SEGMENT_INDEX_ALLOCATOR_VERSION}) \
-                     — restart upload: invalidating entire session",
-                    stored.allocator_version
-                );
-                self.invalidate_session();
-                return false;
-            }
             // Compare logical layout structure: total_files, total_segments, and part counts
             let stored_layout = stored.layout();
             let matches = stored_layout.total_files() == current_layout.total_files()
@@ -414,16 +376,6 @@ impl ResumeState {
             if !matches {
                 self.invalidate_session();
                 return false;
-            }
-        }
-
-        // Verify stored records that carry segment identity
-        for record in self.segments.values() {
-            if let Some(id) = record.segment_identity {
-                if current_layout.segment_identity(id.file_ordinal, id.part_number) != Some(id) {
-                    self.invalidate_session();
-                    return false;
-                }
             }
         }
 
@@ -513,7 +465,6 @@ impl ResumeState {
                 check_disabled: false,
                 server_idx: 0,
                 wire_identity: None,
-                segment_identity: None,
             },
         );
     }
@@ -856,7 +807,6 @@ mod tests {
                 check_disabled: true,
                 server_idx: 2,
                 wire_identity: None,
-                segment_identity: None,
             },
         );
         s.record("a.bin", 2, "id2@x", 50);
@@ -877,7 +827,6 @@ mod tests {
             check_disabled: false,
             server_idx: 0,
             wire_identity: None,
-            segment_identity: None,
         };
         let unconfirmed = SegmentRecord {
             confirmed: false,
@@ -917,7 +866,6 @@ mod tests {
                 check_disabled: true,
                 server_idx: 0,
                 wire_identity: None,
-                segment_identity: None,
             },
         );
         let rec = s.get("a.bin", 1).unwrap();
@@ -925,8 +873,8 @@ mod tests {
     }
 
     #[test]
-    fn session_identity_and_record_identity_round_trip() {
-        use crate::poster::{ReleaseLayout, SegmentIdentity};
+    fn session_identity_round_trip() {
+        use crate::poster::ReleaseLayout;
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("session_state.json");
@@ -936,7 +884,6 @@ mod tests {
         let layout = ReleaseLayout::from_parts(2, &[(1, 2), (2, 3)]).unwrap();
         state.set_session_identity(UploadSessionIdentity::new(Some(salt), layout.clone()));
 
-        let id1 = SegmentIdentity::new(1, 2, 1, 1).unwrap();
         state.record_with(
             "file1.bin",
             1,
@@ -947,7 +894,6 @@ mod tests {
                 check_disabled: false,
                 server_idx: 1,
                 wire_identity: None,
-                segment_identity: Some(id1),
             },
         );
 
@@ -964,7 +910,6 @@ mod tests {
         assert_eq!(loaded.session_layout(), Some(&layout));
 
         let rec = loaded.get("file1.bin", 1).unwrap();
-        assert_eq!(rec.segment_identity, Some(id1));
         assert_eq!(rec.message_id, "msg1@example.com");
         assert_eq!(rec.bytes, 1024);
 
@@ -984,12 +929,12 @@ mod tests {
         assert!(loaded.session_salt().is_none());
         assert!(loaded.session_layout().is_none());
         let rec = loaded.get("a.bin", 1).unwrap();
-        assert!(rec.segment_identity.is_none());
+        assert_eq!(rec.message_id, "id1@x");
     }
 
     #[test]
     fn session_validation_invalidates_all_state_on_layout_mismatches() {
-        use crate::poster::{ReleaseLayout, SegmentIdentity};
+        use crate::poster::ReleaseLayout;
 
         let base_parts = &[(1, 2), (2, 3)];
         let base_layout = ReleaseLayout::from_parts(2, base_parts).unwrap();
@@ -1012,20 +957,6 @@ mod tests {
                 FileFingerprint {
                     size: 300,
                     mtime: Some(100),
-                },
-            );
-            let id = SegmentIdentity::new(1, 2, 1, 1).unwrap();
-            s.record_with(
-                "a.bin",
-                1,
-                SegmentRecord {
-                    message_id: "msg@x".into(),
-                    bytes: 100,
-                    confirmed: false,
-                    check_disabled: false,
-                    server_idx: 0,
-                    wire_identity: None,
-                    segment_identity: Some(id),
                 },
             );
             s
@@ -1063,127 +994,14 @@ mod tests {
     }
 
     #[test]
-    fn session_validation_invalidates_on_conflicting_stored_segment_identity() {
-        use crate::poster::{ReleaseLayout, SegmentIdentity};
-
-        let base_layout = ReleaseLayout::from_parts(2, &[(1, 2), (2, 3)]).unwrap();
-        let salt = [0xabu8; 16];
-
-        let mut s = ResumeState::default();
-        s.set_session_identity(UploadSessionIdentity::new(Some(salt), base_layout.clone()));
-
-        // Record a segment with a conflicting identity (wrong part_number / segment_index)
-        let conflicting_id = SegmentIdentity::new(1, 2, 1, 11).unwrap(); // prefix sum 10 instead of 0
-        s.record_with(
-            "a.bin",
-            1,
-            SegmentRecord {
-                message_id: "msg@x".into(),
-                bytes: 100,
-                confirmed: false,
-                check_disabled: false,
-                server_idx: 0,
-                wire_identity: None,
-                segment_identity: Some(conflicting_id),
-            },
-        );
-
-        assert!(!s.validate_session(&base_layout));
-        assert!(s.session_identity().is_none());
-        assert_eq!(s.len(), 0);
-    }
-
-    #[test]
-    fn session_with_missing_allocator_version_fails_closed() {
-        use crate::poster::{ReleaseLayout, SegmentIdentity};
-
-        let base_layout = ReleaseLayout::from_parts(1, &[(1, 1)]).unwrap();
-        let salt = [0xabu8; 16];
-
-        // Simulate a session from an earlier build: no allocator version
-        // marker, and a persisted identity with index 10 — a value the
-        // allocator skips and `SegmentIdentity::new` rejects, so emulate the
-        // persisted record with a direct struct literal.
-        let legacy_id = SegmentIdentity {
-            file_ordinal: 1,
-            total_files: 1,
-            part_number: 1,
-            segment_index: 10,
-        };
-        let mut s = ResumeState {
-            session_identity: Some(UploadSessionIdentity {
-                salt: Some(salt),
-                layout: base_layout.clone(),
-                allocator_version: None,
-            }),
-            ..ResumeState::default()
-        };
-        s.record_with(
-            "a.bin",
-            1,
-            SegmentRecord {
-                message_id: "msg@x".into(),
-                bytes: 100,
-                confirmed: false,
-                check_disabled: false,
-                server_idx: 0,
-                wire_identity: None,
-                segment_identity: Some(legacy_id),
-            },
-        );
-
-        // Fail closed: session invalidated (not silently accepted, not
-        // re-mapped), with the explicit allocator-version error path.
-        assert!(!s.validate_session(&base_layout));
-        assert!(s.session_identity().is_none());
-        assert_eq!(s.len(), 0);
-    }
-
-    #[test]
-    fn session_with_mismatched_allocator_version_fails_closed() {
-        use crate::poster::{ReleaseLayout, SegmentIdentity};
-
-        let base_layout = ReleaseLayout::from_parts(1, &[(1, 1)]).unwrap();
-        let salt = [0xcdu8; 16];
-
-        let id = SegmentIdentity::new(1, 1, 1, 1).unwrap();
-        let mut s = ResumeState {
-            session_identity: Some(UploadSessionIdentity {
-                salt: Some(salt),
-                layout: base_layout.clone(),
-                allocator_version: Some(SEGMENT_INDEX_ALLOCATOR_VERSION + 1),
-            }),
-            ..ResumeState::default()
-        };
-        s.record_with(
-            "a.bin",
-            1,
-            SegmentRecord {
-                message_id: "msg@x".into(),
-                bytes: 100,
-                confirmed: false,
-                check_disabled: false,
-                server_idx: 0,
-                wire_identity: None,
-                segment_identity: Some(id),
-            },
-        );
-
-        assert!(!s.validate_session(&base_layout));
-        assert!(s.session_identity().is_none());
-        assert_eq!(s.len(), 0);
-    }
-
-    #[test]
     fn current_version_session_round_trips_byte_for_byte() {
-        use crate::poster::{ReleaseLayout, SegmentIdentity};
+        use crate::poster::ReleaseLayout;
 
         let base_layout = ReleaseLayout::from_parts(1, &[(1, 1)]).unwrap();
         let salt = [0x77u8; 16];
 
         let mut s = ResumeState::default();
         s.set_session_identity(UploadSessionIdentity::new(Some(salt), base_layout.clone()));
-        let id = SegmentIdentity::new(1, 1, 1, 1).unwrap();
         s.record_with(
             "a.bin",
             1,
@@ -1194,11 +1012,10 @@ mod tests {
                 check_disabled: false,
                 server_idx: 0,
                 wire_identity: None,
-                segment_identity: Some(id),
             },
         );
 
-        // Current-version session validates unchanged and survives
+        // Session validates unchanged and survives
         // serialization round-trip byte-for-byte.
         assert!(s.validate_session(&base_layout));
         assert!(s.session_identity().is_some());
@@ -1208,6 +1025,6 @@ mod tests {
         s.save(&path).unwrap();
         let mut loaded = ResumeState::load(&path).unwrap();
         assert!(loaded.validate_session(&base_layout));
-        assert_eq!(loaded.get("a.bin", 1).unwrap().segment_identity, Some(id));
+        assert_eq!(loaded.get("a.bin", 1).unwrap().message_id, "msg@x");
     }
 }

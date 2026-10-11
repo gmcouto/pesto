@@ -59,7 +59,6 @@ async fn a_staged_job_downloads_and_lands_in_history() {
         server_idx: 0,
         file_index: 0,
         total_files: 0,
-        segment_identity: None,
     }];
     let nzb_bytes = pesto::nzb::generate(
         &groups,
@@ -67,7 +66,6 @@ async fn a_staged_job_downloads_and_lands_in_history() {
         &NzbMeta::default(),
         pesto::config::ObfuscateMode::None,
     )
-    .unwrap()
     .into_bytes();
 
     let job = sugo::job::stage_and_create(&state, "greeting.nzb", None, nzb_bytes)
@@ -130,7 +128,7 @@ async fn encrypted_nzb_sugo_job_round_trip() {
         total: 1,
         offset: 0,
     };
-    let identity = pesto::poster::SegmentIdentity::new(1, 1, 1, 1).unwrap();
+    let segment_index = 1u32;
     let mut body = Vec::new();
     let encoded = adapter
         .encode_article(
@@ -140,7 +138,7 @@ async fn encrypted_nzb_sugo_job_round_trip() {
             original,
             128,
             None,
-            identity,
+            segment_index,
             &mut body,
         )
         .unwrap();
@@ -173,7 +171,6 @@ async fn encrypted_nzb_sugo_job_round_trip() {
         server_idx: 0,
         file_index: 1,
         total_files: 1,
-        segment_identity: Some(identity),
     }];
     let meta = NzbMeta {
         password: Some(password.to_string()),
@@ -186,7 +183,6 @@ async fn encrypted_nzb_sugo_job_round_trip() {
         &meta,
         pesto::config::ObfuscateMode::None,
     )
-    .unwrap()
     .into_bytes();
 
     let job = sugo::job::stage_and_create(&state, "sugo_secret.nzb", None, nzb_bytes)
@@ -233,7 +229,7 @@ async fn encrypted_nzb_sugo_tampered_job_fails_cleanly() {
         total: 1,
         offset: 0,
     };
-    let identity = pesto::poster::SegmentIdentity::new(1, 1, 1, 1).unwrap();
+    let segment_index = 1u32;
     let mut body = Vec::new();
     let encoded = adapter
         .encode_article(
@@ -243,7 +239,7 @@ async fn encrypted_nzb_sugo_tampered_job_fails_cleanly() {
             original,
             128,
             None,
-            identity,
+            segment_index,
             &mut body,
         )
         .unwrap();
@@ -285,7 +281,6 @@ async fn encrypted_nzb_sugo_tampered_job_fails_cleanly() {
         server_idx: 0,
         file_index: 1,
         total_files: 1,
-        segment_identity: Some(identity),
     }];
     let meta = NzbMeta {
         password: Some(password.to_string()),
@@ -298,7 +293,6 @@ async fn encrypted_nzb_sugo_tampered_job_fails_cleanly() {
         &meta,
         pesto::config::ObfuscateMode::None,
     )
-    .unwrap()
     .into_bytes();
 
     let job = sugo::job::stage_and_create(&state, "tampered.nzb", None, nzb_bytes)
@@ -355,7 +349,7 @@ async fn test_staged_encrypted_nzb_persistence_and_restart() {
         total: 1,
         offset: 0,
     };
-    let identity = pesto::poster::SegmentIdentity::new(0, 0, 1, 77).unwrap();
+    let segment_index = 1u32;
     let mut body = Vec::new();
     let encoded = adapter
         .encode_article(
@@ -365,7 +359,7 @@ async fn test_staged_encrypted_nzb_persistence_and_restart() {
             original,
             128,
             None,
-            identity,
+            segment_index,
             &mut body,
         )
         .unwrap();
@@ -403,7 +397,6 @@ async fn test_staged_encrypted_nzb_persistence_and_restart() {
         server_idx: 0,
         file_index: 0,
         total_files: 0,
-        segment_identity: Some(identity),
     }];
     let meta = NzbMeta {
         password: Some(password.to_string()),
@@ -416,7 +409,6 @@ async fn test_staged_encrypted_nzb_persistence_and_restart() {
         &meta,
         pesto::config::ObfuscateMode::None,
     )
-    .unwrap()
     .into_bytes();
 
     // Stage and enqueue in store 1, then explicitly save to disk

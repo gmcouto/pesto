@@ -8,7 +8,6 @@ use anyhow::Result;
 
 use crate::yenc;
 
-use super::outcome::SegmentIdentity;
 use super::FileMeta;
 
 /// Fans posted articles out to per-worker channels instead of one channel
@@ -58,9 +57,7 @@ pub(super) struct PostTask {
     pub(super) total: u32,
     pub(super) offset: u64,
     pub(super) data: Vec<u8>,
-    /// Immutable segment identity across the entire release.
-    #[allow(dead_code)]
-    pub(super) segment_identity: SegmentIdentity,
+    pub(super) segment_index: u32,
     /// Per-article subject token. In article mode each article gets a unique
     /// value; otherwise this mirrors `meta.subject_name`.
     pub(super) subject_name: String,

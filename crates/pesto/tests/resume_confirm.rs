@@ -344,7 +344,6 @@ async fn t13_new_schema_three_arms() {
             check_disabled: false,
             server_idx: 0,
             wire_identity: None,
-            segment_identity: None,
         },
     );
     prior.record_with(
@@ -357,7 +356,6 @@ async fn t13_new_schema_three_arms() {
             check_disabled: false,
             server_idx: 0,
             wire_identity: None,
-            segment_identity: None,
         },
     );
     prior.save(&state_path).unwrap();
@@ -643,10 +641,10 @@ async fn t23_cancel_during_check_drain_persists_unconfirmed() {
     assert!(counts2.stats.load(Ordering::Relaxed) >= 2);
 }
 
-/// Verify that cancellation and resume round-trip preserves exact SegmentIdentity
-/// across interrupted save, load, and replay.
+/// Verify that cancellation and resume round-trip preserves the exact
+/// Message-IDs across interrupted save, load, and replay.
 #[tokio::test(flavor = "multi_thread")]
-async fn resume_preserves_exact_segment_identity_across_cancel_and_replay() {
+async fn resume_preserves_exact_message_ids_across_cancel_and_replay() {
     let (port, _counts) = spawn_mock(None, None, 0).await;
     let dir = tempfile::tempdir().unwrap();
     let file1 = input(dir.path(), "file1.bin", 150); // 2 segments
@@ -691,11 +689,10 @@ async fn resume_preserves_exact_segment_identity_across_cancel_and_replay() {
     assert!(state_path.exists());
 
     let state1 = ResumeState::load(&state_path).unwrap();
-    // Segment records persisted during cancel must carry valid segment_identity.
+    // Segment records persisted during cancel must replay the same Message-IDs.
     for seg in &outcome1.segments {
         let rec = state1.get(&seg.file_name, seg.part).unwrap();
-        assert_eq!(rec.segment_identity, seg.segment_identity);
-        assert!(rec.segment_identity.is_some());
+        assert_eq!(rec.message_id, seg.message_id);
     }
 
     // Now resume and finish the remaining segment.
@@ -724,7 +721,7 @@ async fn resume_preserves_exact_segment_identity_across_cancel_and_replay() {
     assert!(outcome2.failures.is_empty());
     assert_eq!(outcome2.segments.len(), 3);
 
-    // Verify all 3 segments have contiguous 1..=3 segment_index and matching ordinals.
+    // Verify all 3 segments replay or post with stable subject ordinals.
     let s1 = outcome2
         .segments
         .iter()
@@ -741,10 +738,23 @@ async fn resume_preserves_exact_segment_identity_across_cancel_and_replay() {
         .find(|s| s.file_name == "file2.bin" && s.part == 1)
         .unwrap();
 
-    assert_eq!(s1.segment_identity.unwrap().segment_index, 1);
-    assert_eq!(s1.segment_identity.unwrap().file_ordinal, 1);
-    assert_eq!(s2.segment_identity.unwrap().segment_index, 2);
-    assert_eq!(s2.segment_identity.unwrap().file_ordinal, 1);
-    assert_eq!(s3.segment_identity.unwrap().segment_index, 3);
-    assert_eq!(s3.segment_identity.unwrap().file_ordinal, 2);
+    assert_eq!(
+        s1.message_id,
+        outcome1
+            .segments
+            .iter()
+            .find(|s| s.file_name == "file1.bin" && s.part == 1)
+            .unwrap()
+            .message_id
+    );
+    assert_eq!(
+        s2.message_id,
+        outcome1
+            .segments
+            .iter()
+            .find(|s| s.file_name == "file1.bin" && s.part == 2)
+            .unwrap()
+            .message_id
+    );
+    assert!(s3.message_id != s1.message_id && s3.message_id != s2.message_id);
 }

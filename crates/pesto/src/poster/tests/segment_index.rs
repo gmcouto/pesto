@@ -1,7 +1,7 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use super::*;
-use crate::poster::outcome::SegmentIdentity;
 use crate::poster::prepare::ReleaseLayout;
 use crate::poster::task::PostTask;
 use crate::poster::FileMeta;
@@ -26,24 +26,10 @@ fn release_layout_assigns_prefix_base_by_natural_ordinal_not_processing_order() 
     assert_eq!(entry2.part_count, 2);
     assert_eq!(entry2.prefix_parts, 1);
 
-    // Segment identities:
-    let id1_1 = layout.segment_identity(1, 1).expect("part 1 of file 1");
-    assert_eq!(id1_1.file_ordinal, 1);
-    assert_eq!(id1_1.total_files, 2);
-    assert_eq!(id1_1.part_number, 1);
-    assert_eq!(id1_1.segment_index, 1);
-
-    let id2_1 = layout.segment_identity(2, 1).expect("part 1 of file 2");
-    assert_eq!(id2_1.file_ordinal, 2);
-    assert_eq!(id2_1.total_files, 2);
-    assert_eq!(id2_1.part_number, 1);
-    assert_eq!(id2_1.segment_index, 2);
-
-    let id2_2 = layout.segment_identity(2, 2).expect("part 2 of file 2");
-    assert_eq!(id2_2.file_ordinal, 2);
-    assert_eq!(id2_2.total_files, 2);
-    assert_eq!(id2_2.part_number, 2);
-    assert_eq!(id2_2.segment_index, 3);
+    // Segment indices:
+    assert_eq!(layout.segment_identity(1, 1).expect("part 1 of file 1"), 1);
+    assert_eq!(layout.segment_identity(2, 1).expect("part 1 of file 2"), 2);
+    assert_eq!(layout.segment_identity(2, 2).expect("part 2 of file 2"), 3);
 
     // Out of bounds queries return None
     assert!(layout.segment_identity(1, 2).is_none());
@@ -68,30 +54,30 @@ fn release_layout_planned_par2_index_and_volumes_follow_data_files() {
 
     // Ordinal 1: prefix 0, segments 1..=3
     assert_eq!(layout.entry(1).unwrap().prefix_parts, 0);
-    assert_eq!(layout.segment_identity(1, 1).unwrap().segment_index, 1);
-    assert_eq!(layout.segment_identity(1, 3).unwrap().segment_index, 3);
+    assert_eq!(layout.segment_identity(1, 1).unwrap(), 1);
+    assert_eq!(layout.segment_identity(1, 3).unwrap(), 3);
 
     // Ordinal 2: prefix 3, segments 4..=5
     assert_eq!(layout.entry(2).unwrap().prefix_parts, 3);
-    assert_eq!(layout.segment_identity(2, 1).unwrap().segment_index, 4);
-    assert_eq!(layout.segment_identity(2, 2).unwrap().segment_index, 5);
+    assert_eq!(layout.segment_identity(2, 1).unwrap(), 4);
+    assert_eq!(layout.segment_identity(2, 2).unwrap(), 5);
 
     // PAR2 index (ordinal 3): prefix 5, segment 6
     assert_eq!(layout.entry(3).unwrap().prefix_parts, 5);
-    assert_eq!(layout.segment_identity(3, 1).unwrap().segment_index, 6);
+    assert_eq!(layout.segment_identity(3, 1).unwrap(), 6);
 
     // PAR2 volume 1 (ordinal 4): prefix 6, segments 7..=8
     assert_eq!(layout.entry(4).unwrap().prefix_parts, 6);
-    assert_eq!(layout.segment_identity(4, 1).unwrap().segment_index, 7);
-    assert_eq!(layout.segment_identity(4, 2).unwrap().segment_index, 8);
+    assert_eq!(layout.segment_identity(4, 1).unwrap(), 7);
+    assert_eq!(layout.segment_identity(4, 2).unwrap(), 8);
 
     // PAR2 volume 2 (ordinal 5): prefix 8, segments 9..=12
     assert_eq!(layout.entry(5).unwrap().prefix_parts, 8);
-    assert_eq!(layout.segment_identity(5, 1).unwrap().segment_index, 9);
+    assert_eq!(layout.segment_identity(5, 1).unwrap(), 9);
     // Index framing rule: ranks 10 and 12 map through nth_safe_segment_index, skipping
     // forbidden indices 10 and 13 (assigned 11 and 14).
-    assert_eq!(layout.segment_identity(5, 2).unwrap().segment_index, 11);
-    assert_eq!(layout.segment_identity(5, 4).unwrap().segment_index, 14);
+    assert_eq!(layout.segment_identity(5, 2).unwrap(), 11);
+    assert_eq!(layout.segment_identity(5, 4).unwrap(), 14);
 }
 
 #[test]
@@ -131,17 +117,14 @@ fn release_layout_fails_on_missing_or_duplicate_ordinals() {
 }
 
 #[test]
-fn post_task_carries_checked_segment_identity() {
+fn post_task_carries_checked_segment_index() {
     let layout = ReleaseLayout::from_parts(1, &[(1, 1)]).unwrap();
-    let id = layout.segment_identity(1, 1).unwrap();
-    assert_eq!(id.segment_index, 1);
-    assert_eq!(id.file_ordinal, 1);
-    assert_eq!(id.total_files, 1);
-    assert_eq!(id.part_number, 1);
+    let index = layout.segment_identity(1, 1).unwrap();
+    assert_eq!(index, 1);
 }
 
 #[test]
-fn posted_segment_and_failed_task_carry_planned_identity() {
+fn posted_segment_and_failed_task_carry_planned_index() {
     let dir = TempDir::new().unwrap();
     let file_path = dir.path().join("file.bin");
     std::fs::write(&file_path, b"test payload").unwrap();
@@ -155,19 +138,17 @@ fn posted_segment_and_failed_task_carry_planned_identity() {
         from: "test <t@x>".into(),
         date: (None, None),
         size: 12,
-        mtime: None,
         release_ordinal: 1,
         file_index: 1,
     });
 
-    let id = SegmentIdentity::new(1, 1, 1, 1).expect("valid id");
     let task = PostTask {
         meta: Arc::clone(&meta),
         part: 1,
         total: 1,
         offset: 0,
         data: b"test payload".to_vec(),
-        segment_identity: id,
+        segment_index: 1,
         subject_name: "file.bin".into(),
         yenc_name: "file.bin".into(),
         from: "test <t@x>".into(),
@@ -191,21 +172,15 @@ fn posted_segment_and_failed_task_carry_planned_identity() {
 
     let results = shared.results.lock().unwrap();
     assert_eq!(results.len(), 1);
-    let posted_seg = &results[0];
-    assert_eq!(posted_seg.segment_identity, Some(id));
-    assert_eq!(posted_seg.segment_identity.unwrap().segment_index, 1);
-    assert_eq!(posted_seg.segment_identity.unwrap().file_ordinal, 1);
-    assert_eq!(posted_seg.segment_identity.unwrap().part_number, 1);
-    assert_eq!(posted_seg.segment_identity.unwrap().total_files, 1);
 
-    // Commit failure
+    // Commit failure records a FailedTask carrying the planned segment index
     let task_fail = PostTask {
         meta: Arc::clone(&meta),
         part: 1,
         total: 1,
         offset: 0,
         data: b"fail payload".to_vec(),
-        segment_identity: id,
+        segment_index: 1,
         subject_name: "file.bin".into(),
         yenc_name: "file.bin".into(),
         from: "test <t@x>".into(),
@@ -227,20 +202,13 @@ fn posted_segment_and_failed_task_carry_planned_identity() {
     let failed = shared.failed_tasks.lock().unwrap();
     assert_eq!(failed.len(), 1);
     let failed_task = &failed[0];
-    assert_eq!(failed_task.segment_identity, id);
-    assert_eq!(failed_task.segment_identity.segment_index, 1);
-    assert_eq!(failed_task.segment_identity.file_ordinal, 1);
-    assert_eq!(failed_task.segment_identity.part_number, 1);
-    assert_eq!(failed_task.segment_identity.total_files, 1);
+    assert_eq!(failed_task.segment_index, 1);
 }
 
 #[test]
-fn sorting_post_outcome_preserves_exact_identities() {
+fn sorting_post_outcome_preserves_subject_ordinals() {
     let dir = TempDir::new().unwrap();
     let file_path = dir.path().join("dummy");
-
-    let id1 = SegmentIdentity::new(1, 2, 1, 1).unwrap();
-    let id2 = SegmentIdentity::new(2, 2, 1, 2).unwrap();
 
     let seg1 = PostedSegment {
         file_name: "file_a.bin".into(),
@@ -259,7 +227,6 @@ fn sorting_post_outcome_preserves_exact_identities() {
         server_idx: 0,
         file_index: 1,
         total_files: 2,
-        segment_identity: Some(id1),
     };
 
     let seg2 = PostedSegment {
@@ -279,7 +246,6 @@ fn sorting_post_outcome_preserves_exact_identities() {
         server_idx: 0,
         file_index: 2,
         total_files: 2,
-        segment_identity: Some(id2),
     };
 
     // Push into shared in reverse order (file_b, then file_a)
@@ -303,13 +269,11 @@ fn sorting_post_outcome_preserves_exact_identities() {
     // After outcome assembly, segments are sorted natural by name: file_a, then file_b
     assert_eq!(outcome.segments.len(), 2);
     assert_eq!(outcome.segments[0].file_name, "file_a.bin");
-    assert_eq!(outcome.segments[0].segment_identity, Some(id1));
     assert_eq!(outcome.segments[1].file_name, "file_b.bin");
-    assert_eq!(outcome.segments[1].segment_identity, Some(id2));
 }
 
 #[tokio::test]
-async fn dry_run_assigns_planned_identity_to_posted_segments() {
+async fn dry_run_assigns_planned_indices_to_posted_segments() {
     let dir = TempDir::new().unwrap();
     let f1 = dir.path().join("a.bin");
     let f2 = dir.path().join("b.bin");
@@ -332,39 +296,13 @@ async fn dry_run_assigns_planned_identity_to_posted_segments() {
     let outcome = post_files(&config, &files).await.unwrap();
 
     assert_eq!(outcome.segments.len(), 2);
-    // a.bin: ordinal 1, prefix 0, part 1 -> segment_index 1
-    let seg_a = outcome
-        .segments
-        .iter()
-        .find(|s| s.file_name == "a.bin")
-        .unwrap();
-    let id_a = seg_a.segment_identity.expect("a.bin has segment identity");
-    assert_eq!(id_a.file_ordinal, 1);
-    assert_eq!(id_a.total_files, 2);
-    assert_eq!(id_a.part_number, 1);
-    assert_eq!(id_a.segment_index, 1);
-
-    // b.bin: ordinal 2, prefix 1, part 1 -> segment_index 2
-    let seg_b = outcome
-        .segments
-        .iter()
-        .find(|s| s.file_name == "b.bin")
-        .unwrap();
-    let id_b = seg_b.segment_identity.expect("b.bin has segment identity");
-    assert_eq!(id_b.file_ordinal, 2);
-    assert_eq!(id_b.total_files, 2);
-    assert_eq!(id_b.part_number, 1);
-    assert_eq!(id_b.segment_index, 2);
+    // Segment ordering in the outcome follows the release's natural order.
+    assert_eq!(outcome.segments[0].file_name, "a.bin");
+    assert_eq!(outcome.segments[1].file_name, "b.bin");
 }
 
 #[tokio::test]
-async fn repost_failed_tasks_preserves_exact_identity_and_subject_ordinals() {
-    let id = SegmentIdentity::new(2, 3, 2, 5).unwrap();
-    assert_eq!(id.segment_index, 5);
-    assert_eq!(id.file_ordinal, 2);
-    assert_eq!(id.part_number, 2);
-    assert_eq!(id.total_files, 3);
-
+async fn repost_failed_tasks_preserves_subject_ordinals() {
     let failed = FailedTask {
         file_name: "file2.bin".into(),
         client_path: "file2.bin".into(),
@@ -380,7 +318,7 @@ async fn repost_failed_tasks_preserves_exact_identity_and_subject_ordinals() {
         full_crc32: 0,
         file_index: 2,
         total_files: 3,
-        segment_identity: id,
+        segment_index: 5,
     };
 
     // Verify subject formatting with default_subject matches original
@@ -402,7 +340,6 @@ async fn repost_failed_tasks_preserves_exact_identity_and_subject_ordinals() {
         None,
         None,
         &mut slots,
-        None,
     )
     .await
     .unwrap();
@@ -410,42 +347,7 @@ async fn repost_failed_tasks_preserves_exact_identity_and_subject_ordinals() {
 }
 
 #[test]
-fn release_layout_build_populates_par2_file_names_for_identity_resolution() {
-    let mut config = dry_run_config();
-    config.article_size = 500;
-    let meta = std::sync::Arc::new(FileMeta {
-        path: std::path::PathBuf::from("test.bin"),
-        real_name: "test.bin".into(),
-        client_path: "test.bin".into(),
-        subject_name: "test.bin".into(),
-        yenc_name: "test.bin".into(),
-        size: 1000,
-        mtime: Some(100),
-        from: "p@x".into(),
-        date: (None, None),
-        file_index: 1,
-        release_ordinal: 1,
-    });
-    let layout = ReleaseLayout::build(&[meta], &config, 4, 1024).unwrap();
-    let par2_entries: Vec<_> = layout
-        .entries()
-        .iter()
-        .filter(|e| e.release_ordinal > 1)
-        .collect();
-    assert!(!par2_entries.is_empty());
-    for entry in par2_entries {
-        assert!(
-            entry.file_name.is_some(),
-            "PAR2 entry ordinal {} should have file_name",
-            entry.release_ordinal
-        );
-        let name = entry.file_name.as_ref().unwrap();
-        assert!(name.ends_with(".par2"));
-    }
-}
-
-#[test]
-fn task_dispatcher_queue_reordering_preserves_segment_identity() {
+fn task_dispatcher_queue_reordering_preserves_segment_index() {
     let meta1 = Arc::new(FileMeta {
         path: PathBuf::from("f1.bin"),
         real_name: "f1.bin".into(),
@@ -453,7 +355,6 @@ fn task_dispatcher_queue_reordering_preserves_segment_identity() {
         subject_name: "f1.bin".into(),
         yenc_name: "f1.bin".into(),
         size: 1000,
-        mtime: Some(100),
         from: "p@x".into(),
         date: (None, None),
         file_index: 1,
@@ -466,16 +367,11 @@ fn task_dispatcher_queue_reordering_preserves_segment_identity() {
         subject_name: "f2.bin".into(),
         yenc_name: "f2.bin".into(),
         size: 1000,
-        mtime: Some(100),
         from: "p@x".into(),
         date: (None, None),
         file_index: 2,
         release_ordinal: 2,
     });
-
-    let id1 = SegmentIdentity::new(1, 2, 1, 1).unwrap();
-    let id2 = SegmentIdentity::new(1, 2, 2, 2).unwrap();
-    let id3 = SegmentIdentity::new(2, 2, 1, 3).unwrap();
 
     let task1 = PostTask {
         meta: meta1.clone(),
@@ -483,7 +379,7 @@ fn task_dispatcher_queue_reordering_preserves_segment_identity() {
         total: 2,
         offset: 0,
         data: vec![1; 500],
-        segment_identity: id1,
+        segment_index: 1,
         subject_name: "f1.bin".into(),
         yenc_name: "f1.bin".into(),
         from: "p@x".into(),
@@ -496,7 +392,7 @@ fn task_dispatcher_queue_reordering_preserves_segment_identity() {
         total: 2,
         offset: 500,
         data: vec![2; 500],
-        segment_identity: id2,
+        segment_index: 2,
         subject_name: "f1.bin".into(),
         yenc_name: "f1.bin".into(),
         from: "p@x".into(),
@@ -509,7 +405,7 @@ fn task_dispatcher_queue_reordering_preserves_segment_identity() {
         total: 1,
         offset: 0,
         data: vec![3; 500],
-        segment_identity: id3,
+        segment_index: 3,
         subject_name: "f2.bin".into(),
         yenc_name: "f2.bin".into(),
         from: "p@x".into(),
@@ -532,62 +428,22 @@ fn task_dispatcher_queue_reordering_preserves_segment_identity() {
     shuffled.push_back(t3);
     shuffled.push_back(t1);
 
-    // Invariance check: identity remains attached to each specific task
+    // Invariance check: the index remains attached to each specific task
     let p_t2 = shuffled.pop_front().unwrap();
     assert_eq!(p_t2.part, 2);
-    assert_eq!(p_t2.segment_identity, id2);
+    assert_eq!(p_t2.segment_index, 2);
 
     let p_t3 = shuffled.pop_front().unwrap();
     assert_eq!(p_t3.meta.real_name, "f2.bin");
-    assert_eq!(p_t3.segment_identity, id3);
+    assert_eq!(p_t3.segment_index, 3);
 
     let p_t1 = shuffled.pop_front().unwrap();
     assert_eq!(p_t1.part, 1);
-    assert_eq!(p_t1.segment_identity, id1);
-}
-
-#[tokio::test]
-async fn spool_storage_and_recovery_preserves_segment_identity_and_salt() {
-    let tmp = tempfile::tempdir().unwrap();
-    let spool_dir = tmp.path().join("spool");
-
-    let id = SegmentIdentity::new(1, 2, 1, 42).unwrap();
-    let salt = [7u8; 16];
-    let meta = crate::spool::SpoolMetadata {
-        wire_identity: None,
-        segment_identity: Some(id),
-        session_salt: Some(salt),
-        layout_fingerprint: Some("fingerprint-test-xyz".into()),
-    };
-
-    let file_name = "test_spool.bin";
-    let part = 1;
-    let message_id = "<spool-test-msg@example.com>";
-    let headers = b"Subject: test\r\n";
-    let body = b"yenc encrypted body content\r\n";
-
-    crate::spool::write_with_metadata(
-        &spool_dir, file_name, part, message_id, headers, body, &meta,
-    )
-    .await
-    .unwrap();
-
-    let recovered =
-        crate::spool::read(&spool_dir, file_name, part).expect("must read back spooled article");
-    assert_eq!(recovered.message_id, message_id);
-    assert_eq!(recovered.headers, headers);
-    assert_eq!(recovered.body, body);
-    assert_eq!(recovered.segment_identity, Some(id));
-    assert_eq!(recovered.session_salt, Some(salt));
-    assert_eq!(
-        recovered.layout_fingerprint.as_deref(),
-        Some("fingerprint-test-xyz")
-    );
+    assert_eq!(p_t1.segment_index, 1);
 }
 
 #[test]
-fn failed_task_preserves_immutable_segment_identity() {
-    let id = SegmentIdentity::new(3, 5, 2, 99).unwrap();
+fn failed_task_preserves_planned_segment_index() {
     let failed = FailedTask {
         file_name: "video.mkv".into(),
         client_path: "video.mkv".into(),
@@ -603,134 +459,8 @@ fn failed_task_preserves_immutable_segment_identity() {
         full_crc32: 0x12345678,
         file_index: 3,
         total_files: 5,
-        segment_identity: id,
+        segment_index: 99,
     };
 
-    assert_eq!(failed.segment_identity.file_ordinal, 3);
-    assert_eq!(failed.segment_identity.total_files, 5);
-    assert_eq!(failed.segment_identity.part_number, 2);
-    assert_eq!(failed.segment_identity.segment_index, 99);
-}
-
-fn encrypted_shared(article_size: usize) -> Arc<Shared> {
-    let mut config = dry_run_config();
-    config.article_size = article_size;
-    let post_group = pick_post_group(&config.groups);
-    let session = Arc::new(crate::crypto::EncryptionSession::new("testpass", [1u8; 16]).unwrap());
-    let adapter = Arc::new(crate::crypto::UploadEncryptionAdapter::new(session));
-    Arc::new(Shared {
-        config,
-        servers: Arc::new(vec![]),
-        results: Arc::new(Mutex::new(Vec::new())),
-        failures: Mutex::new(Vec::new()),
-        failed_tasks: Mutex::new(Vec::new()),
-        events: None,
-        cancelled: Arc::new(AtomicBool::new(false)),
-        paused: Arc::new(AtomicBool::new(false)),
-        resume: None,
-        resume_path: None,
-        spool_dir: None,
-        pool: Arc::new(Mutex::new(Vec::new())),
-        encode_pool: Arc::new(Mutex::new(Vec::new())),
-        total_retries: std::sync::atomic::AtomicUsize::new(0),
-        post_group,
-        release_prefix: None,
-        release_from: None,
-        run_id: 0,
-        total_files: 1,
-        release_layout: Arc::new(prepare::ReleaseLayout::from_parts(1, &[(1, 1)]).unwrap()),
-        encryption_adapter: Some(adapter),
-        check_tx: Mutex::new(None),
-    })
-}
-
-#[tokio::test]
-async fn prepare_ready_records_failure_on_encryption_error() {
-    let shared = encrypted_shared(1024);
-    let path = std::path::PathBuf::from("test.bin");
-    let meta = meta_with_name(&path, "test.bin");
-    let id = SegmentIdentity::new(1, 1, 1, 1).unwrap();
-    let task = PostTask {
-        meta: Arc::new(meta),
-        part: 1,
-        total: 1,
-        offset: 0,
-        data: vec![1, 2, 3],
-        segment_identity: id,
-        subject_name: "test.bin".into(),
-        yenc_name: "bad\0name".into(),
-        from: "tester <t@example.com>".into(),
-        date: (None, None),
-        file_crc32: None,
-    };
-    let ready = super::super::worker::prepare_ready(&shared, task).await;
-    assert!(ready.is_none());
-    let failures = shared.failures.lock().unwrap();
-    assert_eq!(failures.len(), 1);
-    assert!(failures[0].contains("failed to encrypt article segment"));
-    let failed_tasks = shared.failed_tasks.lock().unwrap();
-    assert_eq!(failed_tasks.len(), 1);
-    assert_eq!(failed_tasks[0].part, 1);
-    assert_eq!(failed_tasks[0].segment_identity, id);
-}
-
-#[tokio::test]
-async fn repost_one_missing_segment_identity_returns_error_instead_of_panicking() {
-    let tmp = TempDir::new().unwrap();
-    let file_path = tmp.path().join("dummy.bin");
-    tokio::fs::write(&file_path, b"hello world 1234567890")
-        .await
-        .unwrap();
-
-    let mut config = dry_run_config();
-    config.article_size = 100;
-    let server_entry = crate::config::ServerEntry {
-        host: "127.0.0.1".into(),
-        port: 1119,
-        ssl: false,
-        connections: 1,
-        username: None,
-        password: None,
-        retry_delay: 1,
-        timeout: 10,
-        proxy: None,
-    };
-    let mut slots =
-        crate::nntp::pool::ConnectionPool::build(Arc::new(vec![server_entry]), 1).into_slots();
-    let mut slot = slots.pop().unwrap();
-
-    let seg = PostedSegment {
-        file_name: "dummy.bin".into(),
-        file_path: Arc::from(file_path.as_path()),
-        subject_name: Arc::from("dummy.bin"),
-        wire_name: Arc::from("dummy.bin"),
-        wire_yenc_name: Arc::from("dummy.bin"),
-        file_size: 20,
-        part: 1,
-        total: 1,
-        message_id: "<orig@msg>".into(),
-        bytes: 100,
-        from: Arc::from("test <t@x>"),
-        date: (None, None),
-        full_crc32: 0,
-        server_idx: 0,
-        file_index: 1,
-        total_files: 1,
-        segment_identity: None,
-    };
-
-    let session = Arc::new(crate::crypto::EncryptionSession::new("testpass", [1u8; 16]).unwrap());
-    let adapter = crate::crypto::UploadEncryptionAdapter::new(session);
-    let res = super::super::check::repost_one(
-        &config,
-        &mut slot,
-        &seg,
-        &["alt.test".into()],
-        Some(&adapter),
-    )
-    .await;
-
-    assert!(res.is_err());
-    let err_str = res.unwrap_err().to_string();
-    assert!(err_str.contains("missing segment identity for encrypted repost"));
+    assert_eq!(failed.segment_index, 99);
 }

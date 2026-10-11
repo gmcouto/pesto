@@ -59,7 +59,6 @@ fn meta_with_name(path: &std::path::Path, name: &str) -> FileMeta {
         from: String::new(),
         date: (None, None),
         size: 0,
-        mtime: None,
         release_ordinal: 1,
         file_index: 0,
     }

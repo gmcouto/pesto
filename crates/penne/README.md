@@ -566,9 +566,6 @@ within the NZB. The CLI `--password` option is used for downstream archive extra
 Decryption operates on an article-by-article basis. Failed authentication releases
 zero plaintext and triggers alternate-server failover before failing the job.
 
-Encrypted releases are fully interoperable across all conforming ecosystem clients,
-including Pesto, Nyuu, ngPost, Penne, Sugo, SABnzbd, and NZBGet.
-
 **Security and Threat Model:**
 - Content encryption at the article layer (XChaCha20-Poly1305) protects stored Usenet articles from unauthorized retrieval.
 - Transport encryption (TLS) secures the network connection to the Usenet provider, while content encryption secures payload data at rest on servers.

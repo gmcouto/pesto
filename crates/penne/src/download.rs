@@ -52,7 +52,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use pesto::config::ServerEntry;
-use pesto::crypto::{crypto_error_kind_of, CryptoErrorKind, DownloadDecryptionAdapter};
+use pesto::crypto::DownloadDecryptionAdapter;
 use pesto::yenc::decode_part;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::task::JoinSet;
@@ -262,7 +262,7 @@ pub async fn download_queue_with_decryptor(
                     )
                     .await?;
                     continue;
-                } else {
+                } else if decryptor.is_some() {
                     // Evict corrupted/unauthenticated cache entry
                     let _ = cache::remove(dest_dir, &seg.message_id);
                 }
@@ -611,29 +611,12 @@ async fn worker_loop(
                 fetched.push(item);
             }
             Err(e) => {
-                // Failover routing (Two-Tier model, Body Std §5): a
-                // pesto-origin `CryptoErrorKind::MetadataValidation` is
-                // STRUCTURAL — it would reproduce identically against every
-                // server, so there is no point rotating providers. Anything
-                // else (including the typed `ProviderFailover` tier and
-                // unclassified decode errors) is retriable per-server
-                // corruption. The kind is attached at the crypto origin and
-                // recovered here by downcast — penne never re-derives it from
-                // message strings.
-                let is_metadata_failure =
-                    crypto_error_kind_of(&e) == Some(CryptoErrorKind::MetadataValidation);
                 tracing::warn!(
                     message_id = %item.message_id,
                     file = %item.file_name,
                     part = item.part,
                     "article decode/decryption failed: {e}"
                 );
-                if is_metadata_failure {
-                    // Structural failure: abort the run — no server can
-                    // satisfy this request. Surface the typed classification
-                    // to the caller.
-                    return Err(e);
-                }
                 if is_last_server {
                     emit(&ctx.progress, || ProgressEvent::SegmentCorrupt {
                         file_name: item.file_name.clone(),

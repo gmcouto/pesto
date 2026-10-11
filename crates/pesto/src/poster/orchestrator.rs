@@ -294,7 +294,7 @@ async fn run(options: RunOptions<'_>) -> Result<PostOutcome> {
             shared.events.clone(),
             Some(Arc::clone(&shared.cancelled)),
             check_slots,
-            (shared.resume.clone(), shared.encryption_adapter.clone()),
+            shared.resume.clone(),
         ))
     } else {
         None
@@ -374,26 +374,6 @@ struct RecoveryOutcome {
     inconclusive: Vec<String>,
 }
 
-fn resolve_segment_identity(
-    shared: &Shared,
-    file_name: &str,
-    part: u32,
-    existing: Option<crate::poster::SegmentIdentity>,
-) -> Option<crate::poster::SegmentIdentity> {
-    existing.or_else(|| {
-        shared
-            .release_layout
-            .entries()
-            .iter()
-            .find(|e| e.file_name.as_deref() == Some(file_name))
-            .and_then(|e| {
-                shared
-                    .release_layout
-                    .segment_identity(e.release_ordinal, part)
-            })
-    })
-}
-
 /// Retry unacknowledged posts, drain the streaming STAT queue and attempt the
 /// bounded final recovery pass before returning every held connection slot.
 async fn recover_or_repost(
@@ -424,7 +404,6 @@ async fn recover_or_repost(
             shared.events.as_ref(),
             Some(&shared.cancelled),
             &mut post_slots,
-            shared.encryption_adapter.as_deref(),
         )
         .await
         .unwrap_or_else(|e| {
@@ -452,12 +431,6 @@ async fn recover_or_repost(
                             &seg.from,
                             &seg.date,
                         )),
-                        segment_identity: resolve_segment_identity(
-                            shared,
-                            &seg.file_name,
-                            seg.part,
-                            seg.segment_identity,
-                        ),
                     },
                 );
             }
@@ -563,7 +536,6 @@ async fn recover_or_repost(
                 candidates,
                 shared.events.as_ref(),
                 std::mem::take(&mut post_slots),
-                shared.encryption_adapter.clone(),
             )
             .await;
             post_slots = recovered.slots;
@@ -578,24 +550,6 @@ async fn recover_or_repost(
                         .iter_mut()
                         .find(|s| s.file_name == seg.file_name && s.part == seg.part)
                     {
-                        if existing.segment_identity != seg.segment_identity {
-                            error!(
-                                file = %seg.file_name,
-                                part = seg.part,
-                                "recovery repost altered logical segment identity"
-                            );
-                            continue;
-                        }
-                        if (existing.file_index, existing.total_files)
-                            != (seg.file_index, seg.total_files)
-                        {
-                            error!(
-                                file = %seg.file_name,
-                                part = seg.part,
-                                "recovery repost altered file index or total files"
-                            );
-                            continue;
-                        }
                         *existing = seg.clone();
                     }
                 }
@@ -618,12 +572,6 @@ async fn recover_or_repost(
                                 &seg.from,
                                 &seg.date,
                             )),
-                            segment_identity: resolve_segment_identity(
-                                shared,
-                                &seg.file_name,
-                                seg.part,
-                                seg.segment_identity,
-                            ),
                         },
                     );
                 }
@@ -643,12 +591,6 @@ async fn recover_or_repost(
                                 &seg.from,
                                 &seg.date,
                             )),
-                            segment_identity: resolve_segment_identity(
-                                shared,
-                                &seg.file_name,
-                                seg.part,
-                                seg.segment_identity,
-                            ),
                         },
                     );
                 }

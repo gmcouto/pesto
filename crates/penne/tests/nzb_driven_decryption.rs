@@ -18,7 +18,6 @@ use penne::nzb::{download_decryptor, load};
 use penne::queue::{build, DownloadQueue, QueuedFile, QueuedSegment};
 use pesto::crypto::kdf::EncryptionSession;
 use pesto::crypto::{DownloadDecryptionAdapter, UploadEncryptionAdapter};
-use pesto::poster::SegmentIdentity;
 use pesto::yenc::PartSpec;
 use tempfile::NamedTempFile;
 
@@ -65,14 +64,13 @@ fn encode_test_article(
     file_size: u64,
     spec: PartSpec,
     payload: &[u8],
-    segment_index: u32,
+    _segment_index: u32,
 ) -> Vec<u8> {
     let uploader = UploadEncryptionAdapter::new(session.clone());
-    let identity = SegmentIdentity::new(0, 0, spec.number, segment_index).unwrap();
     let mut body = Vec::new();
     let encoded = uploader
         .encode_article(
-            file_name, file_size, spec, payload, 128, None, identity, &mut body,
+            file_name, file_size, spec, payload, 128, None, 1u32, &mut body,
         )
         .expect("encode article failed");
     encoded.body
@@ -709,8 +707,6 @@ async fn test_unencrypted_article_rejection_for_encrypted_segment() {
     let queue = DownloadQueue {
         files: vec![QueuedFile {
             name: "spoofed.bin".to_string(),
-            file_ordinal: Some(1),
-            total_files: Some(1),
             segments: vec![QueuedSegment {
                 message_id: "spoofed-msg-01".to_string(),
                 part: 1,

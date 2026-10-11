@@ -8,7 +8,6 @@ use super::body;
 use super::control;
 use super::kdf::EncryptionSession;
 use super::{attach_crypto_error_kind, CryptoErrorKind};
-use crate::poster::SegmentIdentity;
 use crate::yenc::{self, DecodedPart, EncodedPart, PartSpec};
 
 /// Thin adapter presenting standard yEnc encode contract for encrypted articles.
@@ -27,7 +26,7 @@ impl UploadEncryptionAdapter {
 
     /// Encrypt and yEnc-encode a raw article segment.
     ///
-    /// 1. Derives 24-byte body nonce from `identity.segment_index`.
+    /// 1. Derives 24-byte body nonce from `segment_index`.
     /// 2. Encrypts `data` via XChaCha20-Poly1305 -> `(ciphertext, tag)`.
     /// 3. yEnc-encodes `ciphertext` into `body` buffer.
     /// 4. Injects `=yencryption` control line.
@@ -41,10 +40,10 @@ impl UploadEncryptionAdapter {
         data: &[u8],
         line_len: usize,
         file_crc32: Option<u32>,
-        identity: SegmentIdentity,
+        segment_index: u32,
         body: &mut Vec<u8>,
     ) -> Result<EncodedPart> {
-        let nonce = self.session.derive_body_nonce(identity.segment_index);
+        let nonce = self.session.derive_body_nonce(segment_index);
         let (ciphertext, tag) = body::encrypt_body(data, self.session.master_key(), &nonce)?;
 
         let mut encoded = yenc::encode_part_into(
@@ -67,18 +66,15 @@ impl UploadEncryptionAdapter {
             &mut encoded.body,
             &salt,
             &tag,
-            identity.segment_index,
+            segment_index,
             spec.total > 1,
         )
         // Keep `MissingYPartLineError` as the downcastable error-chain root.
         .map_err(anyhow::Error::new)?;
 
         // Encrypt control lines using FF1
-        let wire_body = control::encrypt_yenc_control_lines(
-            &self.session,
-            identity.segment_index,
-            &encoded.body,
-        )?;
+        let wire_body =
+            control::encrypt_yenc_control_lines(&self.session, segment_index, &encoded.body)?;
 
         encoded.body = wire_body;
         Ok(encoded)
@@ -377,6 +373,7 @@ pub struct DownloadDecryptionAdapter {
 }
 
 impl DownloadDecryptionAdapter {
+    #[cfg(test)]
     pub fn new(session: Option<Arc<EncryptionSession>>) -> Self {
         let mut map = HashMap::new();
         let mut order = VecDeque::new();
@@ -415,14 +412,6 @@ impl DownloadDecryptionAdapter {
                 );
             }
             return yenc::decode_part(body);
-        }
-        // IN-03: a uu-encoded article (starts with "begin <mode> <name>") is
-        // not an encrypted segment — name the actual condition instead of the
-        // misleading LINE_TRUNCATED-style bootstrap error.
-        if body.starts_with(b"begin ") && self.has_decryption_credentials() {
-            bail!(
-                "UU_ENCODED_ARTICLE: unencrypted uu-encoded article received where an encrypted segment was expected"
-            );
         }
 
         let first_line_end =
@@ -520,6 +509,7 @@ impl DownloadDecryptionAdapter {
     /// Directly authenticate and decrypt ciphertext with given salt and segment index.
     ///
     /// Strictly guarantees Zero-Output on authentication failure.
+    #[cfg(test)]
     pub fn decrypt_raw(
         &self,
         salt: [u8; 16],
@@ -553,7 +543,7 @@ impl DownloadDecryptionAdapter {
     }
 
     fn get_or_create_session(&self, salt: [u8; 16]) -> Result<Arc<EncryptionSession>> {
-        // IN-02-R4: same poisoned-tolerant policy as `has_decryption_credentials`
+        // Same poisoned-tolerant policy as `has_decryption_credentials`
         // above — a poisoned mutex in the download hot path fails closed as a
         // mapped crypto error instead of panicking.
         let mut guard = self.cached_sessions.lock().map_err(|_| {
@@ -640,7 +630,7 @@ mod tests {
         let session = Arc::new(EncryptionSession::new(password, salt).unwrap());
         let upload_adapter = UploadEncryptionAdapter::new(session);
         let payload = b"LF-only encrypted control framing";
-        let identity = SegmentIdentity::new(1, 1, 1, 1).unwrap();
+        let _segment_index = 1u32;
         let mut body = Vec::new();
         let encoded = upload_adapter
             .encode_article(
@@ -654,7 +644,7 @@ mod tests {
                 payload,
                 128,
                 None,
-                identity,
+                1u32,
                 &mut body,
             )
             .unwrap();
@@ -679,7 +669,7 @@ mod tests {
         let salt = control::generate_alphabet_salt();
         let session = Arc::new(EncryptionSession::new(password, salt).unwrap());
         let upload_adapter = UploadEncryptionAdapter::new(session);
-        let identity = SegmentIdentity::new(1, 1, 1, 1).unwrap();
+        let _segment_index = 1u32;
         let mut body = Vec::new();
         let encoded = upload_adapter
             .encode_article(
@@ -693,7 +683,7 @@ mod tests {
                 b"",
                 128,
                 None,
-                identity,
+                1u32,
                 &mut body,
             )
             .unwrap();
@@ -718,7 +708,7 @@ mod tests {
             total: 1,
             offset: 0,
         };
-        let identity = SegmentIdentity::new(1, 1, 1, 1).unwrap();
+        let _segment_index = 1u32;
         let mut body = Vec::new();
         let encoded = upload_adapter
             .encode_article(
@@ -728,7 +718,7 @@ mod tests {
                 payload,
                 128,
                 None,
-                identity,
+                1u32,
                 &mut body,
             )
             .expect("encode single-part file with part= in filename");
@@ -755,7 +745,7 @@ mod tests {
             total: 2,
             offset: 0,
         };
-        let identity = SegmentIdentity::new(1, 2, 1, 1).unwrap();
+        let _segment_index = 1u32;
         let mut body = Vec::new();
         let encoded = upload_adapter
             .encode_article(
@@ -765,7 +755,7 @@ mod tests {
                 &payload,
                 128,
                 None,
-                identity,
+                1u32,
                 &mut body,
             )
             .expect("encode multipart file with =ypart in filename");
