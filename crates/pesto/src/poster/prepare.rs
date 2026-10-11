@@ -170,7 +170,6 @@ pub(super) async fn prepare_inputs(
     resume_arc: Option<Arc<Mutex<ResumeState>>>,
     release_prefix: Option<String>,
     release_from: Option<String>,
-    spool_dir: Option<&Path>,
 ) -> Result<(Vec<Arc<FileMeta>>, u64)> {
     let common_release_root = files
         .first()
@@ -215,10 +214,9 @@ pub(super) async fn prepare_inputs(
                         "resume: `{real_name}` changed size or modification time since the \
                          saved session state was recorded — invalidating entire session"
                     );
+                    // The session_invalidated flag set here makes
+                    // `prepare_resources` clear the spool directory too.
                     state.invalidate_session();
-                    if let Some(dir) = spool_dir {
-                        crate::spool::remove_all(dir);
-                    }
                 } else if config.par2 > 0 {
                     // PAR2 recovery blocks are computed over the whole
                     // recovery set together, not per file — one file's
@@ -787,15 +785,15 @@ pub(super) async fn prepare_resources(
             if let Some(existing_salt) = state.session_salt() {
                 *existing_salt
             } else {
-                let fresh_salt = crate::crypto::control::generate_alphabet_salt();
+                let fresh_salt = crate::crypto::generate_alphabet_salt();
                 state.set_session_identity(crate::resume::UploadSessionIdentity::new(
-                    Some(fresh_salt),
+                    fresh_salt,
                     (*release_layout).clone(),
                 ));
                 fresh_salt
             }
         } else {
-            crate::crypto::control::generate_alphabet_salt()
+            crate::crypto::generate_alphabet_salt()
         };
         let session = Arc::new(crate::crypto::EncryptionSession::new(password, salt)?);
         Some(Arc::new(crate::crypto::UploadEncryptionAdapter::new(

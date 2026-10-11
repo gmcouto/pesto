@@ -185,28 +185,24 @@ pub struct PersistedWireIdentity {
     pub unix_date: Option<u64>,
 }
 
-/// Upload session identity containing an opaque 16-byte salt and the
-/// complete ordered release layout.
+/// Upload session identity: the 16-byte salt this release was encrypted
+/// under plus the complete ordered release layout that determined every
+/// segment index. Persisted so a `--resume` run reuses the *same* salt
+/// (already-posted articles must stay decryptable) and can detect layout
+/// changes (adding/removing files must invalidate the index space — nonce
+/// reuse risk).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UploadSessionIdentity {
-    /// Opaque 16-byte salt for this session, if set.
-    #[serde(default)]
-    pub salt: Option<[u8; 16]>,
+    /// Opaque 16-byte salt for this session. Always present: an identity is
+    /// only ever recorded for an encrypted upload.
+    pub salt: [u8; 16],
     /// The complete ordered release layout.
     pub layout: crate::poster::ReleaseLayout,
 }
 
 impl UploadSessionIdentity {
-    pub fn new(salt: Option<[u8; 16]>, layout: crate::poster::ReleaseLayout) -> Self {
+    pub fn new(salt: [u8; 16], layout: crate::poster::ReleaseLayout) -> Self {
         Self { salt, layout }
-    }
-
-    pub fn salt(&self) -> Option<&[u8; 16]> {
-        self.salt.as_ref()
-    }
-
-    pub fn layout(&self) -> &crate::poster::ReleaseLayout {
-        &self.layout
     }
 }
 
@@ -329,12 +325,7 @@ impl ResumeState {
 
     /// The opaque 16-byte session salt recorded for this state, if any.
     pub fn session_salt(&self) -> Option<&[u8; 16]> {
-        self.session_identity.as_ref().and_then(|s| s.salt())
-    }
-
-    /// The release layout recorded for this session, if any.
-    pub fn session_layout(&self) -> Option<&crate::poster::ReleaseLayout> {
-        self.session_identity.as_ref().map(|s| s.layout())
+        self.session_identity.as_ref().map(|s| &s.salt)
     }
 
     /// Invalidate the entire upload session, clearing session identity (salt and
@@ -352,12 +343,9 @@ impl ResumeState {
         self.release_from = None;
     }
 
-    /// Check if the session was invalidated during this run.
-    pub fn is_session_invalidated(&self) -> bool {
-        self.session_invalidated
-    }
-
-    /// Take and clear the session_invalidated dirty bit.
+    /// Take and clear the session_invalidated dirty bit (set by
+    /// `validate_run`/`invalidate_session`). `prepare_resources` consumes it
+    /// to clear the spool directory along with the invalidated state.
     pub fn take_session_invalidated(&mut self) -> bool {
         std::mem::take(&mut self.session_invalidated)
     }
@@ -368,21 +356,12 @@ impl ResumeState {
     /// if the session was persisted by a different segment-index allocator
     /// version, the entire session is invalidated and `false` is returned.
     pub fn validate_session(&mut self, current_layout: &crate::poster::ReleaseLayout) -> bool {
+        // `ReleaseLayout: PartialEq` covers exactly what the old hand-rolled
+        // comparison checked (total_files gates entry-count equality, and
+        // total_segments is derived from the entry part counts by
+        // construction) — so compare the whole layout directly.
         if let Some(stored) = &self.session_identity {
-            // Compare logical layout structure: total_files, total_segments, and part counts
-            let stored_layout = stored.layout();
-            let matches = stored_layout.total_files() == current_layout.total_files()
-                && stored_layout.total_segments() == current_layout.total_segments()
-                && stored_layout
-                    .entries()
-                    .iter()
-                    .zip(current_layout.entries())
-                    .all(|(a, b)| {
-                        a.release_ordinal == b.release_ordinal
-                            && a.part_count == b.part_count
-                            && a.prefix_parts == b.prefix_parts
-                    });
-            if !matches {
+            if stored.layout != *current_layout {
                 self.invalidate_session();
                 return false;
             }
@@ -891,7 +870,7 @@ mod tests {
 
         let salt = [0x5au8; 16];
         let layout = ReleaseLayout::from_parts(2, &[(1, 2), (2, 3)]).unwrap();
-        state.set_session_identity(UploadSessionIdentity::new(Some(salt), layout.clone()));
+        state.set_session_identity(UploadSessionIdentity::new(salt, layout.clone()));
 
         state.record_with(
             "file1.bin",
@@ -916,7 +895,7 @@ mod tests {
         // Load back
         let loaded = ResumeState::load(&path).unwrap();
         assert_eq!(loaded.session_salt(), Some(&salt));
-        assert_eq!(loaded.session_layout(), Some(&layout));
+        assert_eq!(loaded.session_identity().map(|s| &s.layout), Some(&layout));
 
         let rec = loaded.get("file1.bin", 1).unwrap();
         assert_eq!(rec.message_id, "msg1@example.com");
@@ -936,7 +915,6 @@ mod tests {
         let loaded: ResumeState = serde_json::from_str(json).unwrap();
         assert!(loaded.session_identity().is_none());
         assert!(loaded.session_salt().is_none());
-        assert!(loaded.session_layout().is_none());
         let rec = loaded.get("a.bin", 1).unwrap();
         assert_eq!(rec.message_id, "id1@x");
     }
@@ -951,7 +929,7 @@ mod tests {
 
         let make_state = || {
             let mut s = ResumeState::default();
-            s.set_session_identity(UploadSessionIdentity::new(Some(salt), base_layout.clone()));
+            s.set_session_identity(UploadSessionIdentity::new(salt, base_layout.clone()));
             s.set_archive_stem("arch_stem".into());
             s.set_release_identity("rel_prefix".into(), "rel_from".into());
             s.record_file(
@@ -1010,7 +988,7 @@ mod tests {
         let salt = [0x77u8; 16];
 
         let mut s = ResumeState::default();
-        s.set_session_identity(UploadSessionIdentity::new(Some(salt), base_layout.clone()));
+        s.set_session_identity(UploadSessionIdentity::new(salt, base_layout.clone()));
         s.record_with(
             "a.bin",
             1,

@@ -267,10 +267,7 @@ async fn par2_geometry_or_data_change_invalidates_session_salt_and_spool() {
     prior.validate_run(&RunFingerprint::from_config(&config));
     let salt = [0x5Au8; 16];
     let old_layout = pesto::poster::ReleaseLayout::from_parts(2, &[(1, 2), (2, 1)]).unwrap();
-    prior.set_session_identity(pesto::resume::UploadSessionIdentity::new(
-        Some(salt),
-        old_layout,
-    ));
+    prior.set_session_identity(pesto::resume::UploadSessionIdentity::new(salt, old_layout));
     prior.record_file(
         "data.bin",
         FileFingerprint {
@@ -336,10 +333,7 @@ async fn added_file_invalidates_entire_session_and_reposts_all_with_fresh_indice
     prior.validate_run(&RunFingerprint::from_config(&config));
     let salt = [0x99u8; 16];
     let old_layout = pesto::poster::ReleaseLayout::from_parts(1, &[(1, 2)]).unwrap();
-    prior.set_session_identity(pesto::resume::UploadSessionIdentity::new(
-        Some(salt),
-        old_layout,
-    ));
+    prior.set_session_identity(pesto::resume::UploadSessionIdentity::new(salt, old_layout));
     prior.record_file(
         "f1.bin",
         FileFingerprint {
@@ -431,7 +425,7 @@ async fn file_mtime_change_with_identical_layout_clears_spool_and_invalidates_se
     let matching_layout = pesto::poster::ReleaseLayout::from_parts(1, &[(1, 2)]).unwrap();
     let salt = [0x77u8; 16];
     prior.set_session_identity(pesto::resume::UploadSessionIdentity::new(
-        Some(salt),
+        salt,
         matching_layout.clone(),
     ));
     prior.record_file(

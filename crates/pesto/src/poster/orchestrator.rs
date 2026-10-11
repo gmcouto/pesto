@@ -94,7 +94,6 @@ async fn run(options: RunOptions<'_>) -> Result<PostOutcome> {
         resume_arc.clone(),
         release_prefix.clone(),
         release_from.clone(),
-        spool_dir_owned.as_deref(),
     )
     .await?;
 

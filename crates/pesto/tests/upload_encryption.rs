@@ -811,7 +811,7 @@ async fn test_persistence_lifecycle_invariants() {
         pesto::resume::ResumeState::load(&resume_path).expect("resume state must be written");
     assert!(state.session_identity().is_some());
     let session_ident = state.session_identity().unwrap();
-    let saved_salt = session_ident.salt().expect("salt must be set");
+    let saved_salt = session_ident.salt;
 
     // 2. Resume run to finish upload
     let outcome = post_files_with_progress(&config, &files, None, Some(&resume_path), None)
@@ -875,7 +875,7 @@ async fn test_persistence_lifecycle_invariants() {
     for article in articles.iter() {
         let body = article_body(article);
         let (art_salt, art_index) = pesto::crypto::extract_bootstrap_from_line1(body).unwrap();
-        assert_eq!(&art_salt, saved_salt);
+        assert_eq!(art_salt, saved_salt);
         assert!(art_index > 0);
     }
 }

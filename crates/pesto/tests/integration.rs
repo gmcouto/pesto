@@ -883,7 +883,7 @@ async fn spool_replay_preserves_identity_and_invalidation_clears_spool() {
     let layout = pesto::poster::ReleaseLayout::from_parts(1, &[(1, 1)]).unwrap();
     let salt = [0x77u8; 16];
     resume_state.set_session_identity(pesto::resume::UploadSessionIdentity::new(
-        Some(salt),
+        salt,
         layout.clone(),
     ));
     resume_state.save(&state_path).unwrap();
@@ -954,7 +954,7 @@ async fn spool_replay_preserves_identity_and_invalidation_clears_spool() {
 
     let mut state2 = pesto::resume::ResumeState::default();
     state2.set_session_identity(pesto::resume::UploadSessionIdentity::new(
-        Some(salt),
+        salt,
         layout.clone(),
     ));
     state2.save(&resume_state_path2).unwrap();
