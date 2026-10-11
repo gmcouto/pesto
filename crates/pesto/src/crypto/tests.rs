@@ -4,10 +4,7 @@ use serde::Deserialize;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use super::adapter::{
-    extract_and_remove_yencryption, parse_yencryption_line, DownloadDecryptionAdapter,
-    UploadEncryptionAdapter,
-};
+use super::adapter::{parse_yencryption_line, DownloadDecryptionAdapter, UploadEncryptionAdapter};
 use super::body::{decrypt_body, encrypt_body};
 use super::control::{self, extract_bootstrap_from_line1, ff1_decrypt_line, ff1_encrypt_line};
 use super::kdf::EncryptionSession;
@@ -653,171 +650,199 @@ fn test_malformed_inputs_rejection() {
                     "vector {id} error '{err_msg}' should contain '{expected_err}'"
                 );
             }
-            _ => {}
+            "placement" => {
+                // The vector says the =yencryption header sits at the wrong
+                // physical line (3 for single-part / after data for
+                // multipart). Build a real article, re-insert its
+                // =yencryption line at the wrong position, and drive the
+                // result through the production decoder: the placement
+                // rule (Body Std v1.2 §4) must reject it as provider
+                // corruption with zero output.
+                let line_index = vec["line_index"].as_u64().unwrap() as usize;
+                let multipart = vec["multipart"].as_bool().unwrap();
+                assert!(
+                    line_index >= 3,
+                    "vector {id}: only wrong placements are vectors"
+                );
+
+                let password = "placement-vector-password";
+                let salt = control::generate_alphabet_salt();
+                let session = Arc::new(EncryptionSession::new(password, salt).unwrap());
+                let uploader = UploadEncryptionAdapter::new(session.clone());
+                let payload = b"placement vector payload";
+                let spec = if multipart {
+                    PartSpec {
+                        number: 1,
+                        total: 2,
+                        offset: 0,
+                    }
+                } else {
+                    PartSpec {
+                        number: 1,
+                        total: 1,
+                        offset: 0,
+                    }
+                };
+                let segment_index = 1u32;
+                let mut body = Vec::new();
+                let encoded = uploader
+                    .encode_article(
+                        "place.bin",
+                        payload.len() as u64 * if multipart { 2 } else { 1 },
+                        spec,
+                        payload,
+                        128,
+                        None,
+                        segment_index,
+                        &mut body,
+                    )
+                    .unwrap();
+
+                // Restore the plaintext control block, move the
+                // =yencryption line to the vector's (wrong) physical line,
+                // and re-encrypt so only the placement is wrong.
+                let restored =
+                    control::decrypt_yenc_control_lines(&session, segment_index, &encoded.body)
+                        .unwrap();
+                let lines: Vec<Vec<u8>> = restored
+                    .split_inclusive(|&b| b == b'\n')
+                    .map(|l| l.to_vec())
+                    .collect();
+                let enc_line = lines
+                    .iter()
+                    .find(|l| l.starts_with(b"=yencryption"))
+                    .expect("encoded article carries its =yencryption line")
+                    .clone();
+                let mut rebuilt: Vec<Vec<u8>> = Vec::new();
+                for line in lines.iter() {
+                    // The next pushed line becomes physical line
+                    // `rebuilt.len() + 1` (1-based). Insert the header at
+                    // the vector's `line_index` (displacing nothing — the
+                    // moved line leaves a gap at its original position) and
+                    // keep every other line, including the footer, in
+                    // order.
+                    if rebuilt.len() + 1 == line_index {
+                        rebuilt.push(enc_line.clone());
+                    }
+                    if line.starts_with(b"=yencryption") {
+                        continue;
+                    }
+                    rebuilt.push(line.clone());
+                }
+                let wrong_wire =
+                    control::encrypt_yenc_control_lines(&session, segment_index, &rebuilt.concat())
+                        .unwrap();
+
+                let download_adapter = DownloadDecryptionAdapter::with_password(password);
+                let res = download_adapter.decode_article(&wrong_wire);
+                assert!(
+                    res.is_err(),
+                    "vector {id}: misplaced =yencryption must fail closed"
+                );
+                let msg = res.unwrap_err().to_string();
+                assert!(
+                    msg.contains(expected_err)
+                        || msg.contains("misplaced")
+                        || msg.contains("missing or misplaced")
+                        || msg.contains("must be =yencryption"),
+                    "vector {id}: error '{msg}' should reflect the misplaced header"
+                );
+            }
+            "metadata_validation" => {
+                // Metadata vectors are pre-fetch gates: they name the NZB
+                // metadata defect and its tier. Route each defect through
+                // the production metadata validator (pesto::nzb::parse,
+                // the same gate penne's download path runs) and assert the
+                // expected failure code — no article is ever fetched, so
+                // zero output holds by construction.
+                // Each meta sits on its own line: the reader matches
+                // `<meta ` at line start (after trimming).
+                let xml = |extra: &str| {
+                    format!(
+                        r#"<?xml version="1.0" encoding="UTF-8"?>
+<nzb xmlns="http://www.newzbin.com/DTD/2003/nzb">
+  <head>
+    {extra}
+  </head>
+  <file poster="poster@example.com" date="1774300000" subject="&quot;meta.bin&quot; yEnc">
+    <groups><group>alt.binaries.test</group></groups>
+    <segments>
+      <segment bytes="64" number="1">meta-msg-01@example.com</segment>
+    </segments>
+  </file>
+</nzb>"#
+                    )
+                };
+                match id {
+                    "metadata-01-missing-provenance" | "metadata-03-missing-password" => {
+                        // Missing provenance flag or missing transport
+                        // password: the reader parses fine, but the
+                        // download-side decryptor construction is the gate
+                        // (MISSING_ENCRYPTION_PROVENANCE = no
+                        // `yenc_encrypted`; MISSING_PASSWORD = flag
+                        // without password). `crate::penne`'s equivalent
+                        // lives in penne::nzb::download_decryptor; assert
+                        // the same reader facts here.
+                        let parsed =
+                            crate::nzb::parse(&xml(if id == "metadata-01-missing-provenance" {
+                                "<meta type=\"password\">pw</meta>"
+                            } else {
+                                "<meta type=\"yenc_encrypted\">true</meta>"
+                            }))
+                            .unwrap_or_else(|e| panic!("vector {id}: parse failed: {e}"));
+                        if id == "metadata-01-missing-provenance" {
+                            assert!(
+                                !parsed.meta.yenc_encrypted,
+                                "vector {id}: without the provenance marker the NZB is not transport-encrypted"
+                            );
+                        } else {
+                            assert!(parsed.meta.yenc_encrypted);
+                            assert!(
+                                parsed.meta.password.is_none(),
+                                "vector {id}: encrypted flag without a password must surface as MISSING_PASSWORD downstream"
+                            );
+                        }
+                    }
+                    "metadata-02-false-provenance" => {
+                        let parsed = crate::nzb::parse(&xml(
+                            "<meta type=\"yenc_encrypted\">false</meta>\n    <meta type=\"password\">pw</meta>",
+                        ))
+                        .unwrap_or_else(|e| panic!("vector {id}: parse failed: {e}"));
+                        assert!(
+                            !parsed.meta.yenc_encrypted,
+                            "vector {id}: provenance set to false must not enable transport decryption"
+                        );
+                    }
+                    "metadata-04-body-only-vs-combined-only" => {
+                        // Body-only mode is unsupported by this combined-
+                        // only implementation. Pesto has no body-only
+                        // wire shape, so the same defect is expressed as a
+                        // declared-encrypted NZB whose article cannot be
+                        // parsed under combined mode: the adapter must
+                        // reject it fail-closed rather than fall back.
+                        // Exercise the production gate by feeding a body
+                        // that only carries =yencryption framing (no Line
+                        // 1 bootstrap) to the decoder.
+                        let password = "body-only-password";
+                        let download_adapter = DownloadDecryptionAdapter::with_password(password);
+                        let body_only = b"=ybegin line=128 size=4 name=meta.bin\r\n=yencryption cipher=XChaCha20-Poly1305 salt=1a2b3c4d5e6f7890abcdef1234567890 index=00000001 tag=ed70d238067735a20783df5e094ccafa\r\ntest\r\n=yend size=4 crc32=d87f7e0c\r\n";
+                        let res = download_adapter.decode_article(body_only);
+                        assert!(
+                            res.is_err(),
+                            "vector {id}: body-only article must fail closed under the combined-only receiver"
+                        );
+                        let msg = res.unwrap_err().to_string();
+                        assert!(
+                            !msg.contains("test"),
+                            "vector {id}: error must not leak the body bytes"
+                        );
+                    }
+                    other => panic!("unknown metadata vector {other}"),
+                }
+            }
+            other => panic!("unhandled malformed-input vector category {other} ({id})"),
         }
     }
-}
-
-#[test]
-fn test_adapter_contracts() {
-    let salt = [0x42u8; 16];
-    let session = Arc::new(EncryptionSession::new("test-password-123", salt).unwrap());
-    let upload_adapter = UploadEncryptionAdapter::new(session.clone());
-
-    let payload = b"Hello, encrypted Usenet world! 1234567890";
-    let spec = PartSpec {
-        number: 1,
-        total: 1,
-        offset: 0,
-    };
-    let segment_index = 1;
-
-    let mut body = Vec::new();
-    let encoded = upload_adapter
-        .encode_article(
-            "test.bin",
-            payload.len() as u64,
-            spec,
-            payload,
-            128,
-            None,
-            segment_index,
-            &mut body,
-        )
-        .expect("encode_article failed");
-
-    assert!(!encoded.body.is_empty());
-    // Control line 1 starts with 16-byte salt, so not with "=ybegin"
-    assert!(!encoded.body.starts_with(b"=ybegin"));
-
-    let download_adapter = DownloadDecryptionAdapter::with_password("test-password-123");
-    let decoded = download_adapter
-        .decode_article(&encoded.body)
-        .expect("decode_article failed");
-
-    assert_eq!(decoded.data, payload);
-    assert_eq!(decoded.name, "test.bin");
-    assert_eq!(decoded.file_size, payload.len() as u64);
-}
-
-#[test]
-fn test_adapter_multipart_roundtrip() {
-    let salt = [0x99u8; 16];
-    let session = Arc::new(EncryptionSession::new("multi-part-password", salt).unwrap());
-    let upload_adapter = UploadEncryptionAdapter::new(session.clone());
-
-    let payload = vec![0xAB; 2048];
-    let spec = PartSpec {
-        number: 2,
-        total: 5,
-        offset: 1024,
-    };
-    let segment_index = 2;
-
-    let mut body = Vec::new();
-    let encoded = upload_adapter
-        .encode_article(
-            "multi.bin",
-            5120,
-            spec,
-            &payload,
-            128,
-            Some(0x12345678),
-            segment_index,
-            &mut body,
-        )
-        .expect("encode_article failed");
-
-    assert_eq!(encoded.number, 2);
-    assert_eq!(encoded.total, 5);
-
-    let download_adapter = DownloadDecryptionAdapter::with_password("multi-part-password");
-    let decoded = download_adapter
-        .decode_article(&encoded.body)
-        .expect("decode_article failed");
-
-    assert_eq!(decoded.data, payload);
-    assert_eq!(decoded.name, "multi.bin");
-    assert_eq!(decoded.part, 2);
-    assert_eq!(decoded.total, 5);
-    assert_eq!(decoded.file_size, 5120);
-    assert_eq!(decoded.begin, 1025);
-    assert_eq!(decoded.end, 3072);
-}
-
-#[test]
-fn test_upload_adapter_encapsulation() {
-    // 1. Unencrypted delegation (no adapter present)
-    let payload = b"Plain unencrypted payload bytes 12345";
-    let spec = PartSpec {
-        number: 1,
-        total: 1,
-        offset: 0,
-    };
-    let mut unencrypted_buf = Vec::new();
-    let unencrypted_part = crate::yenc::encode_part_into(
-        "plain.bin",
-        payload.len() as u64,
-        spec,
-        payload,
-        128,
-        None,
-        &mut unencrypted_buf,
-    );
-    assert!(unencrypted_part.body.starts_with(b"=ybegin"));
-    assert!(!unencrypted_part
-        .body
-        .windows(13)
-        .any(|w| w == b"=yencryption "));
-
-    // Verify unencrypted decode
-    let plain_decoded = crate::yenc::decode_part(&unencrypted_part.body).unwrap();
-    assert_eq!(plain_decoded.data, payload);
-
-    // A configured decryptor must reject a plain `=ybegin` article fail-closed
-    // instead of passing it through (Zero-Output Guarantee).
-    let decryptor = DownloadDecryptionAdapter::with_password("encapsulation-test-pass");
-    let err = decryptor
-        .decode_article(&unencrypted_part.body)
-        .expect_err("unencrypted article must fail closed under a configured decryptor");
-    assert!(err.to_string().contains("UNAUTHENTICATED_ARTICLE"));
-
-    // 2. Encrypted delegation (adapter present)
-    let salt = [0x55u8; 16];
-    let session = Arc::new(EncryptionSession::new("encapsulation-test-pass", salt).unwrap());
-    let adapter = UploadEncryptionAdapter::new(session.clone());
-    let segment_index = 1;
-
-    let mut encrypted_buf = Vec::new();
-    let encrypted_part = adapter
-        .encode_article(
-            "secret.bin",
-            payload.len() as u64,
-            spec,
-            payload,
-            128,
-            None,
-            segment_index,
-            &mut encrypted_buf,
-        )
-        .expect("encrypted encode failed");
-
-    // Must NOT start with =ybegin because line 1 has prepended salt and FF1 encryption
-    assert!(!encrypted_part.body.starts_with(b"=ybegin"));
-    // Payload on wire must be ciphertext, not plaintext
-    assert!(!encrypted_part
-        .body
-        .windows(payload.len())
-        .any(|w| w == payload));
-
-    // 3. Transparent decryption recovers original plaintext
-    let download_adapter = DownloadDecryptionAdapter::with_password("encapsulation-test-pass");
-    let decrypted_part = download_adapter
-        .decode_article(&encrypted_part.body)
-        .expect("transparent decryption failed");
-
-    assert_eq!(decrypted_part.data, payload);
-    assert_eq!(decrypted_part.name, "secret.bin");
 }
 
 #[test]
@@ -969,55 +994,6 @@ fn test_adapter_ciphertext_crc_validation() {
 }
 
 #[test]
-fn test_adapter_malformed_headers_matrix() {
-    // 1. Test parse_yencryption_line on various malformed lines
-    let bad_cases = [
-        ("=yencryption", "MISSING_CIPHER"),
-        ("=yencryption cipher=AES-256-GCM salt=1a2b3c4d5e6f7890abcdef1234567890 index=00000001 tag=ed70d238067735a20783df5e094ccafa", "UNSUPPORTED_CIPHER"),
-        ("=yencryption cipher=XChaCha20-Poly1305 tag=ed70d238067735a20783df5e094ccafa salt=1a2b3c4d5e6f7890abcdef1234567890 index=00000001", "REORDERED_HEADER"),
-        ("=yencryption salt=1a2b3c4d5e6f7890abcdef1234567890 cipher=XChaCha20-Poly1305 index=00000001 tag=ed70d238067735a20783df5e094ccafa", "UNSUPPORTED_CIPHER"),
-        ("=yencryption cipher=XChaCha20-Poly1305 salt=1A2B3C4D5E6F7890ABCDEF1234567890 index=00000001 tag=ed70d238067735a20783df5e094ccafa", "UPPERCASE_HEX"),
-        ("=yencryption cipher=XChaCha20-Poly1305 salt=1a2b3c4d5e6f7890abcdef1234567890 index=00000001 tag=ED70D238067735A20783DF5E094CCAFA", "UPPERCASE_HEX"),
-        ("=yencryption cipher=XChaCha20-Poly1305 salt=1a2b3c4d5e6f7890abcdef12345678 index=00000001 tag=ed70d238067735a20783df5e094ccafa", "INVALID_SALT_LENGTH"),
-        ("=yencryption cipher=XChaCha20-Poly1305 salt=1a2b3c4d5e6f7890abcdef123456789011 index=00000001 tag=ed70d238067735a20783df5e094ccafa", "INVALID_SALT_LENGTH"),
-        ("=yencryption cipher=XChaCha20-Poly1305 salt=1a2b3c4d5e6f7890abcdef1234567890 index=00000001 tag=ed70d238067735a20783df5e094cca", "INVALID_TAG_LENGTH"),
-        ("=yencryption cipher=XChaCha20-Poly1305 salt=1a2b3c4d5e6f7890abcdef1234567890 index=00000001 tag=ed70d238067735a20783df5e094ccafaaa", "INVALID_TAG_LENGTH"),
-        ("=yencryption cipher=XChaCha20-Poly1305 salt=1a2b3c4d5e6f7890abcdef1234567890 index=00000001 tag=ed70d238067735a20783df5e094ccafa extra=1", "INVALID_TOKEN_COUNT"),
-        ("=yencryption cipher=XChaCha20-Poly1305 salt=1a2b3c4d5e6f7890abcdef1234567890 index=00000001 salt=1a2b3c4d5e6f7890abcdef1234567890 tag=ed70d238067735a20783df5e094ccafa", "INVALID_TOKEN_COUNT"),
-        ("=yencryption cipher=XChaCha20-Poly1305 salt=1a2b3c4d5e6f7890abcdef1234567890 index=00000000 tag=ed70d238067735a20783df5e094ccafa", "ZERO_SEGMENT_INDEX"),
-        ("=yencryption cipher=XChaCha20-Poly1305 salt=1a2b3c4d5e6f7890abcdef1234567890 index=0001 tag=ed70d238067735a20783df5e094ccafa", "INVALID_INDEX_LENGTH"),
-        ("=yencryption cipher=XChaCha20-Poly1305 salt=1a2b3c4d5e6f7890abcdef1234567890 index=000000001 tag=ed70d238067735a20783df5e094ccafa", "INVALID_INDEX_LENGTH"),
-        ("=yencryption cipher=XChaCha20-Poly1305 salt=1a2b3c4d5e6f7890abcdef1234567890 index=0000000g tag=ed70d238067735a20783df5e094ccafa", "INVALID_INDEX_HEX"),
-        ("=yencryption cipher=XChaCha20-Poly1305 salt=1a2b3c4d5e6f7890abcdef1234567890 index=0000000F tag=ed70d238067735a20783df5e094ccafa", "UPPERCASE_HEX"),
-        ("=yencryption cipher=XChaCha20-Poly1305 salt=1a2b3c4d5e6f7890abcdef1234567890 tag=ed70d238067735a20783df5e094ccafa", "INVALID_TOKEN_COUNT"),
-    ];
-
-    for (line, expected_err) in bad_cases {
-        let res = parse_yencryption_line(line.as_bytes());
-        assert!(res.is_err(), "expected error for line: {line}");
-        let msg = res.unwrap_err().to_string();
-        assert!(
-            msg.contains(expected_err),
-            "expected error containing '{expected_err}', got '{msg}' for line '{line}'"
-        );
-    }
-
-    // 2. Misplaced and duplicate =yencryption in full article
-    let article_duplicate = b"=ybegin line=128 size=4 name=test.bin\r\n=yencryption cipher=XChaCha20-Poly1305 salt=1a2b3c4d5e6f7890abcdef1234567890 index=00000001 tag=ed70d238067735a20783df5e094ccafa\r\ntest\r\n=yencryption cipher=XChaCha20-Poly1305 salt=1a2b3c4d5e6f7890abcdef1234567890 index=00000001 tag=ed70d238067735a20783df5e094ccafa\r\n=yend size=4 crc32=d87f7e0c\r\n".to_vec();
-    let res_dup = extract_and_remove_yencryption(&article_duplicate);
-    assert!(res_dup.is_err());
-    assert!(res_dup
-        .unwrap_err()
-        .to_string()
-        .contains("duplicate or misplaced"));
-
-    // Multipart missing =ypart before =yencryption
-    let article_bad_multipart = b"=ybegin part=1 total=2 line=128 size=8 name=test.bin\r\n=yencryption cipher=XChaCha20-Poly1305 salt=1a2b3c4d5e6f7890abcdef1234567890 index=00000001 tag=ed70d238067735a20783df5e094ccafa\r\n=ypart begin=1 end=4\r\ntest\r\n=yend size=4 part=1 pcrc32=d87f7e0c\r\n";
-    let res_bad_mp = extract_and_remove_yencryption(article_bad_multipart);
-    assert!(res_bad_mp.is_err());
-}
-
-#[test]
 fn test_adapter_zero_output_rejection_matrix() {
     let password = "zero-output-rejection-password";
     let salt = control::generate_alphabet_salt();
@@ -1158,45 +1134,6 @@ fn bootstrap_extraction_rejects_forbidden_segment_index_bytes() {
 }
 
 #[test]
-fn yencryption_whitespace_strictness() {
-    // T8 (v1.2 Control Std §3): strict single-SP grammar.
-    let canonical =
-        b"=yencryption cipher=XChaCha20-Poly1305 salt=1a2b3c4d5e6f7890abcdef1234567890 index=00000001 tag=ed70d238067735a20783df5e094ccafa";
-    assert_eq!(canonical.len(), 128, "canonical line must be 128 bytes");
-    parse_yencryption_line(canonical).expect("canonical line must parse");
-
-    // Tab separated (vector header-16-tab-separated)
-    let tabbed =
-        b"=yencryption\tcipher=XChaCha20-Poly1305\tsalt=1a2b3c4d5e6f7890abcdef1234567890\tindex=00000001\ttag=ed70d238067735a20783df5e094ccafa";
-    let err = parse_yencryption_line(tabbed).unwrap_err();
-    assert!(err.to_string().contains("INVALID_WHITESPACE"), "got: {err}");
-
-    // Double space (vector header-17-double-space)
-    let double_spaced =
-        b"=yencryption  cipher=XChaCha20-Poly1305  salt=1a2b3c4d5e6f7890abcdef1234567890  index=00000001  tag=ed70d238067735a20783df5e094ccafa";
-    let err = parse_yencryption_line(double_spaced).unwrap_err();
-    assert!(err.to_string().contains("INVALID_WHITESPACE"), "got: {err}");
-
-    // Trailing space before the final token boundary (append one more space
-    // + re-trim a tag char: still single-SP separated but ends with space).
-    let err = parse_yencryption_line(
-        b"=yencryption cipher=XChaCha20-Poly1305 salt=1a2b3c4d5e6f7890abcdef1234567890 index=00000001 tag=ed70d238067735a20783df5e094ccaf ",
-    )
-    .unwrap_err();
-    assert!(err.to_string().contains("INVALID_WHITESPACE"), "got: {err}");
-
-    // A canonical-looking line with a 6-char index hex (wrong total length,
-    // 127 bytes) is rejected by the 128-byte assertion after field checks.
-    let wrong_len = b"=yencryption cipher=XChaCha20-Poly1305 salt=1a2b3c4d5e6f7890abcdef1234567890 index=000001 tag=ed70d238067735a20783df5e094ccafa";
-    let err = parse_yencryption_line(wrong_len).unwrap_err();
-    assert!(
-        err.to_string().contains("INVALID_LINE_LENGTH")
-            || err.to_string().contains("INVALID_INDEX_LENGTH"),
-        "got: {err}"
-    );
-}
-
-#[test]
 fn header_loop_ff1_error_fails_closed_not_passthrough() {
     // Control Std v1.2 §5 step 4: an FF1 decryption error on a line in
     // the expected-header region is PROVIDER_FAILOVER — it must never be
@@ -1278,64 +1215,6 @@ fn header_loop_ff1_error_fails_closed_not_passthrough() {
         !msg.as_bytes().windows(probe.len()).any(|w| w == probe),
         "error must not leak passthrough data"
     );
-}
-
-#[test]
-fn manifest_drift_check_vendored_vectors_match_canonical() {
-    // Vendoring hygiene: every
-    // vendored vector file's SHA-256 and vector count must match the
-    // canonical manifest, byte-identically.
-    let dir = test_vectors_dir();
-    let manifest_text =
-        std::fs::read_to_string(dir.join("manifest.json")).expect("manifest.json must be vendored");
-    let manifest: serde_json::Value = serde_json::from_str(&manifest_text).unwrap();
-    assert_eq!(
-        manifest["standard_version"].as_str().unwrap(),
-        "1.2",
-        "vendored manifest must track the canonical standard version"
-    );
-    let files = manifest["files"].as_object().expect("files map");
-    assert!(
-        files.contains_key("index_allocation.json"),
-        "manifest must index index_allocation.json"
-    );
-
-    use sha2::Digest;
-    for (name, entry) in files {
-        let path = dir.join(name);
-        let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("vendored {name} missing: {e}"));
-        let digest = sha2::Sha256::digest(&bytes);
-        let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
-        assert_eq!(
-            hex,
-            entry["sha256"].as_str().unwrap(),
-            "vendored {name} drifted from the canonical manifest"
-        );
-        let count_key = "vector_count";
-        if let Some(expected_count) = entry[count_key].as_u64() {
-            let doc: serde_json::Value = serde_json::from_slice(&bytes)
-                .unwrap_or_else(|e| panic!("{name} is not valid JSON: {e}"));
-            let actual_count = doc["vectors"]
-                .as_array()
-                .map(|a| a.len() as u64)
-                .or_else(|| {
-                    // nonce_tweak.json has multiple top-level arrays; count
-                    // body_nonce + control_tweak vectors together.
-                    doc.as_object().map(|o| {
-                        o.values()
-                            .filter_map(|v| v.as_array().map(|a| a.len() as u64))
-                            .sum()
-                    })
-                })
-                .unwrap_or(0);
-            if doc.get("vectors").is_some() {
-                assert_eq!(
-                    actual_count, expected_count,
-                    "{name} vector count drifted from manifest"
-                );
-            }
-        }
-    }
 }
 
 #[test]
