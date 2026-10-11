@@ -182,10 +182,7 @@ async fn encrypted_upload_round_trips_captured_articles() {
         let body = article_body(article);
         assert!(!body.starts_with(b"=ybegin"));
         assert_eq!(
-            pesto::crypto::extract_bootstrap_from_line1(body)
-                .unwrap()
-                .0
-                .len(),
+            pesto::crypto::extract_bootstrap_from_line1(body).unwrap().0.len(),
             16
         );
         let decoded = decryptor.decode_article(body).unwrap();
