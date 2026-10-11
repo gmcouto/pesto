@@ -7,7 +7,6 @@ use std::sync::Arc;
 use super::body;
 use super::control;
 use super::kdf::EncryptionSession;
-use super::{attach_crypto_error_kind, CryptoErrorKind};
 use crate::yenc::{self, DecodedPart, EncodedPart, PartSpec};
 
 /// Thin adapter presenting standard yEnc encode contract for encrypted articles.
@@ -221,24 +220,6 @@ pub fn parse_yencryption_line(line: &[u8]) -> Result<YEncryptionParams> {
     if segment_index == 0 {
         bail!("ZERO_SEGMENT_INDEX: segment index cannot be zero");
     }
-    // Index framing rule (Body Std v1.2 §5/§8): an index whose big-endian
-    // encoding contains 0x0A (LF) or 0x0D (CR) would have split a control
-    // line on the wire — reject it here too so the gap cannot resurface if
-    // body-only mode is ever added (combined mode already rejects it at the
-    // Line-1 bootstrap, `extract_bootstrap_from_line1`).
-    if segment_index
-        .to_be_bytes()
-        .iter()
-        .any(|&b| b == 0x0A || b == 0x0D)
-    {
-        return Err(attach_crypto_error_kind(
-            anyhow::anyhow!(
-                "FORBIDDEN_SEGMENT_INDEX_BYTE: segment index bytes contain 0x0A or 0x0D"
-            ),
-            CryptoErrorKind::ProviderFailover,
-        ));
-    }
-
     // Token 4 must be tag=
     if !tokens[4].starts_with("tag=") {
         if tokens.iter().skip(1).any(|t| t.starts_with("tag=")) {
@@ -440,23 +421,20 @@ impl DownloadDecryptionAdapter {
         let (yenc_params, clean_yenc) = extract_and_remove_yencryption(&restored_yenc)?;
 
         // Dual-Bootstrap Agreement
+        // Dual-Bootstrap Agreement (Body Std v1.2 §6): the salt and
+        // segmentIndex extracted from control Line 1 must match the
+        // `=yencryption` header tokens.
         if yenc_params.salt != session.salt() {
-            bail!(attach_crypto_error_kind(
-                anyhow::anyhow!(
-                    "DUAL_SALT_MISMATCH: salt mismatch between control line 1 and =yencryption header"
-                ),
-                CryptoErrorKind::ProviderFailover,
-            ));
+            bail!(
+                "DUAL_SALT_MISMATCH: salt mismatch between control line 1 and =yencryption header"
+            );
         }
         if yenc_params.segment_index != segment_index {
-            bail!(attach_crypto_error_kind(
-                anyhow::anyhow!(
-                    "DUAL_INDEX_MISMATCH: segmentIndex mismatch between control line 1 ({}) and =yencryption header ({})",
-                    segment_index,
-                    yenc_params.segment_index
-                ),
-                CryptoErrorKind::ProviderFailover,
-            ));
+            bail!(
+                "DUAL_INDEX_MISMATCH: segmentIndex mismatch between control line 1 ({}) and =yencryption header ({})",
+                segment_index,
+                yenc_params.segment_index
+            );
         }
 
         // Decode yEnc ciphertext
@@ -464,10 +442,7 @@ impl DownloadDecryptionAdapter {
 
         // Ciphertext CRC check before AEAD decryption
         if !decoded.crc_matches() {
-            bail!(attach_crypto_error_kind(
-                anyhow::anyhow!("ciphertext CRC mismatch"),
-                CryptoErrorKind::ProviderFailover,
-            ));
+            bail!("ciphertext CRC mismatch");
         }
 
         // Authenticate and decrypt body ciphertext with Zero-Output Guarantee.
@@ -479,12 +454,7 @@ impl DownloadDecryptionAdapter {
             session.master_key(),
             &nonce,
         )
-        .map_err(|e| {
-            attach_crypto_error_kind(
-                anyhow::anyhow!("AUTHENTICATION_FAILURE: {e}"),
-                CryptoErrorKind::ProviderFailover,
-            )
-        })?;
+        .map_err(|e| anyhow::anyhow!("AUTHENTICATION_FAILURE: {e}"))?;
 
         // Zero-output guarantee: replace data with authenticated plaintext.
         // CRC normalization — recompute over the authenticated plaintext (Body
@@ -519,12 +489,8 @@ impl DownloadDecryptionAdapter {
     ) -> Result<Vec<u8>> {
         let session = self.get_or_create_session(salt)?;
         let nonce = session.derive_body_nonce(segment_index);
-        body::decrypt_body(ciphertext, tag, session.master_key(), &nonce).map_err(|e| {
-            attach_crypto_error_kind(
-                anyhow::anyhow!("AUTHENTICATION_FAILURE: {e}"),
-                CryptoErrorKind::ProviderFailover,
-            )
-        })
+        body::decrypt_body(ciphertext, tag, session.master_key(), &nonce)
+            .map_err(|e| anyhow::anyhow!("AUTHENTICATION_FAILURE: {e}"))
     }
 
     /// Whether this adapter holds any decryption credentials (an explicit password
@@ -546,12 +512,10 @@ impl DownloadDecryptionAdapter {
         // Same poisoned-tolerant policy as `has_decryption_credentials`
         // above — a poisoned mutex in the download hot path fails closed as a
         // mapped crypto error instead of panicking.
-        let mut guard = self.cached_sessions.lock().map_err(|_| {
-            attach_crypto_error_kind(
-                anyhow::anyhow!("session cache lock poisoned"),
-                CryptoErrorKind::MetadataValidation,
-            )
-        })?;
+        let mut guard = self
+            .cached_sessions
+            .lock()
+            .map_err(|_| anyhow::anyhow!("session cache lock poisoned"))?;
         if let Some(session) = guard.0.get(&salt) {
             return Ok(session.clone());
         }
@@ -568,10 +532,7 @@ impl DownloadDecryptionAdapter {
             return Ok(session);
         }
 
-        Err(attach_crypto_error_kind(
-            anyhow::anyhow!("no password or encryption session available to decrypt article"),
-            CryptoErrorKind::MetadataValidation,
-        ))
+        bail!("no password or encryption session available to decrypt article")
     }
 }
 

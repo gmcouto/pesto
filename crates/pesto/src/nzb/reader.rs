@@ -3,7 +3,8 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::crypto::{attach_crypto_error_kind, CryptoErrorKind};
+use anyhow::bail;
+
 use crate::poster::PostedSegment;
 
 use super::{NzbMeta, ParsedNzb, YENC_SPEC_VERSION};
@@ -154,23 +155,16 @@ pub fn parse(content: &str) -> anyhow::Result<ParsedNzb> {
         // Fail-closed gating (Body Encryption Standard v1.2 §8): a
         // declared-encrypted NZB with unsupported provenance metadata is a
         // STRUCTURAL failure — it would reproduce identically against every
-        // server — so it is typed `MetadataValidation` at the parse origin
-        // (the downloader aborts instead of rotating providers, and releases
-        // no plaintext).
+        // server — so the parse fails here (the downloader aborts instead of
+        // rotating providers, and releases no plaintext).
         if let Some(ref ver) = meta.yenc_version {
             if ver != YENC_SPEC_VERSION {
-                return Err(attach_crypto_error_kind(
-                    anyhow::anyhow!("unsupported yenc_version in nzb: {ver}"),
-                    CryptoErrorKind::MetadataValidation,
-                ));
+                bail!("unsupported yenc_version in nzb: {ver}");
             }
         }
         if let Some(ref cipher) = meta.yenc_cipher {
             if cipher != "XChaCha20-Poly1305" {
-                return Err(attach_crypto_error_kind(
-                    anyhow::anyhow!("unsupported yenc_cipher in nzb: {cipher}"),
-                    CryptoErrorKind::MetadataValidation,
-                ));
+                bail!("unsupported yenc_cipher in nzb: {cipher}");
             }
         }
         meta.yenc_encrypted = true;

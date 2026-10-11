@@ -16,7 +16,7 @@ use penne::config::ServerTier;
 use penne::nzb::{download_decryptor, load};
 use penne::queue::build;
 use pesto::crypto::kdf::EncryptionSession;
-use pesto::crypto::{crypto_error_kind_of, CryptoErrorKind, UploadEncryptionAdapter};
+use pesto::crypto::UploadEncryptionAdapter;
 use pesto::yenc::PartSpec;
 use tempfile::NamedTempFile;
 
@@ -98,12 +98,6 @@ async fn assert_gated_download_rejected(
     // The gate is the NZB reader itself: loading fails closed before any
     // queue, decryptor, or NNTP connection exists.
     let err = load(nzb_file.path()).expect_err("unsupported metadata must fail the metadata gate");
-    let kind = crypto_error_kind_of(&err).expect("gate failure must carry a typed kind");
-    assert_eq!(
-        CryptoErrorKind::MetadataValidation,
-        kind,
-        "unsupported metadata must be classified MetadataValidation, got: {err:#}"
-    );
     let rendered = format!("{err:#}");
     assert!(
         rendered.contains("unsupported yenc_version")

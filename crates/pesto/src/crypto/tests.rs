@@ -1157,41 +1157,6 @@ fn bootstrap_extraction_rejects_forbidden_segment_index_bytes() {
 }
 
 #[test]
-fn yencryption_line_rejects_forbidden_segment_index_bytes() {
-    // Index framing rule (Body Std v1.2 §5/§8): `parse_yencryption_line` must
-    // reject an `index=` whose big-endian encoding contains 0x0A/0x0D — same
-    // rule the Line-1 bootstrap enforces — with a PROVIDER_FAILOVER
-    // classification (retriable, matching `extract_bootstrap_from_line1`).
-    for idx in [10u32, 13, 266, 269] {
-        let line = format!(
-            "=yencryption cipher=XChaCha20-Poly1305 salt=1a2b3c4d5e6f7890abcdef1234567890 index={idx:08x} tag=ed70d238067735a20783df5e094ccafa"
-        );
-        assert_eq!(line.len(), 128, "test line for {idx} must be canonical");
-        let err = parse_yencryption_line(line.as_bytes()).unwrap_err();
-        assert!(
-            err.to_string().contains("FORBIDDEN_SEGMENT_INDEX_BYTE"),
-            "index {idx} must be rejected with FORBIDDEN_SEGMENT_INDEX_BYTE, got: {err}"
-        );
-        let kind = crate::crypto::crypto_error_kind_of(&err)
-            .expect("forbidden-byte rejection must carry a typed kind");
-        assert_eq!(
-            crate::crypto::CryptoErrorKind::ProviderFailover,
-            kind,
-            "index {idx} must be classified as retriable provider failover"
-        );
-    }
-    // Neighboring safe indices still parse.
-    for idx in [9u32, 11, 12, 14, 265, 267, 268, 270] {
-        let line = format!(
-            "=yencryption cipher=XChaCha20-Poly1305 salt=1a2b3c4d5e6f7890abcdef1234567890 index={idx:08x} tag=ed70d238067735a20783df5e094ccafa"
-        );
-        let params = parse_yencryption_line(line.as_bytes())
-            .unwrap_or_else(|e| panic!("index {idx} must parse, got: {e}"));
-        assert_eq!(params.segment_index, idx);
-    }
-}
-
-#[test]
 fn yencryption_whitespace_strictness() {
     // T8 (v1.2 Control Std §3): strict single-SP grammar.
     let canonical =
@@ -1281,14 +1246,10 @@ fn header_loop_ff1_error_fails_closed_not_passthrough() {
     case_a[1][pos] = 0x00;
     let err =
         control::decrypt_yenc_control_lines(&session, segment_index, &case_a.concat()).unwrap_err();
-    // The kind is recoverable from the chain (envelope at the root) even
-    // though the top-line Display shows the contextual message.
-    use crate::crypto::crypto_error_kind_of;
-    let kind = crypto_error_kind_of(&err).expect("FF1 error must carry a typed kind");
-    assert_eq!(
-        crate::crypto::CryptoErrorKind::ProviderFailover,
-        kind,
-        "out-of-Alphabet header byte must fail closed as PROVIDER_FAILOVER, got: {err:#}"
+    assert!(
+        err.to_string()
+            .contains("control-line decryption failed at line 2 in the header region"),
+        "out-of-Alphabet header byte must fail closed, got: {err:#}"
     );
 
     // Case B: a bit flip in the header ciphertext decrypts "successfully" to
