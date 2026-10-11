@@ -260,6 +260,7 @@ async fn par2_geometry_or_data_change_invalidates_session_salt_and_spool() {
 
     let mut config = test_config(addr.port());
     config.par2 = 50;
+    config.encrypt_password = Some("test-secret".to_string());
 
     // Simulate prior session identity with salt and PST3 spool entry
     let mut prior = ResumeState::default();
@@ -328,6 +329,7 @@ async fn added_file_invalidates_entire_session_and_reposts_all_with_fresh_indice
 
     let mut config = test_config(addr.port());
     config.par2 = 0; // Data only
+    config.encrypt_password = Some("test-secret".to_string());
 
     // Simulate prior session identity for a single file f1.bin only (layout: 1 file, 2 parts)
     let mut prior = ResumeState::default();
@@ -421,13 +423,15 @@ async fn file_mtime_change_with_identical_layout_clears_spool_and_invalidates_se
     let mut config = test_config(addr.port());
     config.par2 = 0; // disable par2 so only file identity is in play
     config.article_size = 500;
+    config.encrypt_password = Some("test-secret".to_string());
 
     // Prior session state with matching 1-file, 2-part layout but DIFFERENT mtime
     let mut prior = ResumeState::default();
     prior.validate_run(&RunFingerprint::from_config(&config));
     let matching_layout = pesto::poster::ReleaseLayout::from_parts(1, &[(1, 2)]).unwrap();
+    let salt = [0x77u8; 16];
     prior.set_session_identity(pesto::resume::UploadSessionIdentity::new(
-        None,
+        Some(salt),
         matching_layout.clone(),
     ));
     prior.record_file(

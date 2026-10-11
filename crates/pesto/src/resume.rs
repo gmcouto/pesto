@@ -301,7 +301,14 @@ impl ResumeState {
     pub fn validate_run(&mut self, current: &RunFingerprint) -> bool {
         if let Some(stored) = &self.fingerprint {
             if stored != current {
-                self.invalidate_session();
+                if self.session_identity.is_some() {
+                    self.session_invalidated = true;
+                }
+                self.segments.clear();
+                self.files.clear();
+                self.archive_stem = None;
+                self.release_prefix = None;
+                self.release_from = None;
                 self.fingerprint = Some(current.clone());
                 return false;
             }
@@ -332,7 +339,9 @@ impl ResumeState {
 
     /// Invalidate the entire upload session, clearing session identity (salt and
     /// layout), all segment records, all file fingerprints, archive stem, and shared
-    /// release identity.
+    /// release identity. Only used for encrypted uploads: an encrypted session
+    /// whose layout changed cannot reuse its salt/index space (nonce reuse risk),
+    /// so everything is dropped wholesale.
     pub fn invalidate_session(&mut self) {
         self.session_invalidated = true;
         self.session_identity = None;
