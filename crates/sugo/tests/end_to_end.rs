@@ -59,6 +59,7 @@ async fn a_staged_job_downloads_and_lands_in_history() {
         server_idx: 0,
         file_index: 0,
         total_files: 0,
+        segment_index: 0,
     }];
     let nzb_bytes = pesto::nzb::generate(
         &groups,
@@ -171,6 +172,7 @@ async fn encrypted_nzb_sugo_job_round_trip() {
         server_idx: 0,
         file_index: 1,
         total_files: 1,
+        segment_index: 0,
     }];
     let meta = NzbMeta {
         password: Some(password.to_string()),
@@ -217,7 +219,7 @@ async fn encrypted_nzb_sugo_job_round_trip() {
 
 #[tokio::test]
 async fn encrypted_nzb_sugo_tampered_job_fails_cleanly() {
-    let password = "sugo-tamper-canary-pass-999"; // ggignore
+    let password = "sugo-tamper-canary-pass-999";
     let salt = pesto::crypto::control::generate_alphabet_salt();
     let session =
         std::sync::Arc::new(pesto::crypto::kdf::EncryptionSession::new(password, salt).unwrap());
@@ -281,6 +283,7 @@ async fn encrypted_nzb_sugo_tampered_job_fails_cleanly() {
         server_idx: 0,
         file_index: 1,
         total_files: 1,
+        segment_index: 0,
     }];
     let meta = NzbMeta {
         password: Some(password.to_string()),
@@ -397,6 +400,7 @@ async fn test_staged_encrypted_nzb_persistence_and_restart() {
         server_idx: 0,
         file_index: 0,
         total_files: 0,
+        segment_index: 0,
     }];
     let meta = NzbMeta {
         password: Some(password.to_string()),

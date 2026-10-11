@@ -227,6 +227,7 @@ fn sorting_post_outcome_preserves_subject_ordinals() {
         server_idx: 0,
         file_index: 1,
         total_files: 2,
+        segment_index: 0,
     };
 
     let seg2 = PostedSegment {
@@ -246,6 +247,7 @@ fn sorting_post_outcome_preserves_subject_ordinals() {
         server_idx: 0,
         file_index: 2,
         total_files: 2,
+        segment_index: 0,
     };
 
     // Push into shared in reverse order (file_b, then file_a)
@@ -335,6 +337,7 @@ async fn repost_failed_tasks_preserves_subject_ordinals() {
     let mut slots = Vec::new();
     let recovered = super::super::result::repost_failed_tasks(
         &config,
+        None,
         &[failed],
         &["alt.test".into()],
         None,

@@ -122,6 +122,10 @@ pub fn parse(content: &str) -> anyhow::Result<ParsedNzb> {
                 // (see `default_subject`'s `None` case) rather than guessed.
                 file_index: 0,
                 total_files: 0,
+                // Not recoverable from an .nzb; a segment parsed back from
+                // an .nzb (--merge-season) is never re-encoded, so this is
+                // never read (see `PostedSegment::wire_name`).
+                segment_index: 0,
             });
         } else if t.starts_with("<meta ") {
             let kind = xml_attr(t, "type").unwrap_or_default();

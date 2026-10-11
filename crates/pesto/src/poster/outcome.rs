@@ -158,6 +158,8 @@ pub struct PostedSegment {
     /// alone, long after `Shared` is gone.
     pub file_index: u32,
     pub total_files: u32,
+    /// Segment index across the release for encrypted uploads.
+    pub segment_index: u32,
 }
 
 /// A segment that failed to post during the upload run. Carries enough

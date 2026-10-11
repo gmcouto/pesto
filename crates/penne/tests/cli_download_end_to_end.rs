@@ -120,6 +120,7 @@ fn segment(file_name: &str, part: u32, total: u32, message_id: &str, size: u64) 
         server_idx: 0,
         file_index: 0,
         total_files: 0,
+        segment_index: 0,
     }
 }
 
@@ -1115,7 +1116,7 @@ fn cli_download_encrypted_multipart_round_trip() {
             &part2_data,
             128,
             None,
-            1u32,
+            2u32,
             &mut body2,
         )
         .unwrap();

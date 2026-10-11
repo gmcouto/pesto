@@ -4,13 +4,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use tokio::fs::File;
 use tokio::io::AsyncReadExt;
 use tracing::{info, warn};
 
 use crate::article::{default_subject, Article};
 use crate::config::Config;
+use crate::crypto::UploadEncryptionAdapter;
 use crate::nntp::pool::ConnectionSlot;
 use crate::progress::{ProgressEvent, ProgressSender};
 use crate::resume::SegmentRecord;
@@ -93,6 +94,7 @@ pub(super) fn commit_result(
             server_idx,
             file_index: task.meta.file_index,
             total_files: shared.total_files,
+            segment_index: task.segment_index,
         };
         shared.results.lock().unwrap().push(seg.clone());
         if let Some(tx) = shared.check_tx.lock().unwrap().as_ref() {
@@ -205,8 +207,17 @@ pub(super) fn record_failure(
 /// `message_id` below for why). Returns the `PostedSegment`s that were
 /// successfully posted; tasks that exhaust all retries are silently dropped
 /// (the caller can compare lengths to detect persistent failures).
+///
+/// `adapter` is the upload's [`UploadEncryptionAdapter`]: when present, the
+/// retried article is re-encrypted with the *same* salt and
+/// `FailedTask::segment_index` the original copy used, so the reposted wire
+/// output is identical in identity to the first attempt. Reposting
+/// plaintext for an encrypted upload would leak the file contents on the
+/// wire and produce an article undecryptable under the NZB's declared
+/// `yenc_encrypted` provenance (audit P0).
 pub async fn repost_failed_tasks(
     config: &Config,
+    adapter: Option<Arc<UploadEncryptionAdapter>>,
     failed: &[FailedTask],
     groups: &[String],
     events: Option<&ProgressSender>,
@@ -263,14 +274,37 @@ pub async fn repost_failed_tasks(
             offset,
         };
         let file_crc32 = (task.part == task.total).then_some(task.full_crc32);
-        let encoded = yenc::encode_part(
-            &task.yenc_name,
-            task.file_size,
-            spec,
-            &buf,
-            config.line_length,
-            file_crc32,
-        );
+        // Encrypted uploads re-run the full encryption adapter with the
+        // original salt + segment index (the adapter derives the same nonce
+        // from the same index, and the session salt is the run's persistent
+        // one) so the retried article is the authenticated wire form, not
+        // plaintext (Body Std v1.2 §8; audit P0). Unencrypted uploads keep
+        // the plain `encode_part` path unchanged.
+        let encoded = match adapter.as_ref() {
+            Some(adapter) => {
+                let mut encode_buf = Vec::new();
+                adapter
+                    .encode_article(
+                        &task.yenc_name,
+                        task.file_size,
+                        spec,
+                        &buf,
+                        config.line_length,
+                        file_crc32,
+                        task.segment_index,
+                        &mut encode_buf,
+                    )
+                    .context("retry: failed to re-encrypt article segment")?
+            }
+            None => yenc::encode_part(
+                &task.yenc_name,
+                task.file_size,
+                spec,
+                &buf,
+                config.line_length,
+                file_crc32,
+            ),
+        };
         // Re-post with the *same* Message-ID the in-run attempts used, so a
         // server that already has the article (lost `240` ack) deduplicates it
         // via `435 Already exists` instead of accepting a duplicate under a
@@ -355,6 +389,7 @@ pub async fn repost_failed_tasks(
                 full_crc32: task.full_crc32,
                 file_index: task.file_index,
                 total_files: task.total_files,
+                segment_index: task.segment_index,
             });
             if let Some(tx) = events {
                 let _ = tx.send(ProgressEvent::PostRetryRecovered {

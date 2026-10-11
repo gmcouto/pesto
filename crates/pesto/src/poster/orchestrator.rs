@@ -295,6 +295,7 @@ async fn run(options: RunOptions<'_>) -> Result<PostOutcome> {
             Some(Arc::clone(&shared.cancelled)),
             check_slots,
             shared.resume.clone(),
+            shared.encryption_adapter.clone(),
         ))
     } else {
         None
@@ -399,6 +400,7 @@ async fn recover_or_repost(
         info!(count = n, "retrying segments that failed during upload");
         let recovered = repost_failed_tasks(
             config,
+            shared.encryption_adapter.clone(),
             &failed_tasks,
             &shared.post_group,
             shared.events.as_ref(),
@@ -536,6 +538,7 @@ async fn recover_or_repost(
                 candidates,
                 shared.events.as_ref(),
                 std::mem::take(&mut post_slots),
+                shared.encryption_adapter.clone(),
             )
             .await;
             post_slots = recovered.slots;

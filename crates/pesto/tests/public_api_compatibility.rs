@@ -46,6 +46,7 @@ fn test_posted_segment_public_api_construction() {
         server_idx: 0,
         file_index: 1,
         total_files: 1,
+        segment_index: 0,
     };
 
     assert_eq!(seg.file_name, "test.bin");
@@ -118,6 +119,7 @@ fn test_nzb_generate_public_signature() {
         server_idx: 0,
         file_index: 0,
         total_files: 0,
+        segment_index: 0,
     };
     let meta = NzbMeta::default();
 
