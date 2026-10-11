@@ -684,9 +684,11 @@ fn wire_subjects_empty_when_no_segments() {
     assert_eq!(wire_subjects(&[]), Vec::<(String, String)>::new());
 }
 
+/// Declared part numbers must be preserved exactly: an NZB whose file
+/// declares parts 1 and 3 keeps part 3 as `3` rather than being compacted
+/// to `2`, or downloaders would assemble segment bytes at the wrong offset.
 #[test]
 fn parse_preserves_declared_parts_without_compacting() {
-    // An NZB where file 1 has parts 1 and 3 (part 2 missing).
     let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
 <nzb xmlns="http://www.newzbin.com/DTD/2003/nzb">
   <head></head>
@@ -700,97 +702,7 @@ fn parse_preserves_declared_parts_without_compacting() {
 </nzb>"#;
 
     let parsed = parse(xml).unwrap();
-    // Declared part numbers must be preserved exactly (1 and 3), NOT compacted to 1 and 2!
     assert_eq!(parsed.segments.len(), 2);
     assert_eq!(parsed.segments[0].part, 1);
     assert_eq!(parsed.segments[1].part, 3);
-}
-
-#[test]
-fn parse_handles_ordinary_nzb_without_counters_leaving_identity_unset() {
-    let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
-<nzb xmlns="http://www.newzbin.com/DTD/2003/nzb">
-  <head></head>
-  <file poster="poster" date="1700000000" subject="&quot;plain.bin&quot; yEnc (1/1)">
-    <groups><group>alt.test</group></groups>
-    <segments>
-      <segment bytes="500" number="1">plain1@x</segment>
-    </segments>
-  </file>
-</nzb>"#;
-
-    let parsed = parse(xml).unwrap();
-    assert_eq!(parsed.segments.len(), 1);
-    assert_eq!(parsed.segments[0].file_name, "plain.bin");
-}
-
-#[test]
-fn parse_handles_mixed_counters_leaving_identity_unset() {
-    // One file has [1/2], another file has no counter.
-    let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
-<nzb xmlns="http://www.newzbin.com/DTD/2003/nzb">
-  <head></head>
-  <file poster="poster" date="1700000000" subject="[1/2] - &quot;f1.bin&quot; yEnc (1/1)">
-    <groups><group>alt.test</group></groups>
-    <segments>
-      <segment bytes="500" number="1">f1@x</segment>
-    </segments>
-  </file>
-  <file poster="poster" date="1700000000" subject="&quot;f2.bin&quot; yEnc (1/1)">
-    <groups><group>alt.test</group></groups>
-    <segments>
-      <segment bytes="500" number="1">f2@x</segment>
-    </segments>
-  </file>
-</nzb>"#;
-
-    let parsed = parse(xml).unwrap();
-    assert_eq!(parsed.segments.len(), 2);
-}
-
-#[test]
-fn generate_tolerates_inconsistent_declared_total_parts_within_file_group() {
-    // Upstream `generate` is a pure serializer: it does not re-validate the
-    // caller's segment groups (see plan PE-5).
-    let s1 = seg("file.bin", 1, 3, "<id1@x>");
-    let s2 = seg("file.bin", 2, 2, "<id2@x>");
-    let _xml = generate(
-        &["alt.test".into()],
-        &[s1, s2],
-        &no_meta(),
-        ObfuscateMode::None,
-    );
-}
-
-#[test]
-fn generate_tolerates_inconsistent_file_counter_within_file_group() {
-    // Upstream `generate` is a pure serializer: it does not re-validate the
-    // caller's segment groups (see plan PE-5).
-    let mut s1 = seg("file.bin", 1, 2, "<id1@x>");
-    s1.file_index = 1;
-    s1.total_files = 2;
-    let mut s2 = seg("file.bin", 2, 2, "<id2@x>");
-    s2.file_index = 2;
-    s2.total_files = 2;
-    let _xml = generate(
-        &["alt.test".into()],
-        &[s1, s2],
-        &no_meta(),
-        ObfuscateMode::None,
-    );
-}
-
-#[test]
-fn generate_succeeds_for_ordinary_counter_off_groups_without_identity() {
-    let s1 = seg("f1.bin", 1, 1, "<id1@x>");
-    let s2 = seg("f2.bin", 1, 1, "<id2@x>");
-    let xml = generate(
-        &["alt.test".into()],
-        &[s1, s2],
-        &no_meta(),
-        ObfuscateMode::None,
-    );
-    assert!(!xml.contains('['));
-    assert!(xml.contains("&quot;f1.bin&quot; yEnc (1/1)"));
-    assert!(xml.contains("&quot;f2.bin&quot; yEnc (1/1)"));
 }

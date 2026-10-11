@@ -887,36 +887,34 @@ mod tests {
 
         state.save(&path).unwrap();
 
-        // Verify serialized state contains no plaintext password
+        // Serialized state contains no plaintext password.
         let serialized = std::fs::read_to_string(&path).unwrap();
         assert!(!serialized.contains("password"));
         assert!(!serialized.contains("secret"));
 
-        // Load back
+        // Load back: salt/layout/record identity all survive.
         let loaded = ResumeState::load(&path).unwrap();
         assert_eq!(loaded.session_salt(), Some(&salt));
         assert_eq!(loaded.session_identity().map(|s| &s.layout), Some(&layout));
-
         let rec = loaded.get("file1.bin", 1).unwrap();
         assert_eq!(rec.message_id, "msg1@example.com");
         assert_eq!(rec.bytes, 1024);
 
-        // Repeated save/load is idempotent
+        // Repeated save/load is idempotent.
         let path2 = dir.path().join("session_state_2.json");
         loaded.save(&path2).unwrap();
-        let loaded2 = ResumeState::load(&path2).unwrap();
+        let mut loaded2 = ResumeState::load(&path2).unwrap();
         assert_eq!(loaded.session_identity(), loaded2.session_identity());
         assert_eq!(loaded.get("file1.bin", 1), loaded2.get("file1.bin", 1));
-    }
 
-    #[test]
-    fn pre_schema_json_loads_with_absent_session_and_record_identity() {
+        // The unchanged layout still validates on the loaded state, and a
+        // pre-schema record (no session identity) loads with identity unset.
+        assert!(loaded2.validate_session(&layout));
         let json = r#"{"files":{},"segments":{"a.bin\u00001":{"message_id":"id1@x","bytes":100}}}"#;
         let loaded: ResumeState = serde_json::from_str(json).unwrap();
         assert!(loaded.session_identity().is_none());
         assert!(loaded.session_salt().is_none());
-        let rec = loaded.get("a.bin", 1).unwrap();
-        assert_eq!(rec.message_id, "id1@x");
+        assert_eq!(loaded.get("a.bin", 1).unwrap().message_id, "id1@x");
     }
 
     #[test]
@@ -978,40 +976,5 @@ mod tests {
         assert!(!s.validate_session(&resized_layout));
         assert!(s.session_identity().is_none());
         assert_eq!(s.len(), 0);
-    }
-
-    #[test]
-    fn current_version_session_round_trips_byte_for_byte() {
-        use crate::poster::ReleaseLayout;
-
-        let base_layout = ReleaseLayout::from_parts(1, &[(1, 1)]).unwrap();
-        let salt = [0x77u8; 16];
-
-        let mut s = ResumeState::default();
-        s.set_session_identity(UploadSessionIdentity::new(salt, base_layout.clone()));
-        s.record_with(
-            "a.bin",
-            1,
-            SegmentRecord {
-                message_id: "msg@x".into(),
-                bytes: 100,
-                confirmed: false,
-                check_disabled: false,
-                server_idx: 0,
-                wire_identity: None,
-            },
-        );
-
-        // Session validates unchanged and survives
-        // serialization round-trip byte-for-byte.
-        assert!(s.validate_session(&base_layout));
-        assert!(s.session_identity().is_some());
-
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("state.json");
-        s.save(&path).unwrap();
-        let mut loaded = ResumeState::load(&path).unwrap();
-        assert!(loaded.validate_session(&base_layout));
-        assert_eq!(loaded.get("a.bin", 1).unwrap().message_id, "msg@x");
     }
 }
