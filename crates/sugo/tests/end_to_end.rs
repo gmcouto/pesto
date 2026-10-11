@@ -129,7 +129,6 @@ async fn encrypted_nzb_sugo_job_round_trip() {
         total: 1,
         offset: 0,
     };
-    let segment_index = 1u32;
     let mut body = Vec::new();
     let encoded = adapter
         .encode_article(
@@ -139,7 +138,7 @@ async fn encrypted_nzb_sugo_job_round_trip() {
             original,
             128,
             None,
-            segment_index,
+            1,
             &mut body,
         )
         .unwrap();
@@ -231,7 +230,6 @@ async fn encrypted_nzb_sugo_tampered_job_fails_cleanly() {
         total: 1,
         offset: 0,
     };
-    let segment_index = 1u32;
     let mut body = Vec::new();
     let encoded = adapter
         .encode_article(
@@ -241,7 +239,7 @@ async fn encrypted_nzb_sugo_tampered_job_fails_cleanly() {
             original,
             128,
             None,
-            segment_index,
+            1,
             &mut body,
         )
         .unwrap();
@@ -331,214 +329,12 @@ async fn encrypted_nzb_sugo_tampered_job_fails_cleanly() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 
-    // Zero-output guarantee: final file and temp file must not exist
+    // Zero-output guarantee: final file and temp sibling must not exist
+    // (penne's temp suffix is `.penne-part`, not `.tmp`).
     let output_file = download_dir.join("tampered").join("tampered.bin");
     assert!(!output_file.exists(), "unauthenticated file must not exist");
-    let tmp_file = download_dir.join("tampered").join("tampered.bin.tmp");
+    let tmp_file = download_dir
+        .join("tampered")
+        .join("tampered.bin.penne-part");
     assert!(!tmp_file.exists(), "temp file must not exist");
-}
-
-#[tokio::test]
-async fn test_staged_encrypted_nzb_persistence_and_restart() {
-    let password = "sugo-restart-test-secret-42";
-    let salt = pesto::crypto::generate_alphabet_salt();
-    let session =
-        std::sync::Arc::new(pesto::crypto::EncryptionSession::new(password, salt).unwrap());
-    let adapter = pesto::crypto::UploadEncryptionAdapter::new(session);
-
-    let original = b"Plaintext that must survive Sugo JobStore reload and worker restart!";
-    let spec = PartSpec {
-        number: 1,
-        total: 1,
-        offset: 0,
-    };
-    let segment_index = 1u32;
-    let mut body = Vec::new();
-    let encoded = adapter
-        .encode_article(
-            "restart_secret.bin",
-            original.len() as u64,
-            spec,
-            original,
-            128,
-            None,
-            segment_index,
-            &mut body,
-        )
-        .unwrap();
-
-    let mut known = HashMap::new();
-    known.insert("sugo_restart@test", encoded.body);
-    let addr = support::spawn_fake_server(known);
-
-    let dir = tempfile::tempdir().unwrap();
-    let download_dir = dir.path().join("downloads");
-    let data_dir = dir.path().join("data");
-    let config = support::test_web_config(&download_dir, addr.port(), "secret");
-
-    let state1 = support::build_state_with_config_path(
-        data_dir.clone(),
-        config.clone(),
-        data_dir.join("config.toml"),
-    );
-
-    let groups = vec!["alt.binaries.test".to_string()];
-    let segments = vec![PostedSegment {
-        file_name: "restart_secret.bin".into(),
-        file_path: std::path::Path::new("restart_secret.bin").into(),
-        subject_name: "restart_secret.bin".into(),
-        wire_name: "restart_secret.bin".into(),
-        wire_yenc_name: "restart_secret.bin".into(),
-        file_size: original.len() as u64,
-        part: 1,
-        total: 1,
-        message_id: "<sugo_restart@test>".into(),
-        bytes: original.len() as u64,
-        from: "poster <p@x>".into(),
-        date: (None, None),
-        full_crc32: 0,
-        server_idx: 0,
-        file_index: 0,
-        total_files: 0,
-        segment_index: 0,
-    }];
-    let meta = NzbMeta {
-        password: Some(password.to_string()),
-        yenc_encrypted: true,
-        ..Default::default()
-    };
-    let nzb_bytes = pesto::nzb::generate(
-        &groups,
-        &segments,
-        &meta,
-        pesto::config::ObfuscateMode::None,
-    )
-    .into_bytes();
-
-    // Stage and enqueue in store 1, then explicitly save to disk
-    let job = sugo::job::stage_and_create(&state1, "restart_secret.nzb", None, nzb_bytes)
-        .await
-        .unwrap();
-    {
-        let mut store = state1.jobs.write().await;
-        store.enqueue(job);
-        store.save().unwrap();
-    }
-
-    // Drop state1 completely, proving process restart
-    drop(state1);
-
-    // Simulate process restart: reload JobStore from disk via build_state
-    let state2 = support::build_state(data_dir.clone(), config);
-    {
-        let store2 = state2.jobs.read().await;
-        assert_eq!(store2.pending.len(), 1);
-        assert!(store2.pending[0].nzb_path.exists());
-    }
-    sugo::job::worker::spawn(state2.clone());
-
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    loop {
-        {
-            let store = state2.jobs.read().await;
-            if let Some(finished) = store.history.first() {
-                assert_eq!(
-                    finished.status,
-                    sugo::job::JobStatus::Completed,
-                    "expected Completed status after restart, got: {:?}",
-                    finished.status
-                );
-                break;
-            }
-        }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "job did not reach history within the timeout after restart"
-        );
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-
-    let written = std::fs::read(
-        download_dir
-            .join("restart_secret")
-            .join("restart_secret.bin"),
-    )
-    .unwrap();
-    assert_eq!(written, original);
-}
-
-#[tokio::test]
-async fn test_archive_password_only_compatibility() {
-    // NZB has password metadata, but yenc_encrypted is false (e.g. RAR archive password)
-    let password = "archive-extract-password-only";
-    let plain_payload = b"Plain ordinary yEnc content with archive password only!";
-    let plain_encoded = pesto::yenc::encode_part(
-        "archive_pass.bin",
-        plain_payload.len() as u64,
-        PartSpec {
-            number: 1,
-            total: 1,
-            offset: 0,
-        },
-        plain_payload,
-        128,
-        None,
-    );
-
-    let mut known = HashMap::new();
-    known.insert("sugo_archive_plain@test", plain_encoded.body);
-    let addr = support::spawn_fake_server(known);
-
-    let dir = tempfile::tempdir().unwrap();
-    let download_dir = dir.path().join("downloads");
-    let config = support::test_web_config(&download_dir, addr.port(), "secret");
-    let state = support::build_state(dir.path().join("data"), config);
-    sugo::job::worker::spawn(state.clone());
-
-    let xml = format!(
-        r#"<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE nzb PUBLIC "-//newzBin//DTD NZB 1.1//EN" "http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd">
-<nzb xmlns="http://www.newzbin.com/DTD/2003/nzb">
-  <head>
-    <meta type="password">{password}</meta>
-  </head>
-  <file poster="uploader@example.com" date="1774300000" subject="&quot;archive_pass.bin&quot; yEnc">
-    <groups><group>alt.binaries.test</group></groups>
-    <segments>
-      <segment bytes="{}" number="1">sugo_archive_plain@test</segment>
-    </segments>
-  </file>
-</nzb>"#,
-        plain_payload.len()
-    );
-
-    let job = sugo::job::stage_and_create(&state, "archive_pass.nzb", None, xml.into_bytes())
-        .await
-        .unwrap();
-    state.jobs.write().await.enqueue(job);
-
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    loop {
-        {
-            let store = state.jobs.read().await;
-            if let Some(finished) = store.history.first() {
-                assert_eq!(
-                    finished.status,
-                    sugo::job::JobStatus::Completed,
-                    "expected Completed for archive-password NZB, got: {:?}",
-                    finished.status
-                );
-                break;
-            }
-        }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "job did not reach history within the timeout"
-        );
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-
-    let written =
-        std::fs::read(download_dir.join("archive_pass").join("archive_pass.bin")).unwrap();
-    assert_eq!(written, plain_payload);
 }

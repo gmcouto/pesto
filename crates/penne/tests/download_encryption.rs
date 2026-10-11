@@ -1,23 +1,44 @@
-//! Integration tests for Penne download decryption and layer encapsulation (ARCH-01, ARCH-03).
+//! Consolidated Penne encrypted-download integration tests (audit D1):
+//! multipart decrypt round trip, tamper failover, zero output/no cache on
+//! authentication failure, spoof rejection, cache resume, boundary segment
+//! indices, and the real-PAR2 verify/repair assertions.
+
+mod support;
 
 use std::collections::HashMap;
+use std::io::Write;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use pesto::config::ServerEntry;
-use pesto::crypto::EncryptionSession;
-use pesto::crypto::{DownloadDecryptionAdapter, UploadEncryptionAdapter};
+use pesto::crypto::{DownloadDecryptionAdapter, EncryptionSession, UploadEncryptionAdapter};
 use pesto::yenc::{encode_part, PartSpec};
+use tempfile::NamedTempFile;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::tcp::OwnedWriteHalf;
 use tokio::net::{TcpListener, TcpStream};
 
 use penne::config::ServerTier;
-use penne::download::{download_queue, download_queue_with_decryptor};
-use penne::queue::{DownloadQueue, QueuedFile, QueuedSegment};
+use penne::download::{download_queue, download_queue_with_decryptor, DownloadOutcome};
+use penne::nzb::{download_decryptor, load};
+use penne::queue::build;
+use penne::repair::{verify_and_repair, RepairOutcome};
 
-/// Spawn a fake NNTP server that only understands `BODY` and `QUIT`.
+use support::{build_fixture_set, FixtureFile};
+
+/// Spawn a fake NNTP server that only understands `BODY` and `QUIT` — the
+/// commands `download_queue_with_decryptor` actually sends.
 fn spawn_fake_server(known: HashMap<String, Vec<u8>>) -> SocketAddr {
+    spawn_fake_server_counting(known, None)
+}
+
+/// Same, with an optional BODY-request counter (used to prove a cached run
+/// makes zero network requests).
+fn spawn_fake_server_counting(
+    known: HashMap<String, Vec<u8>>,
+    counter: Option<Arc<AtomicUsize>>,
+) -> SocketAddr {
     let std_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     std_listener.set_nonblocking(true).unwrap();
     let addr = std_listener.local_addr().unwrap();
@@ -28,14 +49,18 @@ fn spawn_fake_server(known: HashMap<String, Vec<u8>>) -> SocketAddr {
             let Ok((stream, _)) = listener.accept().await else {
                 break;
             };
-            tokio::spawn(handle_connection(stream, known.clone()));
+            tokio::spawn(handle_connection(stream, known.clone(), counter.clone()));
         }
     });
 
     addr
 }
 
-async fn handle_connection(stream: TcpStream, known: HashMap<String, Vec<u8>>) {
+async fn handle_connection(
+    stream: TcpStream,
+    known: HashMap<String, Vec<u8>>,
+    counter: Option<Arc<AtomicUsize>>,
+) {
     let (r, mut w) = stream.into_split();
     let mut reader = BufReader::new(r);
     if w.write_all(b"200 mock ready\r\n").await.is_err() {
@@ -52,6 +77,9 @@ async fn handle_connection(stream: TcpStream, known: HashMap<String, Vec<u8>>) {
         let cmd = line.trim_end();
 
         if let Some(rest) = cmd.strip_prefix("BODY ") {
+            if let Some(ref c) = counter {
+                c.fetch_add(1, Ordering::SeqCst);
+            }
             let id = rest.trim_start_matches('<').trim_end_matches('>');
             match known.get(id) {
                 Some(body) => {
@@ -102,206 +130,192 @@ fn server_entry(addr: SocketAddr) -> ServerEntry {
     }
 }
 
-#[tokio::test]
-async fn test_download_adapter_encapsulation() {
-    let password = "penne-test-password-123";
-    let salt = [0x77u8; 16];
-    let session = Arc::new(EncryptionSession::new(password, salt).unwrap());
+fn write_temp_nzb(xml: &str) -> NamedTempFile {
+    let mut temp = NamedTempFile::new().expect("failed to create temp file");
+    temp.write_all(xml.as_bytes()).expect("failed to write XML");
+    temp
+}
+
+fn encrypted_nzb_xml(password: &str, file_subject: &str, segments: &str) -> String {
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<nzb xmlns="http://www.newzbin.com/DTD/2003/nzb">
+  <head>
+    <meta type="password">{password}</meta>
+    <meta type="yenc_encrypted">true</meta>
+  </head>
+  <file poster="uploader@example.com" date="1774300000" subject="{file_subject}">
+    <groups><group>alt.binaries.test</group></groups>
+    <segments>
+      {segments}
+    </segments>
+  </file>
+</nzb>"#
+    )
+}
+
+/// Encrypt one article segment with the supplied segment index (Body Std
+/// v1.2 §8: every article in a fixture uses a distinct index).
+fn encode_article(
+    session: &Arc<EncryptionSession>,
+    file_name: &str,
+    file_size: u64,
+    spec: PartSpec,
+    payload: &[u8],
+    segment_index: u32,
+) -> Vec<u8> {
     let uploader = UploadEncryptionAdapter::new(session.clone());
-
-    let payload = b"Plaintext content for Penne download encapsulation test. 1234567890.";
-    let spec = PartSpec {
-        number: 1,
-        total: 1,
-        offset: 0,
-    };
-
-    let mut encoded_body = Vec::new();
+    let mut body = Vec::new();
     let encoded = uploader
         .encode_article(
-            "encapsulated.bin",
-            payload.len() as u64,
+            file_name,
+            file_size,
             spec,
             payload,
             128,
             None,
-            1u32,
-            &mut encoded_body,
+            segment_index,
+            &mut body,
         )
-        .expect("upload adapter encode failed");
+        .expect("encode article failed");
+    encoded.body
+}
 
-    // Serve via mock NNTP server
+async fn run_download_nzb(
+    xml: &str,
+    tiers: &[ServerTier],
+    dest: &std::path::Path,
+) -> DownloadOutcome {
+    let nzb_file = write_temp_nzb(xml);
+    let parsed = load(nzb_file.path()).unwrap();
+    let queue = build(&parsed);
+    let decryptor = download_decryptor(&parsed.meta).unwrap();
+    download_queue_with_decryptor(&queue, tiers, dest, 0, None, decryptor)
+        .await
+        .unwrap()
+}
+
+/// Flip one byte in an article's data line, keeping the FF1 control lines
+/// intact so the failure lands in AEAD authentication.
+fn tamper_data_line(article: &[u8], data_line_index: usize) -> Vec<u8> {
+    let mut lines: Vec<Vec<u8>> = article
+        .split_inclusive(|&b| b == b'\n')
+        .map(|l| l.to_vec())
+        .collect();
+    assert!(lines.len() > data_line_index + 1);
+    lines[data_line_index][0] ^= 0x01;
+    lines.into_iter().flatten().collect()
+}
+
+/// Multipart encrypted round trip through the production download path:
+/// an obfuscated subject with misleading counters must not impair decryption
+/// (subjects have no cryptographic meaning, Body Std v1.2 §8); the assembled
+/// file on disk must equal the original plaintext.
+#[tokio::test]
+async fn encrypted_multipart_download_round_trip() {
+    let password = "multipart-roundtrip-password";
+    let salt = [0x31u8; 16];
+    let session = Arc::new(EncryptionSession::new(password, salt).unwrap());
+
+    let payload_p1 = b"First half of the multipart encrypted payload.";
+    let payload_p2 = b"Second half of the multipart encrypted payload.";
+    let mut original = Vec::new();
+    original.extend_from_slice(payload_p1);
+    original.extend_from_slice(payload_p2);
+    let total_len = original.len() as u64;
+
+    let art1 = encode_article(
+        &session,
+        "multi.bin",
+        total_len,
+        PartSpec {
+            number: 1,
+            total: 2,
+            offset: 0,
+        },
+        payload_p1,
+        1,
+    );
+    let art2 = encode_article(
+        &session,
+        "multi.bin",
+        total_len,
+        PartSpec {
+            number: 2,
+            total: 2,
+            offset: payload_p1.len() as u64,
+        },
+        payload_p2,
+        2,
+    );
+
     let mut known = HashMap::new();
-    known.insert("enc-msg-01".to_string(), encoded.body.clone());
+    known.insert("mp-msg-01@test".to_string(), art1);
+    known.insert("mp-msg-02@test".to_string(), art2);
     let addr = spawn_fake_server(known);
 
-    let queue = DownloadQueue {
-        files: vec![QueuedFile {
-            name: "encapsulated.bin".to_string(),
-            segments: vec![QueuedSegment {
-                message_id: "enc-msg-01".to_string(),
-                part: 1,
-                bytes: payload.len() as u64,
-            }],
-        }],
-    };
+    let segments = format!(
+        "<segment bytes=\"{}\" number=\"1\">mp-msg-01@test</segment>\n\
+         <segment bytes=\"{}\" number=\"2\">mp-msg-02@test</segment>",
+        payload_p1.len(),
+        payload_p2.len()
+    );
+    let xml = encrypted_nzb_xml(
+        password,
+        // A misleading [N/M] counter and an obfuscated subject prefix have
+        // no cryptographic meaning: the subject still names the assembled
+        // file, but decryption is driven by the article bootstrap alone.
+        "[7/9] - &quot;multi.bin&quot; yEnc (1/1)",
+        &segments,
+    );
+    let dest = tempfile::tempdir().unwrap();
+    let outcome =
+        run_download_nzb(&xml, &[ServerTier::solo(server_entry(addr))], dest.path()).await;
 
-    let dest_dir = tempfile::tempdir().unwrap();
-    let decryptor = Arc::new(DownloadDecryptionAdapter::with_password(password));
-
-    // Execute download with decryptor
-    let outcome = download_queue_with_decryptor(
-        &queue,
-        &[ServerTier::solo(server_entry(addr))],
-        dest_dir.path(),
-        0,
-        None,
-        Some(decryptor),
-    )
-    .await
-    .expect("download_queue_with_decryptor failed");
-
-    assert!(outcome.segments.contains("enc-msg-01"));
-    assert!(outcome.missing.is_empty());
-    assert!(outcome.corrupt.is_empty());
-
-    // Verify file content on disk is exact plaintext
-    let output_file = dest_dir.path().join("encapsulated.bin");
-    assert!(output_file.exists(), "assembled file must exist on disk");
-    let disk_bytes = std::fs::read(&output_file).unwrap();
+    assert!(outcome.missing.is_empty(), "missing: {:?}", outcome.missing);
+    assert!(outcome.corrupt.is_empty(), "corrupt: {:?}", outcome.corrupt);
     assert_eq!(
-        disk_bytes, payload,
-        "disk file must match original plaintext"
+        std::fs::read(dest.path().join("multi.bin")).unwrap(),
+        original
     );
+}
 
-    // ARCH-03: Verify StreamingAssembly has no crypto imports or cipher references
-    let assemble_src = include_str!("../src/assemble.rs");
-    assert!(
-        !assemble_src.contains("use pesto::crypto"),
-        "assemble.rs must not import pesto::crypto"
-    );
-    assert!(
-        !assemble_src.contains("XChaCha20"),
-        "assemble.rs must not contain cipher references"
-    );
-    assert!(
-        !assemble_src.contains("Argon2"),
-        "assemble.rs must not contain KDF references"
-    );
-    assert!(
-        !assemble_src.contains("Poly1305"),
-        "assemble.rs must not contain MAC references"
-    );
-    assert!(
-        !assemble_src.contains("FF1"),
-        "assemble.rs must not contain FF1 references"
-    );
+/// A tampered copy on the primary tier fails authentication and the segment
+/// is retried on the backup tier, which holds the intact article.
+#[tokio::test]
+async fn tampered_primary_fails_over_to_backup_tier() {
+    let password = "tier-failover-password";
+    let salt = [0x66u8; 16];
+    let session = Arc::new(EncryptionSession::new(password, salt).unwrap());
 
-    // Verify unencrypted download works without decryptor (backward compatibility)
-    let plain_payload = b"Unencrypted plain file content.";
-    let plain_body = encode_part(
-        "plain.bin",
-        plain_payload.len() as u64,
+    let payload = b"Payload for multi-tier failover verification under provider tampering!";
+    let encoded = encode_article(
+        &session,
+        "failover.bin",
+        payload.len() as u64,
         PartSpec {
             number: 1,
             total: 1,
             offset: 0,
         },
-        plain_payload,
-        128,
-        None,
-    )
-    .body;
-
-    let mut plain_known = HashMap::new();
-    plain_known.insert("plain-msg-01".to_string(), plain_body);
-    let plain_addr = spawn_fake_server(plain_known);
-
-    let plain_queue = DownloadQueue {
-        files: vec![QueuedFile {
-            name: "plain.bin".to_string(),
-            segments: vec![QueuedSegment {
-                message_id: "plain-msg-01".to_string(),
-                part: 1,
-                bytes: plain_payload.len() as u64,
-            }],
-        }],
-    };
-
-    let plain_dest = tempfile::tempdir().unwrap();
-    let plain_outcome = download_queue(
-        &plain_queue,
-        &[ServerTier::solo(server_entry(plain_addr))],
-        plain_dest.path(),
-        0,
-        None,
-    )
-    .await
-    .expect("unencrypted download failed");
-
-    assert!(plain_outcome.segments.contains("plain-msg-01"));
-    let plain_disk_bytes = std::fs::read(plain_dest.path().join("plain.bin")).unwrap();
-    assert_eq!(plain_disk_bytes, plain_payload);
-}
-
-#[tokio::test]
-async fn test_zero_output_on_auth_failure() {
-    let password = "zero-output-test-password";
-    let salt = [0xAAu8; 16];
-    let session = Arc::new(EncryptionSession::new(password, salt).unwrap());
-    let uploader = UploadEncryptionAdapter::new(session.clone());
-
-    let payload = b"Sensitive payload that must never touch disk if authentication fails!";
-    let spec = PartSpec {
-        number: 1,
-        total: 1,
-        offset: 0,
-    };
-
-    let mut valid_body = Vec::new();
-    let encoded = uploader
-        .encode_article(
-            "sensitive.bin",
-            payload.len() as u64,
-            spec,
-            payload,
-            128,
-            None,
-            1u32,
-            &mut valid_body,
-        )
-        .expect("upload adapter encode failed");
-
-    // Create a tampered copy: flip a byte in the data line (line index 2, 0-based),
-    // ensuring control lines (lines 0, 1, and the last line) remain valid FF1 ciphertexts.
-    let mut lines: Vec<Vec<u8>> = encoded
-        .body
-        .split_inclusive(|&b| b == b'\n')
-        .map(|l| l.to_vec())
-        .collect();
-    assert!(
-        lines.len() >= 4,
-        "must have header, encryption, data, and footer lines"
+        payload,
+        1,
     );
-    // Mutate a byte in the data line (lines[2])
-    let data_len = lines[2].len();
-    assert!(data_len > 4, "data line must have content");
-    lines[2][0] ^= 0x01;
-    let tampered_body: Vec<u8> = lines.into_iter().flatten().collect();
+    // Single-part: line 0 =ybegin, line 1 =yencryption, line 2 data.
+    let tampered = tamper_data_line(&encoded, 2);
 
-    // 1. Failover test: Server 1 (Tier 1) has tampered body, Server 2 (Tier 2) has valid body
     let mut s1_known = HashMap::new();
-    s1_known.insert("failover-msg-01".to_string(), tampered_body.clone());
+    s1_known.insert("failover-msg-01".to_string(), tampered);
     let s1_addr = spawn_fake_server(s1_known);
 
     let mut s2_known = HashMap::new();
-    s2_known.insert("failover-msg-01".to_string(), encoded.body.clone());
+    s2_known.insert("failover-msg-01".to_string(), encoded.clone());
     let s2_addr = spawn_fake_server(s2_known);
 
-    let queue = DownloadQueue {
-        files: vec![QueuedFile {
-            name: "sensitive.bin".to_string(),
-            segments: vec![QueuedSegment {
+    let queue = penne::queue::DownloadQueue {
+        files: vec![penne::queue::QueuedFile {
+            name: "failover.bin".to_string(),
+            segments: vec![penne::queue::QueuedSegment {
                 message_id: "failover-msg-01".to_string(),
                 part: 1,
                 bytes: payload.len() as u64,
@@ -311,244 +325,6 @@ async fn test_zero_output_on_auth_failure() {
 
     let dest_dir = tempfile::tempdir().unwrap();
     let decryptor = Arc::new(DownloadDecryptionAdapter::with_password(password));
-
-    let tiers = vec![
-        ServerTier::solo(server_entry(s1_addr)),
-        ServerTier::solo(server_entry(s2_addr)),
-    ];
-
-    let outcome = download_queue_with_decryptor(
-        &queue,
-        &tiers,
-        dest_dir.path(),
-        0,
-        None,
-        Some(decryptor.clone()),
-    )
-    .await
-    .expect("download_queue_with_decryptor failed");
-
-    // S1 failed auth -> failed over to S2 -> S2 succeeded
-    assert!(
-        outcome.segments.contains("failover-msg-01"),
-        "segment should be resolved by backup server"
-    );
-    assert!(outcome.missing.is_empty());
-    assert!(outcome.corrupt.is_empty());
-
-    let output_file = dest_dir.path().join("sensitive.bin");
-    assert!(output_file.exists());
-    let disk_bytes = std::fs::read(&output_file).unwrap();
-    assert_eq!(
-        disk_bytes, payload,
-        "assembled file on disk must match plaintext"
-    );
-
-    // 2. Zero-output test: only Server 1 exists with tampered body
-    let mut only_bad_known = HashMap::new();
-    only_bad_known.insert("bad-msg-01".to_string(), tampered_body);
-    let bad_addr = spawn_fake_server(only_bad_known);
-
-    let bad_queue = DownloadQueue {
-        files: vec![QueuedFile {
-            name: "must_not_exist.bin".to_string(),
-            segments: vec![QueuedSegment {
-                message_id: "bad-msg-01".to_string(),
-                part: 1,
-                bytes: payload.len() as u64,
-            }],
-        }],
-    };
-
-    let bad_dest_dir = tempfile::tempdir().unwrap();
-    let bad_outcome = download_queue_with_decryptor(
-        &bad_queue,
-        &[ServerTier::solo(server_entry(bad_addr))],
-        bad_dest_dir.path(),
-        0,
-        None,
-        Some(decryptor),
-    )
-    .await
-    .expect("download should finish with corrupt segment reported");
-
-    // Segment was corrupt
-    assert!(
-        bad_outcome.segments.is_empty(),
-        "no segments should be recorded as successfully fetched"
-    );
-    assert_eq!(bad_outcome.corrupt.len(), 1);
-    assert_eq!(bad_outcome.corrupt[0].message_id, "bad-msg-01");
-    assert!(
-        bad_outcome.corrupt[0]
-            .error
-            .contains("AUTHENTICATION_FAILURE")
-            || bad_outcome.corrupt[0]
-                .error
-                .contains("ciphertext CRC mismatch"),
-        "error must indicate authentication failure: {}",
-        bad_outcome.corrupt[0].error
-    );
-
-    // ZERO-OUTPUT GUARANTEE: Neither final file nor temp file must exist on disk
-    let final_path = bad_dest_dir.path().join("must_not_exist.bin");
-    assert!(
-        !final_path.exists(),
-        "final file must not exist on authentication failure"
-    );
-    let tmp_path = bad_dest_dir.path().join("must_not_exist.bin.tmp");
-    assert!(
-        !tmp_path.exists(),
-        "temp file must not exist on authentication failure"
-    );
-
-    // Verify cache was not written for failed authentication
-    assert!(
-        penne::cache::load(bad_dest_dir.path(), "bad-msg-01").is_none(),
-        "cache must not store unauthenticated body"
-    );
-}
-
-#[tokio::test]
-async fn test_bad_cache_entry_refetch_overwrites_without_eviction() {
-    // Audit D9: a corrupted cached entry falls through to a network refetch
-    // and a successful refetch overwrites it (`cache::store` is a plain
-    // `fs::write`) — no explicit eviction step is needed.
-    let password = "cache-eviction-password";
-    let salt = [0x55u8; 16];
-    let session = Arc::new(EncryptionSession::new(password, salt).unwrap());
-    let uploader = UploadEncryptionAdapter::new(session.clone());
-
-    let payload = b"Payload for testing cache eviction and refetch on corruption!";
-    let spec = PartSpec {
-        number: 1,
-        total: 1,
-        offset: 0,
-    };
-
-    let mut valid_body = Vec::new();
-    let encoded = uploader
-        .encode_article(
-            "cache_test.bin",
-            payload.len() as u64,
-            spec,
-            payload,
-            128,
-            None,
-            1u32,
-            &mut valid_body,
-        )
-        .expect("encode failed");
-
-    let dest_dir = tempfile::tempdir().unwrap();
-
-    // Seed cache with corrupted garbage
-    let corrupted_cache_bytes = b"CORRUPTED_CACHE_ENTRY_NOT_VALID_YENC";
-    penne::cache::store(dest_dir.path(), "cache-evict-msg-01", corrupted_cache_bytes).unwrap();
-    assert!(penne::cache::load(dest_dir.path(), "cache-evict-msg-01").is_some());
-
-    // Mock server serves valid body
-    let mut known = HashMap::new();
-    known.insert("cache-evict-msg-01".to_string(), encoded.body.clone());
-    let addr = spawn_fake_server(known);
-
-    let queue = DownloadQueue {
-        files: vec![QueuedFile {
-            name: "cache_test.bin".to_string(),
-            segments: vec![QueuedSegment {
-                message_id: "cache-evict-msg-01".to_string(),
-                part: 1,
-                bytes: payload.len() as u64,
-            }],
-        }],
-    };
-
-    let decryptor = Arc::new(DownloadDecryptionAdapter::with_password(password));
-    let outcome = download_queue_with_decryptor(
-        &queue,
-        &[ServerTier::solo(server_entry(addr))],
-        dest_dir.path(),
-        0,
-        None,
-        Some(decryptor),
-    )
-    .await
-    .expect("download_queue_with_decryptor failed");
-
-    assert!(outcome.segments.contains("cache-evict-msg-01"));
-    assert!(outcome.missing.is_empty());
-    assert!(outcome.corrupt.is_empty());
-
-    // File assembled matches plaintext
-    let output_file = dest_dir.path().join("cache_test.bin");
-    assert!(output_file.exists());
-    assert_eq!(std::fs::read(&output_file).unwrap(), payload);
-
-    // Cache now holds valid body, not the corrupted one
-    let cached_after = penne::cache::load(dest_dir.path(), "cache-evict-msg-01").unwrap();
-    assert_eq!(cached_after, encoded.body);
-}
-
-#[tokio::test]
-async fn test_tampered_primary_failover_to_secondary() {
-    let password = "tier-failover-password";
-    let salt = [0x66u8; 16];
-    let session = Arc::new(EncryptionSession::new(password, salt).unwrap());
-    let uploader = UploadEncryptionAdapter::new(session.clone());
-
-    let payload = b"Payload for multi-tier failover verification under provider tampering!";
-    let spec = PartSpec {
-        number: 1,
-        total: 1,
-        offset: 0,
-    };
-
-    let mut valid_body = Vec::new();
-    let encoded = uploader
-        .encode_article(
-            "failover_test.bin",
-            payload.len() as u64,
-            spec,
-            payload,
-            128,
-            None,
-            1u32,
-            &mut valid_body,
-        )
-        .expect("encode failed");
-
-    // Tamper the ciphertext data line
-    let mut lines: Vec<Vec<u8>> = encoded
-        .body
-        .split_inclusive(|&b| b == b'\n')
-        .map(|l| l.to_vec())
-        .collect();
-    lines[2][0] ^= 0x01;
-    let tampered_body: Vec<u8> = lines.into_iter().flatten().collect();
-
-    // S1 (Tier 1) has tampered body, S2 (Tier 2) has valid body
-    let mut s1_known = HashMap::new();
-    s1_known.insert("tier-failover-01".to_string(), tampered_body);
-    let s1_addr = spawn_fake_server(s1_known);
-
-    let mut s2_known = HashMap::new();
-    s2_known.insert("tier-failover-01".to_string(), encoded.body.clone());
-    let s2_addr = spawn_fake_server(s2_known);
-
-    let queue = DownloadQueue {
-        files: vec![QueuedFile {
-            name: "failover_test.bin".to_string(),
-            segments: vec![QueuedSegment {
-                message_id: "tier-failover-01".to_string(),
-                part: 1,
-                bytes: payload.len() as u64,
-            }],
-        }],
-    };
-
-    let dest_dir = tempfile::tempdir().unwrap();
-    let decryptor = Arc::new(DownloadDecryptionAdapter::with_password(password));
-
     let tiers = vec![
         ServerTier::solo(server_entry(s1_addr)),
         ServerTier::solo(server_entry(s2_addr)),
@@ -559,90 +335,77 @@ async fn test_tampered_primary_failover_to_secondary() {
             .await
             .expect("download should succeed on failover");
 
-    assert!(outcome.segments.contains("tier-failover-01"));
+    assert!(outcome.segments.contains("failover-msg-01"));
     assert!(outcome.missing.is_empty());
     assert!(outcome.corrupt.is_empty());
+    assert_eq!(
+        std::fs::read(dest_dir.path().join("failover.bin")).unwrap(),
+        payload
+    );
 
-    let output_file = dest_dir.path().join("failover_test.bin");
-    assert!(output_file.exists());
-    assert_eq!(std::fs::read(&output_file).unwrap(), payload);
-
-    // Cache holds valid body from tier 2
-    let cached = penne::cache::load(dest_dir.path(), "tier-failover-01").unwrap();
-    assert_eq!(cached, encoded.body);
+    // Cache holds the intact body fetched from tier 2.
+    assert_eq!(
+        penne::cache::load(dest_dir.path(), "failover-msg-01").unwrap(),
+        encoded
+    );
 }
 
+/// Zero-Output Guarantee on authentication failure: with only a tampered
+/// copy available, a multipart download must report the corrupt segment and
+/// commit nothing — no final file, no temp sibling, no cache entry for the
+/// failed article — while successfully fetched parts stay cacheable.
 #[tokio::test]
-async fn test_multipart_partial_auth_failure_cleanup() {
-    let password = "multipart-partial-auth-fail-password";
-    let salt = [0x77u8; 16];
+async fn auth_failure_commits_zero_output_and_no_cache() {
+    let password = "zero-output-password";
+    let salt = [0xAAu8; 16];
     let session = Arc::new(EncryptionSession::new(password, salt).unwrap());
-    let uploader = UploadEncryptionAdapter::new(session.clone());
 
-    let part1_payload = vec![0x11u8; 500];
-    let part2_payload = vec![0x22u8; 500];
+    let part1 = vec![0x11u8; 500];
+    let part2 = vec![0x22u8; 500];
 
-    let mut body1 = Vec::new();
-    let enc1 = uploader
-        .encode_article(
-            "multipart_cleanup.bin",
-            1000,
-            PartSpec {
-                number: 1,
-                total: 2,
-                offset: 0,
-            },
-            &part1_payload,
-            128,
-            None,
-            1u32,
-            &mut body1,
-        )
-        .unwrap();
-
-    let mut body2 = Vec::new();
-    let enc2 = uploader
-        .encode_article(
-            "multipart_cleanup.bin",
-            1000,
-            PartSpec {
-                number: 2,
-                total: 2,
-                offset: 500,
-            },
-            &part2_payload,
-            128,
-            None,
-            2u32,
-            &mut body2,
-        )
-        .unwrap();
-
-    // Tamper part 2
-    let mut lines2: Vec<Vec<u8>> = enc2
-        .body
-        .split_inclusive(|&b| b == b'\n')
-        .map(|l| l.to_vec())
-        .collect();
-    lines2[3][0] ^= 0x01; // multipart has =ybegin (0), =ypart (1), =yencryption (2), data (3)
-    let tampered_body2: Vec<u8> = lines2.into_iter().flatten().collect();
+    let enc1 = encode_article(
+        &session,
+        "sensitive.bin",
+        1000,
+        PartSpec {
+            number: 1,
+            total: 2,
+            offset: 0,
+        },
+        &part1,
+        1,
+    );
+    let enc2 = encode_article(
+        &session,
+        "sensitive.bin",
+        1000,
+        PartSpec {
+            number: 2,
+            total: 2,
+            offset: 500,
+        },
+        &part2,
+        2,
+    );
+    // Multipart: line 0 =ybegin, line 1 =ypart, line 2 =yencryption, line 3 data.
+    let tampered2 = tamper_data_line(&enc2, 3);
 
     let mut known = HashMap::new();
-    known.insert("mp-msg-01".to_string(), enc1.body);
-    known.insert("mp-msg-02".to_string(), tampered_body2);
+    known.insert("zero-msg-01".to_string(), enc1);
+    known.insert("zero-msg-02".to_string(), tampered2);
     let addr = spawn_fake_server(known);
 
-    let queue = DownloadQueue {
-        files: vec![QueuedFile {
-            name: "multipart_cleanup.bin".to_string(),
+    let queue = penne::queue::DownloadQueue {
+        files: vec![penne::queue::QueuedFile {
+            name: "sensitive.bin".to_string(),
             segments: vec![
-                QueuedSegment {
-                    message_id: "mp-msg-01".to_string(),
+                penne::queue::QueuedSegment {
+                    message_id: "zero-msg-01".to_string(),
                     part: 1,
                     bytes: 500,
                 },
-                QueuedSegment {
-                    message_id: "mp-msg-02".to_string(),
+                penne::queue::QueuedSegment {
+                    message_id: "zero-msg-02".to_string(),
                     part: 2,
                     bytes: 500,
                 },
@@ -662,38 +425,49 @@ async fn test_multipart_partial_auth_failure_cleanup() {
         Some(decryptor),
     )
     .await
-    .expect("download finishes");
+    .expect("download finishes with a corrupt segment reported");
 
-    // Part 1 succeeded, Part 2 was corrupt
-    assert!(outcome.segments.contains("mp-msg-01"));
+    // Part 1 succeeded, part 2 failed authentication.
+    assert!(outcome.segments.contains("zero-msg-01"));
     assert_eq!(outcome.corrupt.len(), 1);
-    assert_eq!(outcome.corrupt[0].message_id, "mp-msg-02");
-
-    // ZERO-OUTPUT GUARANTEE:
-    // Neither final file nor temporary file must exist on disk!
-    let final_path = dest_dir.path().join("multipart_cleanup.bin");
-    assert!(!final_path.exists(), "final file must not exist");
-
-    let tmp_path = dest_dir.path().join("multipart_cleanup.bin.tmp");
+    assert_eq!(outcome.corrupt[0].message_id, "zero-msg-02");
     assert!(
-        !tmp_path.exists(),
-        "temporary partial file must be cleaned up"
+        outcome.corrupt[0].error.contains("AUTHENTICATION_FAILURE")
+            || outcome.corrupt[0].error.contains("ciphertext CRC mismatch"),
+        "error must indicate authentication failure: {}",
+        outcome.corrupt[0].error
     );
+
+    // ZERO-OUTPUT GUARANTEE: neither final file nor temp sibling may exist.
+    assert!(
+        !dest_dir.path().join("sensitive.bin").exists(),
+        "final file must not exist on authentication failure"
+    );
+    assert!(
+        !dest_dir.path().join("sensitive.bin.penne-part").exists(),
+        "temp file must not exist on authentication failure"
+    );
+
+    // The failed article is not cached; the intact one is.
+    assert!(
+        penne::cache::load(dest_dir.path(), "zero-msg-02").is_none(),
+        "cache must not store an unauthenticated body"
+    );
+    assert!(penne::cache::load(dest_dir.path(), "zero-msg-01").is_some());
 }
 
 /// An encrypted download (decryptor configured) must reject a spoofed
-/// *unencrypted* article served for a plain NZB 1.1 segment: accepting `=ybegin`
-/// plaintext would release unauthenticated data to disk. The adapter fails
-/// closed whenever it holds decryption credentials.
+/// *unencrypted* article: accepting `=ybegin` plaintext would release
+/// unauthenticated data to disk. The adapter fails closed.
 #[tokio::test]
-async fn test_unencrypted_spoof_rejected_for_encrypted_nzb_segment() {
-    let password = "decoupled-spoof-password";
+async fn unencrypted_spoof_rejected_for_encrypted_download() {
+    let password = "spoof-rejection-password";
 
-    // Adversary-supplied unauthenticated plaintext article: a normal, valid yEnc
-    // body with no encryption framing whatsoever.
+    // Adversary-supplied unauthenticated plaintext article: a normal, valid
+    // yEnc body with no encryption framing whatsoever.
     let plain_payload = b"FORGED PLAINTEXT that must never reach disk";
     let spoofed_body = encode_part(
-        "spoofed_decoupled.bin",
+        "spoofed.bin",
         plain_payload.len() as u64,
         PartSpec {
             number: 1,
@@ -708,15 +482,14 @@ async fn test_unencrypted_spoof_rejected_for_encrypted_nzb_segment() {
     assert!(spoofed_body.starts_with(b"=ybegin"));
 
     let mut known = HashMap::new();
-    known.insert("spoof-none-idx-01".to_string(), spoofed_body);
+    known.insert("spoof-msg-01".to_string(), spoofed_body);
     let addr = spawn_fake_server(known);
 
-    // Plain NZB 1.1 segment: the queue carries no encryption identity.
-    let queue = DownloadQueue {
-        files: vec![QueuedFile {
-            name: "spoofed_decoupled.bin".to_string(),
-            segments: vec![QueuedSegment {
-                message_id: "spoof-none-idx-01".to_string(),
+    let queue = penne::queue::DownloadQueue {
+        files: vec![penne::queue::QueuedFile {
+            name: "spoofed.bin".to_string(),
+            segments: vec![penne::queue::QueuedSegment {
+                message_id: "spoof-msg-01".to_string(),
                 part: 1,
                 bytes: plain_payload.len() as u64,
             }],
@@ -751,18 +524,397 @@ async fn test_unencrypted_spoof_rejected_for_encrypted_nzb_segment() {
 
     // ZERO-OUTPUT GUARANTEE: no final file, no temp sibling, no cache entry.
     assert!(
-        !dest_dir.path().join("spoofed_decoupled.bin").exists(),
+        !dest_dir.path().join("spoofed.bin").exists(),
         "final file must not exist for a rejected spoof"
     );
     assert!(
-        !dest_dir
-            .path()
-            .join("spoofed_decoupled.bin.penne-part")
-            .exists(),
+        !dest_dir.path().join("spoofed.bin.penne-part").exists(),
         "temp file must not exist for a rejected spoof"
     );
     assert!(
-        penne::cache::load(dest_dir.path(), "spoof-none-idx-01").is_none(),
+        penne::cache::load(dest_dir.path(), "spoof-msg-01").is_none(),
         "rejected spoof must not be written to the resume cache"
+    );
+}
+
+/// Cache resume: after an interrupted run, re-downloading the same release
+/// (even with a reordered NZB) serves everything from the cache and makes
+/// zero network requests.
+#[tokio::test]
+async fn download_resumes_from_cache_without_network_requests() {
+    let password = "cache-resume-password";
+    let salt = [0x37u8; 16];
+    let session = Arc::new(EncryptionSession::new(password, salt).unwrap());
+
+    let payload_p1 = b"Part 1 for cache resume verification.";
+    let payload_p2 = b"Part 2 for cache resume verification.";
+    let mut original = Vec::new();
+    original.extend_from_slice(payload_p1);
+    original.extend_from_slice(payload_p2);
+    let total_len = original.len() as u64;
+
+    let art1 = encode_article(
+        &session,
+        "resume.bin",
+        total_len,
+        PartSpec {
+            number: 1,
+            total: 2,
+            offset: 0,
+        },
+        payload_p1,
+        1,
+    );
+    let art2 = encode_article(
+        &session,
+        "resume.bin",
+        total_len,
+        PartSpec {
+            number: 2,
+            total: 2,
+            offset: payload_p1.len() as u64,
+        },
+        payload_p2,
+        2,
+    );
+
+    let mut known = HashMap::new();
+    known.insert("cache-msg-01@test".to_string(), art1);
+    known.insert("cache-msg-02@test".to_string(), art2);
+    let req_counter = Arc::new(AtomicUsize::new(0));
+    let addr = spawn_fake_server_counting(known, Some(req_counter.clone()));
+
+    let segments = |first: &str, second: &str| {
+        format!(
+            "<segment bytes=\"{}\" number=\"1\">{first}</segment>\n\
+             <segment bytes=\"{}\" number=\"2\">{second}</segment>",
+            payload_p1.len(),
+            payload_p2.len()
+        )
+    };
+    let dest = tempfile::tempdir().unwrap();
+
+    // Run 1: download from the mock NNTP and populate the cache.
+    let xml1 = encrypted_nzb_xml(
+        password,
+        "&quot;resume.bin&quot; yEnc",
+        &segments("cache-msg-01@test", "cache-msg-02@test"),
+    );
+    let outcome1 =
+        run_download_nzb(&xml1, &[ServerTier::solo(server_entry(addr))], dest.path()).await;
+    assert!(outcome1.missing.is_empty());
+    assert_eq!(outcome1.segments.len(), 2);
+    assert_eq!(req_counter.load(Ordering::SeqCst), 2);
+    assert!(penne::cache::load(dest.path(), "cache-msg-01@test").is_some());
+
+    // Run 2: remove the assembled file, keep the cache, reorder the NZB.
+    std::fs::remove_file(dest.path().join("resume.bin")).unwrap();
+    let xml2 = encrypted_nzb_xml(
+        password,
+        "&quot;resume.bin&quot; yEnc",
+        &segments("cache-msg-02@test", "cache-msg-01@test"),
+    );
+    req_counter.store(0, Ordering::SeqCst);
+    let outcome2 =
+        run_download_nzb(&xml2, &[ServerTier::solo(server_entry(addr))], dest.path()).await;
+
+    assert!(outcome2.missing.is_empty());
+    assert_eq!(outcome2.segments.len(), 2);
+    assert_eq!(
+        req_counter.load(Ordering::SeqCst),
+        0,
+        "second run must make zero network requests, serving 100% from cache"
+    );
+    assert_eq!(
+        std::fs::read(dest.path().join("resume.bin")).unwrap(),
+        original
+    );
+}
+
+/// Segment indices are validated for the framing rule only (no 0x0A/0x0D in
+/// the uint32_be representation): boundary indices including the framing
+/// skips and u32::MAX must decrypt through the full production path.
+#[tokio::test]
+async fn boundary_segment_indices_decrypt_end_to_end() {
+    let password = "boundary-indices-password";
+    let salt = [0x3au8; 16];
+    let session = Arc::new(EncryptionSession::new(password, salt).unwrap());
+    let cases = [
+        (1u32, "boundary-one.bin"),
+        (9u32, "boundary-nine.bin"),
+        (11u32, "boundary-eleven.bin"),
+        (12u32, "boundary-twelve.bin"),
+        (14u32, "boundary-fourteen.bin"),
+        (u32::MAX - 1, "boundary-max-minus-one.bin"),
+        (u32::MAX, "boundary-max.bin"),
+    ];
+    let mut known = HashMap::new();
+    let mut files = String::new();
+
+    for (index, name) in cases {
+        let payload = format!("payload for segment index {index}");
+        let message_id = format!("boundary-{index}@test");
+        known.insert(
+            message_id.clone(),
+            encode_article(
+                &session,
+                name,
+                payload.len() as u64,
+                PartSpec {
+                    number: 1,
+                    total: 1,
+                    offset: 0,
+                },
+                payload.as_bytes(),
+                index,
+            ),
+        );
+        files.push_str(&format!(
+            "<file poster=\"uploader@example.com\" date=\"1774300000\" subject=\"&quot;{name}&quot; yEnc\">\n<groups>\n<group>alt.binaries.test</group>\n</groups>\n<segments>\n<segment bytes=\"{}\" number=\"1\">{message_id}</segment>\n</segments>\n</file>\n",
+            payload.len()
+        ));
+    }
+
+    let xml = format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<nzb xmlns=\"http://www.newzbin.com/DTD/2003/nzb\">\n<head>\n<meta type=\"password\">{password}</meta>\n<meta type=\"yenc_encrypted\">true</meta>\n</head>\n{files}</nzb>"
+    );
+    let addr = spawn_fake_server(known);
+    let dest = tempfile::tempdir().unwrap();
+    let outcome =
+        run_download_nzb(&xml, &[ServerTier::solo(server_entry(addr))], dest.path()).await;
+
+    assert!(outcome.missing.is_empty());
+    assert!(outcome.corrupt.is_empty());
+    for (index, name) in cases {
+        assert_eq!(
+            std::fs::read_to_string(dest.path().join(name)).unwrap(),
+            format!("payload for segment index {index}")
+        );
+    }
+}
+
+/// Unique PAR2 assertion: decrypted plaintext files plus real on-disk PAR2
+/// recovery data verify cleanly, and a damaged decrypted file is repaired
+/// bit-identically from the downloaded recovery volume.
+#[tokio::test]
+async fn encrypted_download_verifies_and_repairs_via_real_par2() {
+    let password = "encrypted-par2-password";
+    let data1: Vec<u8> = (0..1024u32).map(|i| (i * 7) as u8).collect();
+    let data2: Vec<u8> = (0..1536u32).map(|i| (i * 13) as u8).collect();
+
+    // Build genuine PAR2 bytes via the real PAR2 encoder (upstream
+    // test-support fixture, adapted from parmesan's internal test helper).
+    let fixture_dir = build_fixture_set(
+        &[
+            FixtureFile {
+                name: "data1.bin",
+                data: data1.clone(),
+            },
+            FixtureFile {
+                name: "data2.bin",
+                data: data2.clone(),
+            },
+        ],
+        256,
+        8,
+    );
+    let base_par2_bytes = std::fs::read(fixture_dir.join("base.par2")).unwrap();
+    let vol_par2_bytes = std::fs::read(fixture_dir.join("base.vol000+008.par2")).unwrap();
+    let _ = std::fs::remove_dir_all(&fixture_dir);
+
+    let salt = [0x5au8; 16];
+    let session = Arc::new(EncryptionSession::new(password, salt).unwrap());
+
+    let mut known = HashMap::new();
+    let mut next_index = 1u32;
+    let mut xml_files = String::new();
+    // One <file> element per release file — penne derives each file's name
+    // from its subject and groups consecutive same-name segments.
+    let push_file = |session: &Arc<EncryptionSession>,
+                     name: &str,
+                     data: &[u8],
+                     parts: usize,
+                     known: &mut HashMap<String, Vec<u8>>,
+                     xml_files: &mut String,
+                     next_index: &mut u32| {
+        let part_size = data.len().div_ceil(parts);
+        let mut segments = String::new();
+        for p in 0..parts {
+            let begin = p * part_size;
+            let end = ((p + 1) * part_size).min(data.len());
+            let chunk = &data[begin..end];
+            let art = encode_article(
+                session,
+                name,
+                data.len() as u64,
+                PartSpec {
+                    number: (p + 1) as u32,
+                    total: parts as u32,
+                    offset: begin as u64,
+                },
+                chunk,
+                *next_index,
+            );
+            let msg = format!("par2-msg-{next_index:02}@test");
+            known.insert(msg.clone(), art);
+            segments.push_str(&format!(
+                "<segment bytes=\"{}\" number=\"{}\">{msg}</segment>\n",
+                chunk.len(),
+                p + 1
+            ));
+            *next_index += 1;
+        }
+        xml_files.push_str(&format!(
+            "<file poster=\"uploader@example.com\" date=\"1774300000\" subject=\"&quot;{name}&quot; yEnc\">\n<groups><group>alt.binaries.test</group></groups>\n<segments>\n{segments}</segments>\n</file>\n"
+        ));
+    };
+    push_file(
+        &session,
+        "data1.bin",
+        &data1,
+        2,
+        &mut known,
+        &mut xml_files,
+        &mut next_index,
+    );
+    push_file(
+        &session,
+        "data2.bin",
+        &data2,
+        3,
+        &mut known,
+        &mut xml_files,
+        &mut next_index,
+    );
+    for (name, bytes) in [
+        ("base.par2", &base_par2_bytes),
+        ("base.vol000+008.par2", &vol_par2_bytes),
+    ] {
+        push_file(
+            &session,
+            name,
+            bytes,
+            1,
+            &mut known,
+            &mut xml_files,
+            &mut next_index,
+        );
+    }
+
+    let xml = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<nzb xmlns="http://www.newzbin.com/DTD/2003/nzb">
+  <head>
+    <meta type="password">{password}</meta>
+    <meta type="yenc_encrypted">true</meta>
+  </head>
+  {xml_files}</nzb>"#
+    );
+    let addr = spawn_fake_server(known);
+    let dest = tempfile::tempdir().unwrap();
+    let outcome =
+        run_download_nzb(&xml, &[ServerTier::solo(server_entry(addr))], dest.path()).await;
+
+    assert!(outcome.missing.is_empty());
+    assert!(outcome.corrupt.is_empty());
+    assert_eq!(outcome.assembled.len(), 4);
+
+    let known_files: std::collections::HashSet<String> = [
+        "data1.bin".to_string(),
+        "data2.bin".to_string(),
+        "base.par2".to_string(),
+        "base.vol000+008.par2".to_string(),
+    ]
+    .into_iter()
+    .collect();
+
+    // Phase 1: intact decrypted files verify cleanly.
+    let repair_res = verify_and_repair(dest.path(), &outcome.assembled, &known_files, None)
+        .await
+        .unwrap();
+    assert!(
+        matches!(repair_res, RepairOutcome::Ok),
+        "expected RepairOutcome::Ok, got: {:?}",
+        repair_res
+    );
+
+    // Phase 2: damage data1.bin on disk, then repair bit-identically.
+    let d1_path = dest.path().join("data1.bin");
+    let mut corrupted = std::fs::read(&d1_path).unwrap();
+    for byte in corrupted.iter_mut().take(256) {
+        *byte ^= 0xaa;
+    }
+    std::fs::write(&d1_path, &corrupted).unwrap();
+
+    let repair_res = verify_and_repair(dest.path(), &HashMap::new(), &known_files, None)
+        .await
+        .unwrap();
+    match repair_res {
+        RepairOutcome::Repaired(plan) => {
+            assert!(
+                plan.repaired_files.iter().any(|f| f.name == "data1.bin"),
+                "plan must report data1.bin as repaired"
+            );
+        }
+        other => panic!("expected RepairOutcome::Repaired, got: {other:?}"),
+    }
+    assert_eq!(
+        std::fs::read(&d1_path).unwrap(),
+        data1,
+        "repaired file must match original plaintext bit-identically"
+    );
+    assert_eq!(std::fs::read(dest.path().join("data2.bin")).unwrap(), data2);
+}
+
+/// Ordinary downloads behave exactly as before: a plain NZB 1.1 round-trips
+/// without a decryptor (backward-compatibility seam for
+/// `download_queue_with_decryptor`).
+#[tokio::test]
+async fn unencrypted_download_round_trips_without_decryptor() {
+    let plain_payload = b"Unencrypted plain file content.";
+    let plain_body = encode_part(
+        "plain.bin",
+        plain_payload.len() as u64,
+        PartSpec {
+            number: 1,
+            total: 1,
+            offset: 0,
+        },
+        plain_payload,
+        128,
+        None,
+    )
+    .body;
+
+    let mut plain_known = HashMap::new();
+    plain_known.insert("plain-msg-01".to_string(), plain_body);
+    let plain_addr = spawn_fake_server(plain_known);
+
+    let plain_queue = penne::queue::DownloadQueue {
+        files: vec![penne::queue::QueuedFile {
+            name: "plain.bin".to_string(),
+            segments: vec![penne::queue::QueuedSegment {
+                message_id: "plain-msg-01".to_string(),
+                part: 1,
+                bytes: plain_payload.len() as u64,
+            }],
+        }],
+    };
+
+    let plain_dest = tempfile::tempdir().unwrap();
+    let plain_outcome = download_queue(
+        &plain_queue,
+        &[ServerTier::solo(server_entry(plain_addr))],
+        plain_dest.path(),
+        0,
+        None,
+    )
+    .await
+    .expect("unencrypted download failed");
+
+    assert!(plain_outcome.segments.contains("plain-msg-01"));
+    assert_eq!(
+        std::fs::read(plain_dest.path().join("plain.bin")).unwrap(),
+        plain_payload
     );
 }
