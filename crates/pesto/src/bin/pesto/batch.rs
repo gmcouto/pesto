@@ -188,7 +188,12 @@ pub(super) async fn run_batch(
     }
 
     if season_nzb.is_some() && params.config.encrypt_password.is_some() {
-        anyhow::bail!("encrypted season consolidation is not supported: individual episode uploads use independent session salts and segment indices; individual per-episode NZBs have been generated");
+        anyhow::bail!(
+            "encrypted season consolidation is not supported: each episode would be uploaded \
+             as its own release before any combined NZB could reference it, and no code path \
+             exists to merge those session-specific encrypted articles afterwards; \
+             use --each without --season for encrypted uploads"
+        );
     }
 
     // A season batch merges every entry's NZB into one at the end, so they

@@ -229,8 +229,8 @@ select the entry, and `penne` refuses to load the config.
 cargo run --bin penne -- info path/to/release.nzb
 
 # Download, assemble, deobfuscate, PAR2-verify/repair, and extract.
-# --out-dir defaults to the config's download_dir; --password supplies
-# the password for downstream archive extraction (unrar/7z).
+# --out-dir defaults to the config's download_dir; --password overrides
+# the .nzb's own embedded password. Both optional.
 cargo run --bin penne -- download path/to/release.nzb \
     --out-dir ./downloads \
     --password hunter2
@@ -246,10 +246,7 @@ cargo run --bin penne -- download path/to/release.nzb --stat
    parallel connections per server. A segment already cached from a
    previous, interrupted run is never re-fetched (see Resume below).
 2. **Decode** each fetched article body (yEnc) and cache the raw bytes for
-   resume. For encrypted releases (`<meta type="yenc_encrypted">true</meta>`),
-   Penne restores FF1-encrypted control lines and authenticates/decrypts the
-   body via XChaCha20-Poly1305 before assembly. Unauthenticated segments fail
-   closed with zero plaintext committed.
+   resume.
 3. **Assemble** each file from its decoded segments. A file missing any
    segment is left unwritten entirely — a partial file that looks complete
    is worse than none.
@@ -549,30 +546,14 @@ higher) run can still use it.
 
 ### Encrypted releases (yEnc encryption)
 
-Penne and Sugo support downloading releases encrypted with yEnc body and control-line
-encryption (XChaCha20-Poly1305 and Radix 253 FF1) according to the yEnc Body and Control
-Lines Encryption Standards v1.2.
-
-When an NZB includes `<meta type="yenc_encrypted">true</meta>`, decryption occurs
-automatically using the password embedded in `<meta type="password">`. Penne extracts the
-16-byte salt and unsigned 32-bit segment index directly from the 20-byte Line 1 bootstrap
-prefix, validates dual-bootstrap cross-header agreement against `=yencryption`, and decodes
-the article. NZB segments are plain NZB 1.1 records; the NZB carries no segment identity.
-
-Transport decryption requires the password to be present in `<meta type="password">`
-within the NZB. The CLI `--password` option is used for downstream archive extraction
-(unrar/7z unpacking) after download and assembly.
-
-Decryption operates on an article-by-article basis. Failed authentication releases
-zero plaintext and triggers alternate-server failover before failing the job.
-
-**Security and Threat Model:**
-- Content encryption at the article layer (XChaCha20-Poly1305) protects stored Usenet articles from unauthorized retrieval.
-- Transport encryption (TLS) secures the network connection to the Usenet provider, while content encryption secures payload data at rest on servers.
-- Because the encryption password is conventionally distributed within the NZB (`<meta type="password">`), confidentiality relies upon private distribution of the NZB file itself.
-
-**Protocol Status:**
-The yEnc encryption protocol is experimental. Canonical test vectors, key derivation parameters, and control-line formats are frozen for this release. An independent formal cryptographic review is recommended before stabilization.
+Penne (and Sugo, which uses the same pipeline) downloads releases encrypted
+with yEnc body and control-line encryption (experimental Standards v1.2):
+`<meta type="yenc_encrypted">true</meta>` in the NZB head enables transport
+decryption, using the password from `<meta type="password">`. Identity comes
+only from the article's own 20-byte Line 1 bootstrap; failed authentication
+releases zero plaintext and retries alternate servers before failing the job.
+The CLI `--password` option is unrelated — it is the archive-extraction
+password for post-download unpacking.
 
 ## Roadmap
 

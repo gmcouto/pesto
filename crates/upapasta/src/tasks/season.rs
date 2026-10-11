@@ -28,15 +28,15 @@ pub(crate) fn season_pack_skip_message(
     }
 }
 
-/// Returns an error when encrypted season consolidation is requested: it is
-/// rejected because individual episode uploads use independent session salts
-/// and segment indices.
+/// Returns an error when encrypted season consolidation is requested: not
+/// supported in v1 (no code path merges already-uploaded encrypted articles
+/// from separate sessions into one NZB).
 pub(crate) fn check_season_encryption_preflight(
     folder_mode: crate::app::FolderMode,
     is_encrypted: bool,
 ) -> Result<(), &'static str> {
     if folder_mode == crate::app::FolderMode::Season && is_encrypted {
-        Err("encrypted season consolidation is not supported: individual episode uploads use independent session salts and segment indices; individual per-episode NZBs have been generated")
+        Err("encrypted season consolidation is not supported: each episode would be uploaded as its own release before any combined NZB could reference it, and no code path exists to merge those session-specific encrypted articles afterwards; use per-file mode instead")
     } else {
         Ok(())
     }
@@ -59,17 +59,17 @@ mod season_nzb_gate_tests {
         assert!(check_season_encryption_preflight(FolderMode::Season, true).is_err());
     }
 
-    /// T16b: production `should_write_season_pack` is what the Season
+    /// Production `should_write_season_pack` is what the Season
     /// `fs::write` calls. `folder_ok == false` (had_failures, including
     /// MissingConfirmed with `--allow-incomplete-nzb`) is incomplete.
     #[test]
-    fn t16b_folder_ok_writes_pack() {
+    fn season_pack_folder_ok_writes_pack() {
         assert!(should_write_season_pack(false, true, false));
         assert_eq!(season_pack_skip_message(false, true, false), None);
     }
 
     #[test]
-    fn t16b_folder_ok_false_does_not_write_pack() {
+    fn season_pack_folder_ok_false_does_not_write_pack() {
         assert!(!should_write_season_pack(false, false, false));
         assert_eq!(
             season_pack_skip_message(false, false, false),
@@ -78,7 +78,7 @@ mod season_nzb_gate_tests {
     }
 
     #[test]
-    fn t16b_cancelled_does_not_write_pack() {
+    fn season_pack_cancelled_does_not_write_pack() {
         assert!(!should_write_season_pack(true, true, false));
         assert_eq!(
             season_pack_skip_message(true, true, false),
@@ -87,7 +87,7 @@ mod season_nzb_gate_tests {
     }
 
     #[test]
-    fn t16b_empty_segments_does_not_write_pack() {
+    fn season_pack_empty_segments_does_not_write_pack() {
         assert!(!should_write_season_pack(false, true, true));
         assert_eq!(
             season_pack_skip_message(false, true, true),

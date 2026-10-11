@@ -1,37 +1,19 @@
 //! Cryptographic layer for yEnc body and control-line encryption.
 //!
-//! # Protocol Overview (Experimental)
-//!
-//! This module implements the experimental yEnc encryption standards:
+//! Implements the experimental yEnc encryption standards v1.2:
 //! - **Body Encryption:** Per-segment XChaCha20-Poly1305 AEAD before yEnc encoding.
 //! - **Control-Line Encryption:** Radix 253 NIST SP 800-38G FF1 format-preserving encryption
 //!   of all `=ybegin`, `=ypart`, `=yend`, and `=yencryption` control lines.
 //! - **Key Derivation:** Argon2id (RFC 9106, t=1, m=64MB, p=4) with a 16-byte random session salt.
 //!
-//! # Threat Model
+//! See the root README's Encryption section for the wire format, threat
+//! model, and protocol status.
 //!
-//! - **Confidentiality:** Content encryption at the article layer protects stored Usenet articles
-//!   from parties that do not possess the NZB and password. However, because the password is
-//!   conventionally distributed via the NZB (`<meta type="password">`), release confidentiality
-//!   depends strictly on private distribution of the NZB file.
-//! - **Transport Security:** TLS protects network transit to and from NNTP providers;
-//!   article-layer encryption protects content at rest on Usenet backend storage.
-//! - **Integrity:** Poly1305 tags authenticate segment bodies. Authentication failure releases
-//!   zero unauthenticated plaintext and is treated as provider corruption eligible for tier failover.
-//!
-//! # Operational Constraints
-//!
-//! - **Bootstrap-only identity (v1.2):** Per-segment identity (salt +
-//!   globally unique `segmentIndex`) is carried exclusively in the 20-byte
-//!   bootstrap prefix of encrypted control Line 1 and the `=yencryption`
-//!   line — never in NZB XML attributes. Because each upload session uses
-//!   an independent random salt and a distinct global `segmentIndex` space,
-//!   merging NZBs from multiple sessions under one password is not
-//!   supported for encrypted uploads.
-//! - **Status:** The protocol is currently experimental (spec v1.2). All KDF
-//!   parameters, tweak/nonce derivation rules, control-line formats, and test
-//!   vectors are frozen for this release. An independent formal cryptographic
-//!   review is recommended before stabilization.
+//! **Operational constraint (v1.2):** per-segment identity (salt +
+//! globally unique `segmentIndex`) is carried exclusively in the 20-byte
+//! bootstrap prefix of encrypted control Line 1 and the `=yencryption`
+//! line — never in NZB XML attributes. Merging NZBs from multiple upload
+//! sessions under one password is not supported for encrypted uploads.
 
 pub(crate) mod adapter;
 pub(crate) mod body;

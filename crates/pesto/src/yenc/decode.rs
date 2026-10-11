@@ -324,12 +324,11 @@ mod tests {
 
     /// nyuu frames every article as multipart, even single-segment files
     /// (`=ybegin part=1 total=1` followed by `=ypart`). The decoder must skip
-    /// the `=ypart` line instead of yEnc-decoding it as payload.
+    /// the `=ypart` line instead of yEnc-decoding it as payload — an
+    /// interoperability necessity for encrypted nyuu posts reaching the
+    /// ordinary decode path.
     #[test]
     fn tolerates_ypart_in_single_part_article() {
-        // nyuu frames every article as multipart, even single-segment files
-        // (`=ybegin part=1 total=1` followed by `=ypart`). The decoder must
-        // skip the `=ypart` line instead of yEnc-decoding it as payload.
         let payload: Vec<u8> = (0u8..=255).cycle().take(300).collect();
         let encoded = encode_part(
             "single.bin",

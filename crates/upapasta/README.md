@@ -29,17 +29,16 @@ UpaPasta shares configuration with `pesto` (`$XDG_CONFIG_HOME/pesto/config.toml`
 
 ### Encryption
 
-To enable yEnc body and control-line encryption for posting tasks dispatched by UpaPasta, configure the `[encryption]` section in `config.toml`:
+UpaPasta uses pesto's opt-in yEnc body and control-line encryption (experimental
+Standards v1.2). Configure the `[encryption]` section in `config.toml`:
 
 ```toml
 [encryption]
 password = "MySecretPassword"
 ```
 
-When configured, uploads automatically encrypt bodies with XChaCha20-Poly1305, encrypt control lines with Radix 253 FF1 according to the yEnc Body and Control Lines Encryption Standards v1.2, and embed `<meta type="yenc_encrypted">true</meta>` with `<meta type="password">` in generated NZB 1.1 files, fully compatible with Penne, Sugo, SABnzbd, and NZBGet.
-
-> **Threat Model & Confidentiality:**
-> Content encryption at the article layer (XChaCha20-Poly1305) protects Usenet articles from parties lacking the NZB and password. However, because the encryption password is conventionally embedded in `<meta type="password">` within the generated NZB, confidentiality depends strictly on private distribution of the `.nzb` file.
-
-> **Note on Season Consolidation:**
-> Combined season packs are currently unsupported for encrypted uploads. Because each episode upload generates an independent random session salt and separate segment index space, consolidating multiple episodes into a single NZB with duplicate segment indices violates the specification. Preflight validation rejects encrypted season uploads before any episode transfer begins. When encryption is enabled in season mode, individual per-episode NZBs are created.
+When configured, uploads are encrypted and the generated NZB carries
+`<meta type="yenc_encrypted">true</meta>` with the `<meta type="password">`
+transport password. See the root pesto README's Encryption section for the
+wire format and status. Encrypted season consolidation is not supported in
+v1 and is rejected before any upload starts.

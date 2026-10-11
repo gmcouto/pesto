@@ -567,11 +567,14 @@ allocated from 1 upward, skipping any value whose big-endian bytes contain `0x0A
   provides dual-bootstrap agreement for downloaders.
 
 Generated NZBs strictly conform to the standard NZB 1.1 DTD without custom
-XML attributes on `<segment>` elements, including only `<meta type="yenc_encrypted">true</meta>`
-and `<meta type="password">` in `<head>`.
+XML attributes on `<segment>` elements. The `<head>` carries
+`<meta type="yenc_encrypted">true</meta>` and `<meta type="password">` (the
+transport password); the writer also emits the optional
+`yenc_version`/`yenc_cipher` provenance metas, which conforming readers gate
+fail-closed on unsupported values.
 
 Conforming downloaders detect `yenc_encrypted` and decrypt using the password
-in `<meta type="password">`.
+in `<meta type="password">` (or from their own configured sources).
 
 ### CLI usage
 
@@ -602,12 +605,12 @@ password = "MySecretPassword"
 
 ### Unsupported Operations
 
-- **Season Consolidation (`--season`):** Multi-session / season pack consolidation into a single combined NZB is currently **not supported** for encrypted releases. Each episode upload generates an independent random session salt and a separate global segment index space starting at 1. Combining multiple independent upload sessions into a single `.nzb` violates global segment index uniqueness and causes duplicate indices. Individual per-episode NZBs are generated instead.
-- **Archive Passwords vs Transport Encryption:** An archive password passed to `--password` encrypts the archive file itself. It is distinct from `--encrypt`, which activates yEnc body and control-line transport encryption. Conforming downloaders inspect `<meta type="yenc_encrypted">true</meta>` to distinguish transport encryption from archive extraction passwords.
+- **Season Consolidation (`--season`) and NZB merging:** Not supported for encrypted releases in v1. Encrypted consolidation would require re-uploading or merging articles that were already posted under their own session identity, and no code path exists for that; encrypted season/merge requests are rejected up front, before any upload starts.
+- **Archive Passwords vs Transport Encryption:** An archive password passed to `--password` encrypts the archive file itself. It is distinct from `--encrypt`, which activates yEnc body and control-line transport encryption. When both are set they must be equal (the NZB `<meta type="password">` carries the encryption password; conflicting combinations are rejected before posting). Conforming downloaders inspect `<meta type="yenc_encrypted">true</meta>` to distinguish transport encryption from archive extraction passwords.
 
 ### Protocol Status
 
-The yEnc encryption protocol is explicitly **experimental**. The key derivation (Argon2id), nonce/tweak rules, FF1 control-line format, and canonical test vectors are frozen for this release. An independent formal cryptographic review is recommended prior to stabilizing the specification across the ecosystem.
+The yEnc encryption protocol is explicitly **experimental** (spec v1.2). An independent formal cryptographic review is recommended prior to stabilizing the specification across the ecosystem.
 
 ---
 

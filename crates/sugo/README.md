@@ -96,10 +96,9 @@ Every call needs `?apikey=<key>` matching `[web].api_key`.
 
 ## Encrypted releases
 
-Sugo inherits `penne`'s yEnc body and control-line decryption support. When an
-uploaded or fetched NZB contains `<meta type="yenc_encrypted">true</meta>`,
-Sugo automatically authenticates and decrypts articles using the embedded
-`<meta type="password">` value before assembly.
+See `penne`'s README ("Encrypted releases"): Sugo runs the same pipeline and
+automatically authenticates/decrypts articles for NZBs carrying
+`<meta type="yenc_encrypted">true</meta>`.
 
 ## Architecture
 

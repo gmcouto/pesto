@@ -418,61 +418,11 @@ pesto --obfuscate=full --password=MySecret42 ./MyShow.S01/
 
 ## Encryption (yEnc body & control lines)
 
-Pesto supports opt-in yEnc body and control-line encryption according to the
-yEnc Body and Control Lines Encryption Standards v1.2. Article bodies are encrypted with
-XChaCha20-Poly1305 before yEnc encoding, and yEnc control lines (`=ybegin`, `=ypart`,
-`=yend`, `=yencryption`) are encrypted using Radix 253 NIST SP 800-38G FF1.
-
-Under the v1.2 standards, each posted Usenet article is self-describing
-and embeds its salt and segment index directly into the wire bytes (indices are
-allocated from 1 upward, skipping any value whose big-endian bytes contain `0x0A`/`0x0D`):
-- A 20-byte bootstrap prefix (`[16-byte raw salt][4-byte uint32_be(segmentIndex)]`)
-  is prepended to physical Line 1 (`=ybegin`) before FF1 ciphertext.
-- A canonical 5-token header line (`=yencryption cipher=XChaCha20-Poly1305 salt=<32_hex> index=<8_hex> tag=<32_hex>`)
-  provides dual-bootstrap agreement for downloaders.
-
-Generated NZBs strictly conform to the standard NZB 1.1 DTD without custom
-XML attributes on `<segment>` elements, including only `<meta type="yenc_encrypted">true</meta>`
-and `<meta type="password">` in `<head>`.
-
-Conforming downloaders detect `yenc_encrypted` and decrypt using the password
-in `<meta type="password">`.
-
-### CLI usage
-
-```bash
-# Encrypt with a random 24-character password (printed to stdout and stored in .nzb)
-pesto --encrypt movie.mkv
-
-# Encrypt with an explicit password
-pesto --encrypt=MySecret42 movie.mkv
-# or
-pesto --encrypt-password MySecret42 movie.mkv
-```
-
-### Configuration
-
-Enable encryption or set a default password in `config.toml`:
-
-```toml
-[encryption]
-password = "MySecretPassword"
-```
-
-### Threat Model
-
-- **Confidentiality:** Content encryption at the article layer (XChaCha20-Poly1305) protects stored Usenet articles from parties without the NZB and password. However, because the encryption password is conventionally stored in the NZB (`<meta type="password">`), confidentiality depends strictly on private distribution of the generated `.nzb`.
-- **Transport Security:** TLS continues to protect communication between the poster/downloader and NNTP servers, while content encryption protects payload data at rest on Usenet backend storage.
-- **Integrity & Authenticity:** Poly1305 tags authenticate segment bodies; tampering or truncation causes fail-closed authentication errors releasing zero unauthenticated plaintext.
-
-### Unsupported Operations
-
-- **Season Consolidation (`--season`):** Multi-session / season pack consolidation into a single combined NZB is currently **not supported** for encrypted releases. Each episode upload generates an independent random session salt and a separate global segment index space starting at 1. Combining multiple independent upload sessions into a single `.nzb` violates global segment index uniqueness and causes duplicate indices. Individual per-episode NZBs are generated instead.
-- **Archive Passwords vs Transport Encryption:** An archive password passed to `--password` encrypts the archive file itself. It is distinct from `--encrypt`, which activates yEnc body and control-line transport encryption. Conforming downloaders inspect `<meta type="yenc_encrypted">true</meta>` to distinguish transport encryption from archive extraction passwords.
-
-### Protocol Status
-
-The yEnc encryption protocol is explicitly **experimental**. The key derivation (Argon2id), nonce/tweak rules, FF1 control-line format, and canonical test vectors are frozen for this release. An independent formal cryptographic review is recommended prior to stabilizing the specification across the ecosystem.
+Pesto supports opt-in yEnc body and control-line encryption (XChaCha20-Poly1305
+bodies, Radix 253 FF1 control lines) according to the experimental yEnc Body
+and Control Lines Encryption Standards v1.2 — see the
+[Encryption section](../../README.md#encryption-yenc-body--control-lines) in
+the root README for wire format, CLI usage, configuration, and status.
 
 ---
 

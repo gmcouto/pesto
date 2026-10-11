@@ -421,7 +421,7 @@ mod index_framing_tests {
 
     #[test]
     fn nth_safe_segment_index_equivalent_to_naive_enumeration() {
-        // Equivalence (PE-9 acceptance): the base-254 digit allocator must
+        // Equivalence: the base-254 digit allocator must
         // agree with the naive "next permitted value" enumeration over a
         // range that crosses the byte-boundary carries (0xFF→0x00) and both
         // forbidden pairs at every byte position.

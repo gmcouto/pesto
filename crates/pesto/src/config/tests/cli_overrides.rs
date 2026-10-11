@@ -245,7 +245,7 @@ fn cli_rejects_conflicting_encrypt_and_nzb_password() {
 
 #[test]
 fn cli_rejects_conflicting_archive_and_encrypt_password() {
-    // PE-14 (mirrors ngPost NP-2): `--compress --password A --encrypt E` with
+    // `--compress --password A --encrypt E` with
     // A != E would silently lose the archive password — the NZB
     // `<meta type="password">` carries only the encryption password — so the
     // combination is rejected at config resolution, before any posting work.

@@ -135,7 +135,7 @@ mod tests {
     fn conflicting_archive_and_encrypt_passwords_rejected() {
         // `--password A --encrypt E` (A != E): the NZB can carry only E, so
         // the archive password would be silently lost — reject before any
-        // posting work (PE-14; mirrors ngPost NP-2's rule).
+        // posting work.
         let err = validate_password_compatibility(Some("archive-pw"), Some("encrypt-pw"))
             .expect_err("conflicting archive/encrypt passwords must be rejected");
         assert!(err.to_string().contains("conflicting passwords"));
