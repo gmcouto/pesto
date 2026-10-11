@@ -626,7 +626,7 @@ async fn test_encrypted_upload_multifile_par2_obfuscated() {
         std::fs::write(&path1, &data1).unwrap();
         std::fs::write(&path2, &data2).unwrap();
 
-        let mut config = make_config_with_opts(port, Some("obfpass456".into()), 10, obf_mode); // ggignore
+        let mut config = make_config_with_opts(port, Some("obfpass456".into()), 10, obf_mode);
         config.file_counter = false;
         let files = vec![
             pesto::walk::InputFile {

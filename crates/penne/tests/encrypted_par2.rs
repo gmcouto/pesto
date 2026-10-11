@@ -36,13 +36,20 @@ fn encode_article(
     file_size: u64,
     spec: PartSpec,
     payload: &[u8],
-    _segment_index: u32,
+    segment_index: u32,
 ) -> Vec<u8> {
     let uploader = UploadEncryptionAdapter::new(session.clone());
     let mut body = Vec::new();
     let encoded = uploader
         .encode_article(
-            file_name, file_size, spec, payload, 128, None, 1u32, &mut body,
+            file_name,
+            file_size,
+            spec,
+            payload,
+            128,
+            None,
+            segment_index,
+            &mut body,
         )
         .expect("encode article failed");
     encoded.body

@@ -125,6 +125,11 @@ async fn prepare_ready(shared: &Arc<Shared>, mut task: PostTask) -> Option<Ready
                     server_idx: existing.server_idx,
                     file_index: task.meta.file_index,
                     total_files: shared.total_files,
+                    // The article was already posted encrypted under this
+                    // identity (yEnc Body Encryption Standard v1.2 §8); a
+                    // later `--check` repost of it must reuse the same
+                    // segment index, so it survives the resume re-injection.
+                    segment_index: task.segment_index,
                 };
                 shared.results.lock().unwrap().push(seg.clone());
                 if action == ResumeAction::ReStatStoredId {
@@ -414,6 +419,7 @@ pub(super) async fn worker(
                     server_idx: 0,
                     file_index: p.task.meta.file_index,
                     total_files: shared.total_files,
+                    segment_index: p.task.segment_index,
                 });
                 let bytes = p.task.data.len() as u64;
                 shared.release_buffer(p.task.data);

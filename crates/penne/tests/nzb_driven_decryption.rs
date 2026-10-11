@@ -64,13 +64,20 @@ fn encode_test_article(
     file_size: u64,
     spec: PartSpec,
     payload: &[u8],
-    _segment_index: u32,
+    segment_index: u32,
 ) -> Vec<u8> {
     let uploader = UploadEncryptionAdapter::new(session.clone());
     let mut body = Vec::new();
     let encoded = uploader
         .encode_article(
-            file_name, file_size, spec, payload, 128, None, 1u32, &mut body,
+            file_name,
+            file_size,
+            spec,
+            payload,
+            128,
+            None,
+            segment_index,
+            &mut body,
         )
         .expect("encode article failed");
     encoded.body
@@ -397,6 +404,11 @@ async fn test_download_accepts_boundary_segment_indices() {
     let salt = [0x3au8; 16];
     let session = Arc::new(EncryptionSession::new(password, salt).unwrap());
     let cases = [
+        (1u32, "boundary-one.bin"),
+        (9u32, "boundary-nine.bin"),
+        (11u32, "boundary-eleven.bin"),
+        (12u32, "boundary-twelve.bin"),
+        (14u32, "boundary-fourteen.bin"),
         (u32::MAX - 1, "boundary-max-minus-one.bin"),
         (u32::MAX, "boundary-max.bin"),
     ];

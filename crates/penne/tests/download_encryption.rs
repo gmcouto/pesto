@@ -610,7 +610,7 @@ async fn test_multipart_partial_auth_failure_cleanup() {
             &part2_payload,
             128,
             None,
-            1u32,
+            2u32,
             &mut body2,
         )
         .unwrap();
