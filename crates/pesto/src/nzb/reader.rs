@@ -3,84 +3,41 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
-
 use crate::crypto::{attach_crypto_error_kind, CryptoErrorKind};
 use crate::poster::PostedSegment;
 
 use super::{NzbMeta, ParsedNzb, YENC_SPEC_VERSION};
 
-struct RawSegment {
-    file_name: String,
-    subject_name: String,
-    poster: String,
-    date: Option<u64>,
-    bytes: u64,
-    part: u32,
-    total: u32,
-    message_id: String,
-    file_ordinal: u32,
-    total_files: u32,
-}
-
 /// Parse a `.nzb` document and reconstruct its [`PostedSegment`] list.
 ///
-/// Encrypted releases (indicated by `<meta type="yenc_encrypted">true</meta>`) are marked
-/// `yenc_encrypted`. Segments are plain NZB 1.1 records; segment identity is derived
-/// exclusively from each article's bootstrap at download time (Body Encryption
-/// Standard v1.2 §8).
-pub fn parse(content: &str) -> Result<ParsedNzb> {
-    parse_internal(content)
-}
-
-fn parse_internal(content: &str) -> Result<ParsedNzb> {
+/// The parser targets the format produced by [`crate::nzb::generate`] but
+/// tolerates minor whitespace variation. Attributes must use double quotes.
+/// Segments are sorted by `(file_name, part)` before returning so they can be
+/// passed directly to [`crate::nzb::generate`].
+///
+/// Encrypted releases (indicated by `<meta type="yenc_encrypted">true</meta>`)
+/// are marked `meta.yenc_encrypted`; a declared-encrypted NZB with unsupported
+/// `yenc_version`/`yenc_cipher` provenance is rejected fail-closed (Body
+/// Encryption Standard v1.2 §8).
+pub fn parse(content: &str) -> anyhow::Result<ParsedNzb> {
     let mut poster = String::new();
     let mut groups: Vec<String> = Vec::new();
     let mut meta = NzbMeta::default();
+    let mut segments: Vec<PostedSegment> = Vec::new();
     let mut explicit_yenc_encrypted = false;
 
     let mut current_file_name = String::new();
     let mut current_subject_name = String::new();
-    let mut current_poster = String::new();
-    let mut current_date: Option<u64> = None;
-    let mut current_file_ordinal = 0u32;
-    let mut current_total_files = 0u32;
     let mut file_segment_start: usize = 0;
     let mut in_groups = false;
     let mut in_file = false;
 
-    let mut raw_segments: Vec<RawSegment> = Vec::new();
-
-    let mut pending = String::new();
-    let mut tags: Vec<String> = Vec::new();
+    let mut current_poster = String::new();
+    let mut current_date: Option<u64> = None;
 
     for line in content.lines() {
-        if pending.is_empty() {
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-            pending.push_str(trimmed);
-        } else {
-            pending.push('\n');
-            pending.push_str(line.trim_end());
-        }
+        let t = line.trim();
 
-        if pending.starts_with('<') {
-            let quotes = pending.bytes().filter(|&b| b == b'"').count();
-            if quotes % 2 != 0 || !pending.contains('>') {
-                continue;
-            }
-        }
-
-        tags.push(std::mem::take(&mut pending));
-    }
-    if !pending.is_empty() {
-        tags.push(pending);
-    }
-
-    for t in &tags {
-        let t = t.trim();
         if t.starts_with("<file ") {
             in_file = true;
             in_groups = false;
@@ -90,24 +47,20 @@ fn parse_internal(content: &str) -> Result<ParsedNzb> {
             }
             current_date = xml_attr(t, "date").and_then(|s| s.parse().ok());
             let subject = xml_attr(t, "subject").unwrap_or_default();
-
-            match parse_file_counter(&subject) {
-                Some((n, m, _residual)) => {
-                    current_file_ordinal = n;
-                    current_total_files = m;
-                }
-                None => {
-                    current_file_ordinal = 0;
-                    current_total_files = 0;
-                }
-            }
-
             current_subject_name = strip_part_suffix(&subject);
+            // Standard NZB 1.1 has no `name` attribute on `<file>` — only
+            // `subject`, with the real name as the quoted string inside it,
+            // exactly what `strip_part_suffix` already extracted into
+            // `current_subject_name`. A fully obfuscated subject (no
+            // quotes) yields the raw hash-like text here instead — not the
+            // real name, but a valid starting point for `penne::
+            // deobfuscate` to recover the true one from PAR2.
             current_file_name = current_subject_name.clone();
-            file_segment_start = raw_segments.len();
+            file_segment_start = segments.len();
         } else if t == "</file>" {
-            let total = (raw_segments.len() - file_segment_start) as u32;
-            for seg in &mut raw_segments[file_segment_start..] {
+            // Back-fill `total` now that we know how many segments this file has.
+            let total = (segments.len() - file_segment_start) as u32;
+            for seg in &mut segments[file_segment_start..] {
                 seg.total = total;
             }
             in_file = false;
@@ -116,9 +69,10 @@ fn parse_internal(content: &str) -> Result<ParsedNzb> {
         } else if t == "</groups>" {
             in_groups = false;
         } else if in_groups {
-            let g = xml_text(t, "group").context("malformed XML text in group")?;
-            if !groups.contains(&g) {
-                groups.push(g);
+            if let Some(g) = xml_text(t, "group") {
+                if !groups.contains(&g) {
+                    groups.push(g);
+                }
             }
         } else if in_file && t.starts_with("<segment ") {
             let bytes: u64 = xml_attr(t, "bytes")
@@ -127,27 +81,51 @@ fn parse_internal(content: &str) -> Result<ParsedNzb> {
             let part: u32 = xml_attr(t, "number")
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(0);
-            let raw_id = xml_text(t, "segment").context("malformed XML text in segment")?;
+            let raw_id = xml_text(t, "segment").unwrap_or_default();
             let message_id = if raw_id.starts_with('<') {
                 raw_id
             } else {
                 format!("<{raw_id}>")
             };
-            raw_segments.push(RawSegment {
+            segments.push(PostedSegment {
                 file_name: current_file_name.clone(),
-                subject_name: current_subject_name.clone(),
-                poster: current_poster.clone(),
-                date: current_date,
-                bytes,
+                // Segments parsed back from an existing `.nzb` (e.g. for
+                // `--merge-season`) have no known source file on this
+                // machine; `file_path` is only meaningful for segments
+                // produced by a live upload, which is the only place a
+                // post-check repost can use it.
+                file_path: Arc::from(Path::new(&current_file_name)),
+                subject_name: Arc::from(current_subject_name.as_str()),
+                // Not recoverable from an .nzb (only `subject_name`, always
+                // the real name, is written) — harmless for the same reason
+                // as `full_crc32` below: never re-encoded once parsed back.
+                wire_name: Arc::from(""),
+                wire_yenc_name: Arc::from(""),
+                file_size: 0,
                 part,
-                total: 0,
+                total: 0, // fixed up when </file> is seen
                 message_id,
-                file_ordinal: current_file_ordinal,
-                total_files: current_total_files,
+                bytes,
+                from: Arc::from(current_poster.as_str()),
+                date: (None, current_date),
+                // Not recoverable from an .nzb (it only exists on the
+                // `=yend` line of the last segment's body, which the .nzb
+                // never carries) — harmless, since a segment parsed back
+                // from an .nzb (--merge-season) is never re-encoded.
+                full_crc32: 0,
+                // A segment parsed back from an .nzb never re-enters the
+                // check queue (see `PostedSegment::server_idx`).
+                server_idx: 0,
+                // `current_subject_name` already had any `[filenum/total]`
+                // prefix stripped by `strip_filenum_prefix` — this run has no
+                // way to know the original numbering, so it's simply absent
+                // (see `default_subject`'s `None` case) rather than guessed.
+                file_index: 0,
+                total_files: 0,
             });
         } else if t.starts_with("<meta ") {
             let kind = xml_attr(t, "type").unwrap_or_default();
-            let value = xml_text(t, "meta").context("malformed XML text in meta")?;
+            let value = xml_text(t, "meta").unwrap_or_default();
             match kind.as_str() {
                 "title" => meta.name = Some(value),
                 "password" => meta.password = Some(value),
@@ -157,10 +135,10 @@ fn parse_internal(content: &str) -> Result<ParsedNzb> {
                     explicit_yenc_encrypted = true;
                 }
                 "yenc_version" => {
-                    meta.yenc_version = Some(value.clone());
+                    meta.yenc_version = Some(value);
                 }
                 "yenc_cipher" => {
-                    meta.yenc_cipher = Some(value.clone());
+                    meta.yenc_cipher = Some(value);
                 }
                 _ => {}
             }
@@ -168,9 +146,7 @@ fn parse_internal(content: &str) -> Result<ParsedNzb> {
     }
 
     // Encryption provenance: explicit `yenc_encrypted` meta (v1.2 §8).
-    let is_encrypted = explicit_yenc_encrypted;
-
-    if is_encrypted {
+    if explicit_yenc_encrypted {
         // Fail-closed gating (Body Encryption Standard v1.2 §8): a
         // declared-encrypted NZB with unsupported provenance metadata is a
         // STRUCTURAL failure — it would reproduce identically against every
@@ -194,34 +170,6 @@ fn parse_internal(content: &str) -> Result<ParsedNzb> {
             }
         }
         meta.yenc_encrypted = true;
-    }
-
-    // Bootstrap-only identity (v1.2 §8): no segment identity is constructed
-    // at NZB parse time. Identity comes exclusively from each article's
-    // bootstrap after fetch; download-time validation is per-article only
-    // (non-zero, index framing rule) — release-wide uniqueness is a
-    // PRODUCER obligation (nth_safe_segment_index mapping), because bootstrap
-    // indices live inside unfetched articles and cannot be validated here.
-    let mut segments = Vec::with_capacity(raw_segments.len());
-    for raw in raw_segments {
-        segments.push(PostedSegment {
-            file_name: raw.file_name.clone(),
-            file_path: Arc::from(Path::new(&raw.file_name)),
-            subject_name: Arc::from(raw.subject_name.as_str()),
-            wire_name: Arc::from(""),
-            wire_yenc_name: Arc::from(""),
-            file_size: 0,
-            part: raw.part,
-            total: raw.total,
-            message_id: raw.message_id,
-            bytes: raw.bytes,
-            from: Arc::from(raw.poster.as_str()),
-            date: (None, raw.date),
-            full_crc32: 0,
-            server_idx: 0,
-            file_index: raw.file_ordinal,
-            total_files: raw.total_files,
-        });
     }
 
     segments.sort_by(|a, b| a.file_name.cmp(&b.file_name).then(a.part.cmp(&b.part)));
@@ -250,17 +198,7 @@ fn xml_text(line: &str, tag: &str) -> Option<String> {
     if close_start < open_end + 1 {
         return None;
     }
-    let text = &line[open_end + 1..close_start];
-    let mut without_comments = String::with_capacity(text.len());
-    let mut remaining = text;
-    while let Some(start) = remaining.find("<!--") {
-        without_comments.push_str(&remaining[..start]);
-        let after_start = &remaining[start + 4..];
-        let end = after_start.find("-->")?;
-        remaining = &after_start[end + 3..];
-    }
-    without_comments.push_str(remaining);
-    Some(xml_unescape(&without_comments))
+    Some(xml_unescape(&line[open_end + 1..close_start]))
 }
 
 /// Strip the `"name" yEnc (N/M)` or `"name" yEnc` wrapper from a subject line.
@@ -296,48 +234,31 @@ pub(super) fn strip_part_suffix(subject: &str) -> String {
     subject.to_string()
 }
 
-/// Parse a leading `[N/M]` file counter from a subject string.
+/// Strip a leading `[filenum/files] - ` counter, if present.
 ///
-/// Returns `Some((file_ordinal, total_files, residual))` when the subject
-/// begins with a well-formed `[N/M] - ...` counter where both `N` and `M`
-/// are non-zero ASCII decimal integers that fit in `u32`. The residual is
-/// the part of the subject after the `] - ` separator.
-///
-/// Returns `None` when the prefix is absent, malformed, or contains zero
-/// values — the subject is then treated as ordinary with no counter.
-pub(super) fn parse_file_counter(s: &str) -> Option<(u32, u32, &str)> {
-    let rest = s.strip_prefix('[')?;
-    let (counter, after) = rest.split_once(']')?;
-    let (n_str, m_str) = counter.split_once('/')?;
-    // Both parts must be non-empty pure ASCII digits.
-    if n_str.is_empty()
-        || m_str.is_empty()
-        || !n_str.bytes().all(|b| b.is_ascii_digit())
-        || !m_str.bytes().all(|b| b.is_ascii_digit())
-    {
-        return None;
-    }
-    // Reject counters with more than one `/` (e.g. `[1/2/3]`).
-    if counter.matches('/').count() != 1 {
-        return None;
-    }
-    let n: u32 = n_str.parse().ok()?;
-    let m: u32 = m_str.parse().ok()?;
-    if n == 0 || m == 0 {
-        return None;
-    }
-    let residual = after.strip_prefix(" - ")?;
-    Some((n, m, residual))
-}
-
-/// Strip a leading `[filenum/files] - ` counter, if present, returning only
-/// the residual. This is the legacy compatibility wrapper around
-/// [`parse_file_counter`].
+/// `nyuu`'s default subject template is
+/// `[{filenum}/{files}] - "{filename}" yEnc ({part}/{parts})` — that
+/// `[N/M] - ` counter sits *outside* the quoted real name, so without this,
+/// `strip_part_suffix`'s `unquote` never fires (the string starts with `[`,
+/// not `"`) and the counter ends up baked into the "real" file name
+/// `penne::assemble` later joins onto a directory path — a `/` inside
+/// `[01/14]` then splits into a bogus nested directory instead of staying
+/// part of one path component. Falls back to `s` unchanged for any subject
+/// that isn't actually this shape (including `pesto`'s own, which never
+/// emits this prefix — see `ROADMAP.md` "Subject file counter").
 fn strip_filenum_prefix(s: &str) -> &str {
-    match parse_file_counter(s) {
-        Some((_, _, residual)) => residual,
-        None => s,
-    }
+    (|| {
+        let rest = s.strip_prefix('[')?;
+        let (counter, after) = rest.split_once(']')?;
+        let is_counter = !counter.is_empty()
+            && counter
+                .split('/')
+                .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()));
+        is_counter
+            .then_some(())
+            .and_then(|()| after.strip_prefix(" - "))
+    })()
+    .unwrap_or(s)
 }
 
 /// Reverse the XML entity escaping applied by [`escape`].

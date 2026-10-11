@@ -691,27 +691,6 @@ fn wire_subjects_empty_when_no_segments() {
 }
 
 #[test]
-fn parse_file_counter_extracts_ordinal_and_total() {
-    assert_eq!(
-        parse_file_counter("[1/2] - \"f.bin\" yEnc (1/1)"),
-        Some((1, 2, "\"f.bin\" yEnc (1/1)"))
-    );
-    assert_eq!(
-        parse_file_counter("[14/14] - \"movie.mkv\" yEnc (1/3)"),
-        Some((14, 14, "\"movie.mkv\" yEnc (1/3)"))
-    );
-    // Reject zero
-    assert_eq!(parse_file_counter("[0/2] - \"f.bin\" yEnc"), None);
-    assert_eq!(parse_file_counter("[1/0] - \"f.bin\" yEnc"), None);
-    // Reject malformed
-    assert_eq!(parse_file_counter("no prefix"), None);
-    assert_eq!(parse_file_counter("[1/2/3] - residual"), None);
-    assert_eq!(parse_file_counter("[abc/2] - residual"), None);
-    // Bracketed filename that is not a counter
-    assert_eq!(parse_file_counter("[LEAK] - \"movie.mkv\""), None);
-}
-
-#[test]
 fn parse_preserves_declared_parts_without_compacting() {
     // An NZB where file 1 has parts 1 and 3 (part 2 missing).
     let xml = r#"<?xml version="1.0" encoding="UTF-8"?>

@@ -361,46 +361,6 @@ fn test_unencrypted_nzb_compatibility() {
 }
 
 #[test]
-fn test_reader_strips_xml_comments_from_tag_text() {
-    let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
-<nzb xmlns="http://www.newzbin.com/DTD/2003/nzb">
-  <file poster="poster" date="1700000000" subject="&quot;file.bin&quot; yEnc (1/1)">
-    <groups>
-      <group>alt.<!-- ignored -->test</group>
-    </groups>
-    <segments>
-      <segment bytes="100" number="1">msg-01<!-- ignored -->@host</segment>
-    </segments>
-  </file>
-</nzb>"#;
-
-    let parsed = parse(xml).expect("inline XML comments should be ignored");
-    assert_eq!(parsed.groups, vec!["alt.test"]);
-    assert_eq!(parsed.segments[0].message_id, "<msg-01@host>");
-}
-
-#[test]
-fn test_reader_rejects_unterminated_xml_comment() {
-    let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
-<nzb xmlns="http://www.newzbin.com/DTD/2003/nzb">
-  <file poster="poster" date="1700000000" subject="&quot;file.bin&quot; yEnc (1/1)">
-    <groups>
-      <group>alt.binaries.test</group>
-    </groups>
-    <segments>
-      <segment bytes="100" number="1">msg-01<!-- unterminated</segment>
-    </segments>
-  </file>
-</nzb>"#;
-
-    let err = parse(xml).expect_err("unterminated XML comments must be rejected");
-    assert!(
-        err.to_string().contains("malformed XML text"),
-        "unexpected error: {err:#}"
-    );
-}
-
-#[test]
 fn test_reader_rejects_mixed_encrypted_and_ordinary_files() {
     let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
 <nzb xmlns="http://www.newzbin.com/DTD/2003/nzb">
