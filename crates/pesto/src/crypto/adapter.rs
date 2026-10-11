@@ -10,6 +10,64 @@ use super::control;
 use super::kdf::EncryptionSession;
 use crate::yenc::{self, DecodedPart, EncodedPart, PartSpec};
 
+/// Build the canonical `=yencryption` control line (Body Encryption Standard
+/// v1.2 §4: exactly `CANONICAL_YENCRYPTION_LINE_LEN` bytes + `\r\n`).
+fn format_yencryption_line(salt: &[u8; 16], tag: &[u8; 16], segment_index: u32) -> String {
+    use std::fmt::Write;
+    let mut line = String::with_capacity(CANONICAL_YENCRYPTION_LINE_LEN + 2);
+    line.push_str("=yencryption cipher=XChaCha20-Poly1305 salt=");
+    for b in salt {
+        write!(&mut line, "{b:02x}").expect("writing to a String cannot fail");
+    }
+    write!(&mut line, " index={segment_index:08x} tag=").expect("writing to a String cannot fail");
+    for b in tag {
+        write!(&mut line, "{b:02x}").expect("writing to a String cannot fail");
+    }
+    debug_assert_eq!(line.len(), CANONICAL_YENCRYPTION_LINE_LEN);
+    line.push_str("\r\n");
+    line
+}
+
+/// Insert the `=yencryption` line into an already yEnc-encoded article body:
+/// immediately after `=ypart` for a multipart article, or after `=ybegin` for
+/// a single-part one (v1.2 Body Std §4 placement). Crypto-only seam — the
+/// ordinary codec knows nothing about `=yencryption`. Fails without touching
+/// `body` when a multipart article lacks its `=ypart` line (recoverable
+/// encoding error, never a panic).
+fn insert_yencryption_line(
+    body: &mut Vec<u8>,
+    salt: &[u8; 16],
+    tag: &[u8; 16],
+    segment_index: u32,
+    multipart: bool,
+) -> Result<()> {
+    let line = format_yencryption_line(salt, tag, segment_index);
+    let insertion_idx = if multipart {
+        let ypart_rel = body
+            .windows(7)
+            .position(|w| w == b"\n=ypart")
+            .context("MISSING_YPART_LINE: yEnc body lacks the =ypart framing the =yencryption line must follow")?;
+        let ypart_pos = ypart_rel + 1;
+        let nl_pos = body[ypart_pos..]
+            .iter()
+            .position(|&b| b == b'\n')
+            .context("MISSING_YPART_LINE: yEnc body lacks the =ypart framing the =yencryption line must follow")?;
+        ypart_pos + nl_pos + 1
+    } else {
+        body.iter()
+            .position(|&b| b == b'\n')
+            .map(|nl_pos| nl_pos + 1)
+            .context("encrypted yEnc body has no line terminator")?
+    };
+
+    let mut out = Vec::with_capacity(body.len() + line.len());
+    out.extend_from_slice(&body[..insertion_idx]);
+    out.extend_from_slice(line.as_bytes());
+    out.extend_from_slice(&body[insertion_idx..]);
+    *body = out;
+    Ok(())
+}
+
 /// Thin adapter presenting standard yEnc encode contract for encrypted articles.
 pub struct UploadEncryptionAdapter {
     session: Arc<EncryptionSession>,
@@ -52,21 +110,18 @@ impl UploadEncryptionAdapter {
             body,
         );
 
-        // Format and insert the =yencryption control line at the codec seam
-        // (`yenc::insert_yencryption_line`): after =ypart (multipart) or
-        // after =ybegin (single-part). A multipart body missing =ypart fails
-        // with the typed `MISSING_YPART_LINE` error instead of a generic
-        // context message.
+        // Format and insert the =yencryption control line: after =ypart
+        // (multipart) or after =ybegin (single-part). A multipart body
+        // missing =ypart fails with `MISSING_YPART_LINE` instead of
+        // producing a silently misplaced header.
         let salt = self.session.salt();
-        yenc::insert_yencryption_line(
+        insert_yencryption_line(
             &mut encoded.body,
             &salt,
             &tag,
             segment_index,
             spec.total > 1,
-        )
-        // Keep `MissingYPartLineError` as the downcastable error-chain root.
-        .map_err(anyhow::Error::new)?;
+        )?;
 
         // Encrypt control lines using FF1
         let wire_body =
@@ -85,6 +140,9 @@ pub struct YEncryptionParams {
     pub tag: [u8; 16],
 }
 
+/// Byte length of the canonical `=yencryption` line (v1.2 Body Std §4).
+pub const CANONICAL_YENCRYPTION_LINE_LEN: usize = 128;
+
 /// Parse parameters from `=yencryption ...` control line.
 ///
 /// Accepts only the canonical token sequence:
@@ -101,165 +159,107 @@ pub struct YEncryptionParams {
 /// `yenc/decode.rs`) historically allow flexible whitespace and are
 /// deliberately NOT made strict here.
 pub fn parse_yencryption_line(line: &[u8]) -> Result<YEncryptionParams> {
-    ensure!(line.starts_with(b"=yencryption"), "not a =yencryption line");
+    ensure!(
+        line.starts_with(b"=yencryption"),
+        "INVALID_TOKEN_COUNT: line does not begin with =yencryption token"
+    );
     let text =
         std::str::from_utf8(line).map_err(|_| anyhow::anyhow!("invalid utf8 in =yencryption"))?;
-    // Strict single-SP split: tab or double-space anywhere yields empty
-    // tokens / wrong counts and is rejected as INVALID_WHITESPACE below.
+    // Strict single-SP split (v1.2 Control Std §3): tab or repeated/edge
+    // space anywhere is INVALID_WHITESPACE.
     if text.contains('\t') || text.contains("  ") || text.starts_with(' ') || text.ends_with(' ') {
         bail!("INVALID_WHITESPACE: tab or repeated space in =yencryption line");
     }
     let tokens: Vec<&str> = text.split(' ').collect();
-
-    ensure!(
-        tokens.first() == Some(&"=yencryption"),
-        "line does not begin with =yencryption token"
-    );
-
-    // Reject duplicate parameters
-    let mut seen_keys = std::collections::HashSet::new();
-    for token in tokens.iter().skip(1) {
-        if let Some((k, _)) = token.split_once('=') {
-            if !seen_keys.insert(k) {
-                bail!("INVALID_TOKEN_COUNT: duplicate parameter in =yencryption header");
-            }
+    if tokens.len() != 5 {
+        // The vectors distinguish a missing first parameter from a generic
+        // count error: bare `=yencryption` (or anything without a cipher
+        // token) is MISSING_CIPHER.
+        if tokens.len() < 2 && !tokens.iter().skip(1).any(|t| t.starts_with("cipher=")) {
+            bail!("MISSING_CIPHER: cipher parameter missing");
         }
-    }
-
-    if tokens.len() < 2 {
-        bail!("MISSING_CIPHER: cipher parameter missing");
-    }
-
-    // Token 1 must be cipher=. The canonical validator (v1.2 vectors) raises
-    // UNSUPPORTED_CIPHER for a reordered cipher token and INVALID_TOKEN_COUNT
-    // for a missing one.
-    if !tokens[1].starts_with("cipher=") {
-        if tokens.iter().skip(1).any(|t| t.starts_with("cipher=")) {
-            bail!("UNSUPPORTED_CIPHER: cipher parameter out of order");
-        } else {
-            bail!("INVALID_TOKEN_COUNT: missing cipher parameter");
-        }
-    }
-    let cipher_val = &tokens[1]["cipher=".len()..];
-    // An empty cipher value is UNSUPPORTED_CIPHER (canonical vector
-    // malformed-header-03): there is no cipher to support.
-    if cipher_val.is_empty() || cipher_val != "XChaCha20-Poly1305" {
-        bail!("UNSUPPORTED_CIPHER: unsupported cipher {cipher_val}");
-    }
-
-    if tokens.len() < 5 {
         bail!(
             "INVALID_TOKEN_COUNT: expected 5 tokens, got {}",
             tokens.len()
         );
     }
-    if tokens.len() > 5 {
-        bail!("INVALID_TOKEN_COUNT: unexpected additional parameters in =yencryption header");
+    let (cipher, salt, index, tag) = (&tokens[1], &tokens[2], &tokens[3], &tokens[4]);
+    if !cipher.starts_with("cipher=") {
+        bail!("UNSUPPORTED_CIPHER: cipher parameter out of order");
     }
-
-    // Token 2 must be salt=
-    if !tokens[2].starts_with("salt=") {
-        if tokens.iter().skip(1).any(|t| t.starts_with("salt=")) {
-            bail!("REORDERED_HEADER: salt parameter out of order");
-        } else {
-            bail!("INVALID_TOKEN_COUNT: missing salt parameter");
-        }
-    }
-    let salt_str = &tokens[2]["salt=".len()..];
-    if salt_str.len() != 32 {
+    if cipher["cipher=".len()..] != *"XChaCha20-Poly1305" {
         bail!(
-            "INVALID_SALT_LENGTH: salt must be exactly 32 hex characters, got {}",
-            salt_str.len()
+            "UNSUPPORTED_CIPHER: unsupported cipher {}",
+            &cipher["cipher=".len()..]
         );
     }
-    if salt_str.chars().any(|c| matches!(c, 'A'..='F')) {
-        bail!("UPPERCASE_HEX: salt contains uppercase hex characters");
+    if !salt.starts_with("salt=") {
+        bail!("REORDERED_HEADER: salt parameter out of order");
     }
-    if salt_str
-        .chars()
-        .any(|c| !c.is_ascii_digit() && !matches!(c, 'a'..='f'))
-    {
-        bail!("INVALID_SALT_HEX: salt contains non-hex or non-lowercase characters");
+    if !index.starts_with("index=") {
+        bail!("REORDERED_HEADER: index parameter out of order");
     }
+    if !tag.starts_with("tag=") {
+        bail!("REORDERED_HEADER: tag parameter out of order");
+    }
+
+    let salt_bytes = decode_hex_field(
+        &salt["salt=".len()..],
+        32,
+        "INVALID_SALT_LENGTH",
+        "INVALID_SALT_HEX",
+    )?;
     let mut salt = [0u8; 16];
-    for i in 0..16 {
-        salt[i] = u8::from_str_radix(&salt_str[i * 2..i * 2 + 2], 16)
-            .map_err(|_| anyhow::anyhow!("INVALID_SALT_HEX: salt contains non-hex characters"))?;
-    }
+    salt.copy_from_slice(&salt_bytes);
+    let index_str = &index["index=".len()..];
+    let index_bytes = decode_hex_field(index_str, 8, "INVALID_INDEX_LENGTH", "INVALID_INDEX_HEX")?;
+    let segment_index = u32::from_be_bytes(index_bytes.try_into().unwrap());
+    let tag_bytes = decode_hex_field(
+        &tag["tag=".len()..],
+        32,
+        "INVALID_TAG_LENGTH",
+        "INVALID_TAG_HEX",
+    )?;
+    let mut tag = [0u8; 16];
+    tag.copy_from_slice(&tag_bytes);
 
-    // Token 3 must be index=
-    if !tokens[3].starts_with("index=") {
-        if tokens.iter().skip(1).any(|t| t.starts_with("index=")) {
-            bail!("REORDERED_HEADER: index parameter out of order");
-        } else {
-            bail!("INVALID_TOKEN_COUNT: missing index parameter");
-        }
-    }
-    let index_str = &tokens[3]["index=".len()..];
-    if index_str.len() != 8 {
-        bail!(
-            "INVALID_INDEX_LENGTH: index must be exactly 8 hex characters, got {}",
-            index_str.len()
-        );
-    }
-    if index_str.chars().any(|c| matches!(c, 'A'..='F')) {
-        bail!("UPPERCASE_HEX: index contains uppercase hex characters");
-    }
-    if index_str
-        .chars()
-        .any(|c| !c.is_ascii_digit() && !matches!(c, 'a'..='f'))
-    {
-        bail!("INVALID_INDEX_HEX: index contains non-hex characters");
-    }
-    let segment_index = u32::from_str_radix(index_str, 16)
-        .map_err(|_| anyhow::anyhow!("INVALID_INDEX_HEX: failed to parse index hex"))?;
     if segment_index == 0 {
         bail!("ZERO_SEGMENT_INDEX: segment index cannot be zero");
     }
-    // Token 4 must be tag=
-    if !tokens[4].starts_with("tag=") {
-        if tokens.iter().skip(1).any(|t| t.starts_with("tag=")) {
-            bail!("REORDERED_HEADER: tag parameter out of order");
-        } else {
-            bail!("INVALID_TOKEN_COUNT: missing tag parameter");
-        }
-    }
-    let tag_str = &tokens[4]["tag=".len()..];
-    if tag_str.len() != 32 {
-        bail!(
-            "INVALID_TAG_LENGTH: tag must be exactly 32 hex characters, got {}",
-            tag_str.len()
-        );
-    }
-    if tag_str.chars().any(|c| matches!(c, 'A'..='F')) {
-        bail!("UPPERCASE_HEX: tag contains uppercase hex characters");
-    }
-    if tag_str
-        .chars()
-        .any(|c| !c.is_ascii_digit() && !matches!(c, 'a'..='f'))
-    {
-        bail!("INVALID_TAG_HEX: tag contains non-hex or non-lowercase characters");
-    }
-    let mut tag = [0u8; 16];
-    for i in 0..16 {
-        tag[i] = u8::from_str_radix(&tag_str[i * 2..i * 2 + 2], 16)
-            .map_err(|_| anyhow::anyhow!("INVALID_TAG_HEX: tag contains non-hex characters"))?;
-    }
-
-    // 128-byte total length assertion: the canonical five-token grammar is
-    // exactly 128 bytes, so any accepted line with a different total length
-    // would imply non-canonical content smuggled past the field checks.
-    ensure!(
-        line.len() == 128,
-        "INVALID_LINE_LENGTH: =yencryption line must be exactly 128 bytes, got {}",
-        line.len()
-    );
 
     Ok(YEncryptionParams {
         salt,
         segment_index,
         tag,
     })
+}
+
+/// Decode a fixed-length lowercase-hex field, keeping the vector-matched
+/// error codes: `len_code` when the length is wrong, `UPPERCASE_HEX` for
+/// uppercase digits and `hex_code` for any other non-hex character.
+fn decode_hex_field(
+    value: &str,
+    expected_len: usize,
+    len_code: &str,
+    hex_code: &str,
+) -> Result<Vec<u8>> {
+    if value.len() != expected_len {
+        bail!(
+            "{len_code}: must be exactly {expected_len} hex characters, got {}",
+            value.len()
+        );
+    }
+    let mut out = vec![0u8; expected_len / 2];
+    for (i, b) in value.bytes().enumerate() {
+        let v = match b {
+            b'0'..=b'9' => b - b'0',
+            b'a'..=b'f' => b - b'a' + 10,
+            b'A'..=b'F' => bail!("UPPERCASE_HEX: hex contains uppercase hex characters"),
+            _ => bail!("{hex_code}: hex contains non-hex or non-lowercase characters"),
+        };
+        out[i / 2] = if i % 2 == 0 { v << 4 } else { out[i / 2] | v };
+    }
+    Ok(out)
 }
 
 /// Extract `=yencryption` parameters and remove the single `=yencryption` line from restored yEnc text.
