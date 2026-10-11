@@ -76,14 +76,6 @@ pub(crate) async fn write(request: ArtifactRequest<'_>) -> Result<Option<PathBuf
         mal_id: config.mal_id.clone(),
         tags: nzb_tags,
         yenc_encrypted: config.encrypt_password.is_some(),
-        yenc_version: config
-            .encrypt_password
-            .as_ref()
-            .map(|_| pesto::nzb::YENC_SPEC_VERSION.to_string()),
-        yenc_cipher: config
-            .encrypt_password
-            .as_ref()
-            .map(|_| "XChaCha20-Poly1305".to_string()),
     };
     let xml = pesto::nzb::generate(
         &outcome.groups,

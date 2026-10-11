@@ -26,6 +26,11 @@ pub fn parse(content: &str) -> anyhow::Result<ParsedNzb> {
     let mut meta = NzbMeta::default();
     let mut segments: Vec<PostedSegment> = Vec::new();
     let mut explicit_yenc_encrypted = false;
+    // Reader-local provenance gate values (Body Std v1.2 §8): parsed from
+    // the meta lines but never part of `NzbMeta` — the writer emits the
+    // constants itself, so carrying them as fields would be write-only.
+    let mut explicit_yenc_version: Option<String> = None;
+    let mut explicit_yenc_cipher: Option<String> = None;
 
     let mut current_file_name = String::new();
     let mut current_subject_name = String::new();
@@ -140,10 +145,10 @@ pub fn parse(content: &str) -> anyhow::Result<ParsedNzb> {
                     explicit_yenc_encrypted = true;
                 }
                 "yenc_version" => {
-                    meta.yenc_version = Some(value);
+                    explicit_yenc_version = Some(value);
                 }
                 "yenc_cipher" => {
-                    meta.yenc_cipher = Some(value);
+                    explicit_yenc_cipher = Some(value);
                 }
                 _ => {}
             }
@@ -157,12 +162,12 @@ pub fn parse(content: &str) -> anyhow::Result<ParsedNzb> {
         // STRUCTURAL failure — it would reproduce identically against every
         // server — so the parse fails here (the downloader aborts instead of
         // rotating providers, and releases no plaintext).
-        if let Some(ref ver) = meta.yenc_version {
+        if let Some(ref ver) = explicit_yenc_version {
             if ver != YENC_SPEC_VERSION {
                 bail!("unsupported yenc_version in nzb: {ver}");
             }
         }
-        if let Some(ref cipher) = meta.yenc_cipher {
+        if let Some(ref cipher) = explicit_yenc_cipher {
             if cipher != "XChaCha20-Poly1305" {
                 bail!("unsupported yenc_cipher in nzb: {cipher}");
             }

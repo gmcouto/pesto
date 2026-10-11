@@ -31,10 +31,6 @@ pub struct NzbMeta {
     pub tags: Vec<String>,
     /// Explicit yEnc wire encryption flag emitted as `<meta type="yenc_encrypted">true</meta>`.
     pub yenc_encrypted: bool,
-    /// Explicit yEnc encryption specification version, e.g. "1.2" (`<meta type="yenc_version">`).
-    pub yenc_version: Option<String>,
-    /// Explicit yEnc encryption cipher identifier, e.g. "XChaCha20-Poly1305" (`<meta type="yenc_cipher">`).
-    pub yenc_cipher: Option<String>,
 }
 
 /// Media type of a [`parse_tmdb_ref`] result.

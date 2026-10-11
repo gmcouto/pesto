@@ -313,14 +313,6 @@ pub async fn run_upload(
                 mal_id: config.mal_id.clone(),
                 tags: config.nzb_tags.clone(),
                 yenc_encrypted: config.encrypt_password.is_some(),
-                yenc_version: config
-                    .encrypt_password
-                    .as_ref()
-                    .map(|_| crate::nzb::YENC_SPEC_VERSION.to_string()),
-                yenc_cipher: config
-                    .encrypt_password
-                    .as_ref()
-                    .map(|_| "XChaCha20-Poly1305".to_string()),
             };
             crate::memory::set_phase(crate::memory::Phase::Nzb);
             let xml = crate::nzb::generate(

@@ -252,8 +252,6 @@ fn meta_fields_emitted_in_head() {
         mal_id: Some("654".into()),
         tags: Vec::new(),
         yenc_encrypted: false,
-        yenc_version: None,
-        yenc_cipher: None,
     };
     let xml = generate(&["alt.test".into()], &[], &meta, ObfuscateMode::None);
     assert!(xml.contains("<meta type=\"title\">My Upload</meta>"));
@@ -277,8 +275,6 @@ fn encryption_password_emitted_in_nzb_meta() {
         mal_id: None,
         tags: Vec::new(),
         yenc_encrypted: false,
-        yenc_version: None,
-        yenc_cipher: None,
     };
     let xml = generate(&["alt.test".into()], &[], &meta, ObfuscateMode::None);
     assert!(xml.contains("<meta type=\"password\">encryption-secret-pass</meta>"));
@@ -465,8 +461,6 @@ fn only_password_meta_emits_head_without_name_or_category() {
         mal_id: None,
         tags: Vec::new(),
         yenc_encrypted: false,
-        yenc_version: None,
-        yenc_cipher: None,
     };
     let xml = generate(&["alt.test".into()], &[], &meta, ObfuscateMode::None);
     assert!(xml.contains("<meta type=\"password\">hunter2</meta>"));
@@ -494,8 +488,6 @@ fn parse_round_trips_generate() {
         mal_id: None,
         tags: vec!["hd".into(), "2024".into()],
         yenc_encrypted: false,
-        yenc_version: None,
-        yenc_cipher: None,
     };
     let xml = generate(&groups, &segs, &meta, ObfuscateMode::None);
     let parsed = parse(&xml).expect("parse must succeed");

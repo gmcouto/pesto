@@ -245,14 +245,7 @@ fn test_nzb_writer_emits_plain_segments_and_provenance() {
 
     let parsed = parse(&xml).unwrap();
     assert_eq!(parsed.segments.len(), 2);
-    assert_eq!(
-        parsed.meta.yenc_version.as_deref(),
-        Some(super::YENC_SPEC_VERSION)
-    );
-    assert_eq!(
-        parsed.meta.yenc_cipher.as_deref(),
-        Some("XChaCha20-Poly1305")
-    );
+    assert!(parsed.meta.yenc_encrypted);
 }
 
 #[test]
@@ -310,14 +303,7 @@ fn test_reader_rejects_unsupported_yenc_version_and_cipher() {
         "<meta type=\"yenc_cipher\">XChaCha20-Poly1305</meta>",
     );
     let parsed = parse(&valid_xml).unwrap();
-    assert_eq!(
-        parsed.meta.yenc_version.as_deref(),
-        Some(super::YENC_SPEC_VERSION)
-    );
-    assert_eq!(
-        parsed.meta.yenc_cipher.as_deref(),
-        Some("XChaCha20-Poly1305")
-    );
+    assert!(parsed.meta.yenc_encrypted);
 }
 
 #[test]
