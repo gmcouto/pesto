@@ -33,9 +33,13 @@ pub fn validate_groups(groups: &[String]) -> Result<()> {
 ///
 /// - Rejects empty or whitespace-only password strings.
 /// - Rejects conflicting passwords if both `encrypt_password` and `nzb_password` are specified and differ.
+/// - Rejects a conflicting archive password (`--password`/`compress_password`)
+///   when it differs from `encrypt_password` — see
+///   [`validate_password_compatibility`].
 pub fn validate_encryption(
     encrypt_password: Option<&str>,
     nzb_password: Option<&str>,
+    compress_password: Option<&str>,
 ) -> Result<()> {
     if let Some(pw) = encrypt_password {
         if pw.trim().is_empty() {
@@ -49,6 +53,38 @@ pub fn validate_encryption(
                 bail!("conflicting passwords: --encrypt-password and --nzb-password cannot differ");
             }
         }
+        validate_password_compatibility(compress_password, Some(pw))?;
+    }
+    Ok(())
+}
+
+/// Explicit compatible-password rule for the archive (transport) vs yEnc
+/// encryption password pair (yEnc Body Encryption Standard v1.2 §8).
+///
+/// `<meta type="password">` is the only interoperable password channel in an
+/// NZB, and an encrypted upload writes the *encryption* password there (a
+/// downloader needs it before it can even see the archive inside). When
+/// compression also runs with a password, that archive password has no wire
+/// representation: if the two differ, every downloader would decrypt the
+/// articles successfully and then fail archive extraction with a password it
+/// was never given — the archive password would be silently lost. Rather
+/// than inventing a second metadata field, conflicting combinations are
+/// rejected before any posting work; equal passwords are accepted (the same
+/// value legitimately protects both the archive and the transport).
+pub fn validate_password_compatibility(
+    archive_password: Option<&str>,
+    encrypt_password: Option<&str>,
+) -> Result<()> {
+    if let (Some(archive_pw), Some(encrypt_pw)) = (archive_password, encrypt_password) {
+        if archive_pw != encrypt_pw {
+            bail!(
+                "conflicting passwords: the archive password (--password) and the yEnc \
+                 encryption password (--encrypt-password) cannot differ — the NZB \
+                 <meta type=\"password\"> carries only the encryption password, so a \
+                 different archive password would be lost to every downloader; use the \
+                 same password for both, or drop --password"
+            );
+        }
     }
     Ok(())
 }
@@ -59,31 +95,56 @@ mod tests {
 
     #[test]
     fn encryption_validation_empty_password_rejected() {
-        assert!(validate_encryption(Some(""), None).is_err());
+        assert!(validate_encryption(Some(""), None, None).is_err());
     }
 
     #[test]
     fn encryption_validation_whitespace_only_password_rejected() {
-        assert!(validate_encryption(Some("   "), None).is_err());
-        assert!(validate_encryption(Some("\t\n"), None).is_err());
-        assert!(validate_encryption(Some("secret"), Some("   ")).is_err());
+        assert!(validate_encryption(Some("   "), None, None).is_err());
+        assert!(validate_encryption(Some("\t\n"), None, None).is_err());
+        assert!(validate_encryption(Some("secret"), Some("   "), None).is_err());
     }
 
     #[test]
     fn encryption_validation_valid_password_accepted() {
-        assert!(validate_encryption(Some("secret"), None).is_ok());
-        assert!(validate_encryption(Some("secret"), Some("secret")).is_ok());
+        assert!(validate_encryption(Some("secret"), None, None).is_ok());
+        assert!(validate_encryption(Some("secret"), Some("secret"), None).is_ok());
     }
 
     #[test]
     fn encryption_validation_conflicting_passwords_rejected() {
-        assert!(validate_encryption(Some("secret"), Some("other")).is_err());
+        assert!(validate_encryption(Some("secret"), Some("other"), None).is_err());
     }
 
     #[test]
     fn encryption_validation_none_accepted() {
-        assert!(validate_encryption(None, None).is_ok());
-        assert!(validate_encryption(None, Some("nzbpass")).is_ok());
+        assert!(validate_encryption(None, None, None).is_ok());
+        assert!(validate_encryption(None, Some("nzbpass"), None).is_ok());
+        assert!(validate_encryption(None, None, Some("archive")).is_ok());
+    }
+
+    #[test]
+    fn matching_archive_and_encrypt_passwords_accepted() {
+        // Same password protecting archive and transport is the accepted
+        // combination: the NZB meta describes both.
+        assert!(validate_password_compatibility(Some("shared"), Some("shared")).is_ok());
+        assert!(validate_encryption(Some("shared"), None, Some("shared")).is_ok());
+    }
+
+    #[test]
+    fn conflicting_archive_and_encrypt_passwords_rejected() {
+        // `--password A --encrypt E` (A != E): the NZB can carry only E, so
+        // the archive password would be silently lost — reject before any
+        // posting work (PE-14; mirrors ngPost NP-2's rule).
+        let err = validate_password_compatibility(Some("archive-pw"), Some("encrypt-pw"))
+            .expect_err("conflicting archive/encrypt passwords must be rejected");
+        assert!(err.to_string().contains("conflicting passwords"));
+
+        assert!(validate_encryption(Some("encrypt-pw"), None, Some("archive-pw")).is_err());
+        // The encryption-vs-nzb rule still wins with a distinct message.
+        let err2 = validate_encryption(Some("secret"), Some("other"), Some("secret"))
+            .expect_err("conflicting encrypt/nzb passwords must still be rejected");
+        assert!(err2.to_string().contains("--nzb-password"));
     }
 
     #[test]

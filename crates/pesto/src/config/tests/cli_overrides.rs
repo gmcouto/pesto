@@ -244,6 +244,59 @@ fn cli_rejects_conflicting_encrypt_and_nzb_password() {
 }
 
 #[test]
+fn cli_rejects_conflicting_archive_and_encrypt_password() {
+    // PE-14 (mirrors ngPost NP-2): `--compress --password A --encrypt E` with
+    // A != E would silently lose the archive password — the NZB
+    // `<meta type="password">` carries only the encryption password — so the
+    // combination is rejected at config resolution, before any posting work.
+    let result = Config::resolve(
+        minimal_file(),
+        Overrides {
+            encrypt_password: Some("encrypt-pw".into()),
+            compress_password: Some("archive-pw".into()),
+            ..Default::default()
+        },
+    );
+    let err = result.expect_err("conflicting archive/encrypt passwords must be rejected");
+    assert!(
+        err.to_string().contains("conflicting passwords"),
+        "got: {err:#}"
+    );
+}
+
+#[test]
+fn cli_accepts_matching_archive_and_encrypt_password() {
+    let cfg = Config::resolve(
+        minimal_file(),
+        Overrides {
+            encrypt_password: Some("shared".into()),
+            compress_password: Some("shared".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(cfg.encrypt_password.as_deref(), Some("shared"));
+    assert_eq!(cfg.compress_password.as_deref(), Some("shared"));
+}
+
+#[test]
+fn cli_accepts_archive_password_without_encryption() {
+    // A plain compressed upload with an archive password is untouched: the
+    // NZB password meta describes the archive and there is no transport
+    // encryption to conflict with.
+    let cfg = Config::resolve(
+        minimal_file(),
+        Overrides {
+            compress_password: Some("archive-pw".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(cfg.compress_password.as_deref(), Some("archive-pw"));
+    assert!(cfg.encrypt_password.is_none());
+}
+
+#[test]
 fn cli_accepts_matching_encrypt_and_nzb_password() {
     let cfg = Config::resolve(
         minimal_file(),
