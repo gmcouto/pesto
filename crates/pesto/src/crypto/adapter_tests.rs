@@ -89,25 +89,14 @@ fn encrypted_control_lines_round_trip_with_lf_endings() {
     assert_eq!(decoded.data, payload);
 }
 
-/// Injects a `=ypart` line after `=ybegin`, mimicking nyuu's framing of
-/// single-segment files as multipart.
-fn inject_ypart_after_ybegin(mut body: Vec<u8>, end: u64) -> Vec<u8> {
-    let offset = body.windows(2).position(|w| w == b"\r\n").unwrap() + 2;
-    body.splice(
-        offset..offset,
-        format!("=ypart begin=1 end={end}\r\n").into_bytes(),
-    );
-    body
-}
-
-/// nyuu frames single-segment files as multipart (`total=1` plus `=ypart`).
-/// The decryption adapter delegates unencrypted articles to
-/// `yenc::decode_part`, which must tolerate the stray `=ypart` line.
 #[test]
-fn adapter_decodes_unencrypted_single_part_article_with_ypart() {
-    let payload = b"nyuu-style single-segment payload";
+fn adapter_rejects_unencrypted_article_fail_closed() {
+    // A caller that configured transport decryption must never accept a
+    // plain `=ybegin` article: that would release unauthenticated plaintext
+    // (Zero-Output Guarantee, Body Std v1.2 §7).
+    let payload = b"plain unencrypted payload";
     let encoded = yenc::encode_part(
-        "nyuu.bin",
+        "plain.bin",
         payload.len() as u64,
         PartSpec {
             number: 1,
@@ -118,12 +107,13 @@ fn adapter_decodes_unencrypted_single_part_article_with_ypart() {
         128,
         None,
     );
-    let body = inject_ypart_after_ybegin(encoded.body, payload.len() as u64);
-    let decoded = DownloadDecryptionAdapter::new(None)
-        .decode_article(&body)
-        .unwrap();
-    assert_eq!(decoded.data, payload);
-    assert!(decoded.crc_matches());
+    let err = DownloadDecryptionAdapter::with_password("unused-password")
+        .decode_article(&encoded.body)
+        .expect_err("unencrypted article must fail closed under a decryptor");
+    assert!(
+        err.to_string().contains("UNAUTHENTICATED_ARTICLE"),
+        "got: {err}"
+    );
 }
 
 #[test]

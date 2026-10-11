@@ -118,9 +118,9 @@ async fn a_staged_job_downloads_and_lands_in_history() {
 #[tokio::test]
 async fn encrypted_nzb_sugo_job_round_trip() {
     let password = "sugo-secret-password-12345";
-    let salt = pesto::crypto::control::generate_alphabet_salt();
+    let salt = pesto::crypto::generate_alphabet_salt();
     let session =
-        std::sync::Arc::new(pesto::crypto::kdf::EncryptionSession::new(password, salt).unwrap());
+        std::sync::Arc::new(pesto::crypto::EncryptionSession::new(password, salt).unwrap());
     let adapter = pesto::crypto::UploadEncryptionAdapter::new(session);
 
     let original = b"Plaintext content payload for encrypted Sugo job test!";
@@ -220,9 +220,9 @@ async fn encrypted_nzb_sugo_job_round_trip() {
 #[tokio::test]
 async fn encrypted_nzb_sugo_tampered_job_fails_cleanly() {
     let password = "sugo-tamper-canary-pass-999";
-    let salt = pesto::crypto::control::generate_alphabet_salt();
+    let salt = pesto::crypto::generate_alphabet_salt();
     let session =
-        std::sync::Arc::new(pesto::crypto::kdf::EncryptionSession::new(password, salt).unwrap());
+        std::sync::Arc::new(pesto::crypto::EncryptionSession::new(password, salt).unwrap());
     let adapter = pesto::crypto::UploadEncryptionAdapter::new(session);
 
     let original = b"Plaintext content that must never be committed when tampered!";
@@ -341,9 +341,9 @@ async fn encrypted_nzb_sugo_tampered_job_fails_cleanly() {
 #[tokio::test]
 async fn test_staged_encrypted_nzb_persistence_and_restart() {
     let password = "sugo-restart-test-secret-42";
-    let salt = pesto::crypto::control::generate_alphabet_salt();
+    let salt = pesto::crypto::generate_alphabet_salt();
     let session =
-        std::sync::Arc::new(pesto::crypto::kdf::EncryptionSession::new(password, salt).unwrap());
+        std::sync::Arc::new(pesto::crypto::EncryptionSession::new(password, salt).unwrap());
     let adapter = pesto::crypto::UploadEncryptionAdapter::new(session);
 
     let original = b"Plaintext that must survive Sugo JobStore reload and worker restart!";

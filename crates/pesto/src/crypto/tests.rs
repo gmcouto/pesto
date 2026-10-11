@@ -690,7 +690,7 @@ fn test_adapter_contracts() {
     // Control line 1 starts with 16-byte salt, so not with "=ybegin"
     assert!(!encoded.body.starts_with(b"=ybegin"));
 
-    let download_adapter = DownloadDecryptionAdapter::new(Some(session));
+    let download_adapter = DownloadDecryptionAdapter::with_password("test-password-123");
     let decoded = download_adapter
         .decode_article(&encoded.body)
         .expect("decode_article failed");
@@ -774,12 +774,13 @@ fn test_upload_adapter_encapsulation() {
     let plain_decoded = crate::yenc::decode_part(&unencrypted_part.body).unwrap();
     assert_eq!(plain_decoded.data, payload);
 
-    // Also verify DownloadDecryptionAdapter passes unencrypted articles through untouched
-    let download_adapter_empty = DownloadDecryptionAdapter::new(None);
-    let pass_through_decoded = download_adapter_empty
+    // A configured decryptor must reject a plain `=ybegin` article fail-closed
+    // instead of passing it through (Zero-Output Guarantee).
+    let decryptor = DownloadDecryptionAdapter::with_password("encapsulation-test-pass");
+    let err = decryptor
         .decode_article(&unencrypted_part.body)
-        .expect("unencrypted article should decode transparently without session");
-    assert_eq!(pass_through_decoded.data, payload);
+        .expect_err("unencrypted article must fail closed under a configured decryptor");
+    assert!(err.to_string().contains("UNAUTHENTICATED_ARTICLE"));
 
     // 2. Encrypted delegation (adapter present)
     let salt = [0x55u8; 16];
@@ -810,7 +811,7 @@ fn test_upload_adapter_encapsulation() {
         .any(|w| w == payload));
 
     // 3. Transparent decryption recovers original plaintext
-    let download_adapter = DownloadDecryptionAdapter::new(Some(session));
+    let download_adapter = DownloadDecryptionAdapter::with_password("encapsulation-test-pass");
     let decrypted_part = download_adapter
         .decode_article(&encrypted_part.body)
         .expect("transparent decryption failed");

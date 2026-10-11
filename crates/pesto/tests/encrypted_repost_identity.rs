@@ -22,7 +22,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use pesto::config::{Config, ObfuscateMode};
-use pesto::crypto::{control, DownloadDecryptionAdapter};
+use pesto::crypto::DownloadDecryptionAdapter;
 use pesto::poster::post_files_with_progress;
 use pesto::walk::expand_inputs;
 
@@ -333,7 +333,7 @@ fn assert_all_articles_decrypt_to(
             !body.starts_with(b"=ybegin"),
             "article #{i} was posted as PLAINTEXT yEnc during an encrypted upload"
         );
-        let (salt, index) = control::extract_bootstrap_from_line1(body)
+        let (salt, index) = pesto::crypto::extract_bootstrap_from_line1(body)
             .unwrap_or_else(|e| panic!("article #{i} lacks a valid bootstrap: {e}"));
         assert_eq!(salt.len(), 16);
         indices.push(index);

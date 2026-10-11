@@ -3,6 +3,7 @@
 use anyhow::{bail, ensure, Context, Result};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
+use zeroize::Zeroizing;
 
 use super::body;
 use super::control;
@@ -17,10 +18,6 @@ pub struct UploadEncryptionAdapter {
 impl UploadEncryptionAdapter {
     pub fn new(session: Arc<EncryptionSession>) -> Self {
         Self { session }
-    }
-
-    pub fn session(&self) -> &Arc<EncryptionSession> {
-        &self.session
     }
 
     /// Encrypt and yEnc-encode a raw article segment.
@@ -83,7 +80,6 @@ impl UploadEncryptionAdapter {
 /// Parameters extracted from the `=yencryption` control line.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct YEncryptionParams {
-    pub cipher: String,
     pub salt: [u8; 16],
     pub segment_index: u32,
     pub tag: [u8; 16],
@@ -260,7 +256,6 @@ pub fn parse_yencryption_line(line: &[u8]) -> Result<YEncryptionParams> {
     );
 
     Ok(YEncryptionParams {
-        cipher: "XChaCha20-Poly1305".to_string(),
         salt,
         segment_index,
         tag,
@@ -349,50 +344,30 @@ type SessionCache = (
 
 /// Thin adapter presenting standard yEnc decode contract for downloaded articles.
 pub struct DownloadDecryptionAdapter {
-    password: Option<String>,
+    password: Zeroizing<String>,
     cached_sessions: std::sync::Mutex<SessionCache>,
 }
 
 impl DownloadDecryptionAdapter {
-    #[cfg(test)]
-    pub fn new(session: Option<Arc<EncryptionSession>>) -> Self {
-        let mut map = HashMap::new();
-        let mut order = VecDeque::new();
-        if let Some(s) = session {
-            order.push_back(s.salt());
-            map.insert(s.salt(), s);
-        }
-        Self {
-            password: None,
-            cached_sessions: std::sync::Mutex::new((map, order)),
-        }
-    }
-
+    /// Build a decryption adapter for `password`. The caller configured
+    /// transport decryption for this download, so any unencrypted article
+    /// starting with `=ybegin` is rejected as `UNAUTHENTICATED_ARTICLE`
+    /// (fail closed): accepting it would release unauthenticated plaintext
+    /// and violate the Zero-Output Guarantee.
     pub fn with_password(password: &str) -> Self {
         Self {
-            password: Some(password.to_string()),
+            password: Zeroizing::new(password.to_string()),
             cached_sessions: std::sync::Mutex::new((HashMap::new(), VecDeque::new())),
         }
     }
 
     /// Decode an article wire body, restoring encrypted control lines and decrypting body ciphertext.
     ///
-    /// If the adapter holds decryption credentials (`password` or a cached session) the caller
-    /// has configured transport decryption for this download: any unencrypted article starting
-    /// with `=ybegin` is rejected as `UNAUTHENTICATED_ARTICLE` (fail closed), because accepting
-    /// it would release unauthenticated plaintext and violate the Zero-Output Guarantee.
-    /// Unencrypted passthrough is only allowed for an adapter with no credentials at all.
-    /// If encrypted, the `segmentIndex` and salt are taken from the article bootstrap and a
-    /// valid session/password is required.
+    /// The `segmentIndex` and salt are taken from the article bootstrap.
     /// Strictly guarantees Zero-Output on authentication failure.
     pub fn decode_article(&self, body: &[u8]) -> Result<DecodedPart> {
         if body.starts_with(b"=ybegin") {
-            if self.has_decryption_credentials() {
-                bail!(
-                    "UNAUTHENTICATED_ARTICLE: unencrypted article received for encrypted segment"
-                );
-            }
-            return yenc::decode_part(body);
+            bail!("UNAUTHENTICATED_ARTICLE: unencrypted article received for encrypted segment");
         }
 
         let first_line_end =
@@ -476,38 +451,6 @@ impl DownloadDecryptionAdapter {
         Ok(decoded)
     }
 
-    /// Directly authenticate and decrypt ciphertext with given salt and segment index.
-    ///
-    /// Strictly guarantees Zero-Output on authentication failure.
-    #[cfg(test)]
-    pub fn decrypt_raw(
-        &self,
-        salt: [u8; 16],
-        segment_index: u32,
-        ciphertext: &[u8],
-        tag: &[u8; 16],
-    ) -> Result<Vec<u8>> {
-        let session = self.get_or_create_session(salt)?;
-        let nonce = session.derive_body_nonce(segment_index);
-        body::decrypt_body(ciphertext, tag, session.master_key(), &nonce)
-            .map_err(|e| anyhow::anyhow!("AUTHENTICATION_FAILURE: {e}"))
-    }
-
-    /// Whether this adapter holds any decryption credentials (an explicit password
-    /// or at least one cached encryption session). When true, `decode_article` fails
-    /// closed on unencrypted (`=ybegin`-prefixed) articles: the caller configured
-    /// transport decryption, so plaintext passthrough is an authentication bypass
-    /// (Zero-Output Guarantee — see `crypto/mod.rs` threat model).
-    fn has_decryption_credentials(&self) -> bool {
-        if self.password.is_some() {
-            return true;
-        }
-        self.cached_sessions
-            .lock()
-            .map(|guard| !guard.0.is_empty())
-            .unwrap_or(true)
-    }
-
     fn get_or_create_session(&self, salt: [u8; 16]) -> Result<Arc<EncryptionSession>> {
         // Same poisoned-tolerant policy as `has_decryption_credentials`
         // above — a poisoned mutex in the download hot path fails closed as a
@@ -520,19 +463,15 @@ impl DownloadDecryptionAdapter {
             return Ok(session.clone());
         }
 
-        if let Some(ref pwd) = self.password {
-            let session = Arc::new(EncryptionSession::new(pwd, salt)?);
-            if guard.0.len() == MAX_CACHED_SESSIONS {
-                if let Some(oldest) = guard.1.pop_front() {
-                    guard.0.remove(&oldest);
-                }
+        let session = Arc::new(EncryptionSession::new(&self.password, salt)?);
+        if guard.0.len() == MAX_CACHED_SESSIONS {
+            if let Some(oldest) = guard.1.pop_front() {
+                guard.0.remove(&oldest);
             }
-            guard.0.insert(salt, session.clone());
-            guard.1.push_back(salt);
-            return Ok(session);
         }
-
-        bail!("no password or encryption session available to decrypt article")
+        guard.0.insert(salt, session.clone());
+        guard.1.push_back(salt);
+        Ok(session)
     }
 }
 

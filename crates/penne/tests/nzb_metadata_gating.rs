@@ -15,7 +15,7 @@ use std::sync::Arc;
 use penne::config::ServerTier;
 use penne::nzb::{download_decryptor, load};
 use penne::queue::build;
-use pesto::crypto::kdf::EncryptionSession;
+use pesto::crypto::EncryptionSession;
 use pesto::crypto::UploadEncryptionAdapter;
 use pesto::yenc::PartSpec;
 use tempfile::NamedTempFile;
@@ -51,7 +51,7 @@ fn gated_nzb_xml(version_tag: &str, cipher_tag: &str) -> String {
 }
 
 fn valid_article(password: &str) -> Vec<u8> {
-    let salt = pesto::crypto::control::generate_alphabet_salt();
+    let salt = pesto::crypto::generate_alphabet_salt();
     let session = Arc::new(EncryptionSession::new(password, salt).unwrap());
     let uploader = UploadEncryptionAdapter::new(session);
     let payload = b"Gating payload that must never reach disk";

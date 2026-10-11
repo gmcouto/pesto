@@ -16,7 +16,7 @@ use penne::config::ServerTier;
 use penne::download::{download_queue_with_decryptor, DownloadOutcome};
 use penne::nzb::{download_decryptor, load};
 use penne::queue::{build, DownloadQueue, QueuedFile, QueuedSegment};
-use pesto::crypto::kdf::EncryptionSession;
+use pesto::crypto::EncryptionSession;
 use pesto::crypto::{DownloadDecryptionAdapter, UploadEncryptionAdapter};
 use pesto::yenc::PartSpec;
 use tempfile::NamedTempFile;

@@ -5,7 +5,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use pesto::config::ServerEntry;
-use pesto::crypto::kdf::EncryptionSession;
+use pesto::crypto::EncryptionSession;
 use pesto::crypto::{DownloadDecryptionAdapter, UploadEncryptionAdapter};
 use pesto::yenc::{encode_part, PartSpec};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};

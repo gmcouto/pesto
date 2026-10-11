@@ -17,7 +17,7 @@ use penne::download::download_queue_with_decryptor;
 use penne::nzb::{download_decryptor, load};
 use penne::queue::build;
 use penne::repair::{verify_and_repair, RepairOutcome};
-use pesto::crypto::kdf::EncryptionSession;
+use pesto::crypto::EncryptionSession;
 use pesto::crypto::UploadEncryptionAdapter;
 use pesto::yenc::PartSpec;
 use tempfile::NamedTempFile;

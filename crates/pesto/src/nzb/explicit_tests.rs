@@ -2,7 +2,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::config::ObfuscateMode;
-use crate::crypto::DownloadDecryptionAdapter;
+use crate::crypto::body::decrypt_body;
+use crate::crypto::kdf::EncryptionSession;
 use crate::nzb::{generate, parse, NzbMeta};
 use crate::poster::PostedSegment;
 
@@ -149,7 +150,12 @@ fn test_conformance_vectors_nzb_segment_identity() {
                 let mut salt = [0u8; 16];
                 salt.copy_from_slice(&salt_vec);
 
-                let adapter = DownloadDecryptionAdapter::with_password(pwd);
+                let session = EncryptionSession::new(pwd, salt).unwrap();
+
+                let decrypt_tampered = |t_index: u32, ct: Vec<u8>, tag: [u8; 16]| {
+                    let nonce = session.derive_body_nonce(t_index);
+                    decrypt_body(&ct, &tag, session.master_key(), &nonce)
+                };
 
                 if let Some(tampered_segs) = vec.get("tampered_segments").and_then(|v| v.as_array())
                 {
@@ -160,7 +166,7 @@ fn test_conformance_vectors_nzb_segment_identity() {
                         let mut tag = [0u8; 16];
                         tag.copy_from_slice(&tag_vec);
 
-                        let res = adapter.decrypt_raw(salt, t_index, &ct, &tag);
+                        let res = decrypt_tampered(t_index, ct, tag);
                         assert!(
                             res.is_err(),
                             "vector {id} tampered segment {t_index} succeeded but must fail"
@@ -173,7 +179,7 @@ fn test_conformance_vectors_nzb_segment_identity() {
                     let mut tag = [0u8; 16];
                     tag.copy_from_slice(&tag_vec);
 
-                    let res = adapter.decrypt_raw(salt, t_index, &ct, &tag);
+                    let res = decrypt_tampered(t_index, ct, tag);
                     assert!(
                         res.is_err(),
                         "vector {id} tampered index {t_index} succeeded but must fail"

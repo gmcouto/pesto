@@ -885,9 +885,9 @@ fn stat_reports_incomplete_and_exits_non_zero_when_a_segment_is_missing() {
 #[test]
 fn encrypted_nzb_metadata_round_trip() {
     let password = "super-secret-canary-pass-12345";
-    let salt = pesto::crypto::control::generate_alphabet_salt();
+    let salt = pesto::crypto::generate_alphabet_salt();
     let session =
-        std::sync::Arc::new(pesto::crypto::kdf::EncryptionSession::new(password, salt).unwrap());
+        std::sync::Arc::new(pesto::crypto::EncryptionSession::new(password, salt).unwrap());
     let adapter = pesto::crypto::UploadEncryptionAdapter::new(session);
 
     let original = b"Plaintext content payload for encrypted NZB CLI test!";
@@ -952,9 +952,9 @@ fn encrypted_nzb_metadata_round_trip() {
 #[test]
 fn encrypted_nzb_missing_metadata_rejects() {
     let password = ["missing-metadata-canary-", "pass-99999"].concat();
-    let salt = pesto::crypto::control::generate_alphabet_salt();
+    let salt = pesto::crypto::generate_alphabet_salt();
     let session = std::sync::Arc::new(
-        pesto::crypto::kdf::EncryptionSession::new(password.as_str(), salt).unwrap(),
+        pesto::crypto::EncryptionSession::new(password.as_str(), salt).unwrap(),
     );
     let adapter = pesto::crypto::UploadEncryptionAdapter::new(session);
 
@@ -1076,9 +1076,9 @@ fn ordinary_nzb_without_decryptor_round_trip() {
 #[test]
 fn cli_download_encrypted_multipart_round_trip() {
     let password = "multipart-roundtrip-canary-pass";
-    let salt = pesto::crypto::control::generate_alphabet_salt();
+    let salt = pesto::crypto::generate_alphabet_salt();
     let session =
-        std::sync::Arc::new(pesto::crypto::kdf::EncryptionSession::new(password, salt).unwrap());
+        std::sync::Arc::new(pesto::crypto::EncryptionSession::new(password, salt).unwrap());
     let adapter = pesto::crypto::UploadEncryptionAdapter::new(session);
 
     let part1_data = vec![0x11u8; 1000];

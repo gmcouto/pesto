@@ -33,15 +33,16 @@
 //!   vectors are frozen for this release. An independent formal cryptographic
 //!   review is recommended before stabilization.
 
-pub mod adapter;
-pub mod body;
-pub mod control;
-pub mod kdf;
+pub(crate) mod adapter;
+pub(crate) mod body;
+pub(crate) mod control;
+pub(crate) mod kdf;
 
 #[cfg(test)]
 mod tests;
 
 pub use adapter::{DownloadDecryptionAdapter, UploadEncryptionAdapter};
+pub use control::{extract_bootstrap_from_line1, generate_alphabet_salt};
 pub use kdf::EncryptionSession;
 
 // Error classification note (yEnc Body Encryption Standard §5 Two-Tier

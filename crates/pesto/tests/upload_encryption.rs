@@ -2,7 +2,7 @@ use std::process::Command;
 use std::sync::{Arc, Mutex};
 
 use pesto::config::{Config, FileConfig, ObfuscateMode, Overrides};
-use pesto::crypto::{control, DownloadDecryptionAdapter};
+use pesto::crypto::DownloadDecryptionAdapter;
 use pesto::poster::post_files_with_progress;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
@@ -182,7 +182,10 @@ async fn encrypted_upload_round_trips_captured_articles() {
         let body = article_body(article);
         assert!(!body.starts_with(b"=ybegin"));
         assert_eq!(
-            control::extract_bootstrap_from_line1(body).unwrap().0.len(),
+            pesto::crypto::extract_bootstrap_from_line1(body)
+                .unwrap()
+                .0
+                .len(),
             16
         );
         let decoded = decryptor.decode_article(body).unwrap();
@@ -526,7 +529,7 @@ async fn test_encrypted_upload_multifile_par2_standard() {
         .unwrap()
         .iter()
         .map(|article| {
-            control::extract_bootstrap_from_line1(article_body(article))
+            pesto::crypto::extract_bootstrap_from_line1(article_body(article))
                 .unwrap()
                 .1
         })
@@ -662,7 +665,7 @@ async fn test_encrypted_upload_multifile_par2_obfuscated() {
             .unwrap()
             .iter()
             .map(|article| {
-                control::extract_bootstrap_from_line1(article_body(article))
+                pesto::crypto::extract_bootstrap_from_line1(article_body(article))
                     .unwrap()
                     .1
             })
@@ -828,7 +831,7 @@ async fn test_persistence_lifecycle_invariants() {
     let mut original_indices: Vec<u32> = articles_sorted
         .iter()
         .map(|article| {
-            control::extract_bootstrap_from_line1(article_body(article))
+            pesto::crypto::extract_bootstrap_from_line1(article_body(article))
                 .unwrap()
                 .1
         })
@@ -871,7 +874,7 @@ async fn test_persistence_lifecycle_invariants() {
     let articles = captured.lock().unwrap();
     for article in articles.iter() {
         let body = article_body(article);
-        let (art_salt, art_index) = control::extract_bootstrap_from_line1(body).unwrap();
+        let (art_salt, art_index) = pesto::crypto::extract_bootstrap_from_line1(body).unwrap();
         assert_eq!(&art_salt, saved_salt);
         assert!(art_index > 0);
     }
