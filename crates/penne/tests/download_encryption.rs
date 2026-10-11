@@ -410,7 +410,10 @@ async fn test_zero_output_on_auth_failure() {
 }
 
 #[tokio::test]
-async fn test_bad_cache_eviction_and_refetch() {
+async fn test_bad_cache_entry_refetch_overwrites_without_eviction() {
+    // Audit D9: a corrupted cached entry falls through to a network refetch
+    // and a successful refetch overwrites it (`cache::store` is a plain
+    // `fs::write`) — no explicit eviction step is needed.
     let password = "cache-eviction-password";
     let salt = [0x55u8; 16];
     let session = Arc::new(EncryptionSession::new(password, salt).unwrap());

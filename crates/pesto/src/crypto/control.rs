@@ -251,7 +251,10 @@ pub fn decrypt_yenc_control_lines(
     let n = active_lines.len();
     let mut out = Vec::with_capacity(yenc_block.len().saturating_sub(BOOTSTRAP_PREFIX_LEN));
 
-    // Process line 1
+    // Process line 1. The bootstrap is re-validated here (salt == session
+    // salt, index == the passed index) because this function is also called
+    // directly by tests/callers that did not pre-extract the bootstrap — the
+    // checks are the §5 wire-corruption gate for any caller-provided index.
     let line1 = &active_lines[0];
     let (salt, line1_segment_index) = extract_bootstrap_from_line1(line1.content)?;
     if salt != session.salt() {

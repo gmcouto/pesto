@@ -370,23 +370,15 @@ impl DownloadDecryptionAdapter {
             bail!("UNAUTHENTICATED_ARTICLE: unencrypted article received for encrypted segment");
         }
 
-        let first_line_end =
-            if !body.starts_with(b"=y") && body.len() >= control::BOOTSTRAP_PREFIX_LEN {
-                body[control::BOOTSTRAP_PREFIX_LEN..]
-                    .iter()
-                    .position(|&b| b == b'\n')
-                    .map(|p| p + control::BOOTSTRAP_PREFIX_LEN)
-                    .context("article has no newline terminators")?
-            } else {
-                body.iter()
-                    .position(|&b| b == b'\n')
-                    .context("article has no newline terminators")?
-            };
-        let first_line = &body[..first_line_end]
-            .strip_suffix(b"\r")
-            .unwrap_or(&body[..first_line_end]);
-
-        let (salt, segment_index) = control::extract_bootstrap_from_line1(first_line)?;
+        // Line 1 terminator search must skip the 20-byte bootstrap prefix
+        // (which may itself contain 0x0A/0x0D) — exactly what
+        // `split_lines_preserving_endings` implements, so reuse it instead
+        // of a second hand-rolled scan (audit D6).
+        let lines = control::split_lines_preserving_endings(body);
+        let first_line = lines
+            .first()
+            .context("article has no newline terminators")?;
+        let (salt, segment_index) = control::extract_bootstrap_from_line1(first_line.content)?;
         let session = self.get_or_create_session(salt)?;
 
         // Decrypt control lines
@@ -395,7 +387,6 @@ impl DownloadDecryptionAdapter {
         // Extract and remove =yencryption line
         let (yenc_params, clean_yenc) = extract_and_remove_yencryption(&restored_yenc)?;
 
-        // Dual-Bootstrap Agreement
         // Dual-Bootstrap Agreement (Body Std v1.2 §6): the salt and
         // segmentIndex extracted from control Line 1 must match the
         // `=yencryption` header tokens.

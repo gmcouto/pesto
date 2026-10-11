@@ -262,13 +262,12 @@ pub async fn download_queue_with_decryptor(
                     )
                     .await?;
                     continue;
-                } else if decryptor.is_some() {
-                    // Evict corrupted/unauthenticated cache entry
-                    let _ = cache::remove(dest_dir, &seg.message_id);
                 }
                 // A corrupted cache entry (shouldn't happen, but a killed
                 // write mid-flush is possible) falls through to a normal
-                // network fetch rather than failing the segment outright.
+                // network fetch rather than failing the segment outright; a
+                // successful refetch overwrites it (`cache::store` is a
+                // plain `fs::write`), so no explicit eviction is needed.
             }
             pending.push(WorkItem {
                 file_name: file.name.clone(),
@@ -611,12 +610,18 @@ async fn worker_loop(
                 fetched.push(item);
             }
             Err(e) => {
-                tracing::warn!(
-                    message_id = %item.message_id,
-                    file = %item.file_name,
-                    part = item.part,
-                    "article decode/decryption failed: {e}"
-                );
+                if ctx.decryptor.is_some() {
+                    // Decryption/decode failures on an encrypted download are
+                    // actionable (tampered copy, wrong password); the plain
+                    // path keeps upstream's silent SegmentCorrupt event (audit
+                    // D10 — no new per-article log on ordinary downloads).
+                    tracing::warn!(
+                        message_id = %item.message_id,
+                        file = %item.file_name,
+                        part = item.part,
+                        "article decode/decryption failed: {e}"
+                    );
+                }
                 if is_last_server {
                     emit(&ctx.progress, || ProgressEvent::SegmentCorrupt {
                         file_name: item.file_name.clone(),
