@@ -65,7 +65,7 @@ pub async fn write(
 /// helper, this records the logical wire identity alongside the exact bytes
 /// so resume metadata cannot disagree with a replayed article.
 #[allow(clippy::too_many_arguments)]
-pub async fn write_with_identity(
+pub(crate) async fn write_with_identity(
     dir: &Path,
     file_name: &str,
     part: u32,

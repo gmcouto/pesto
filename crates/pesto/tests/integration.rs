@@ -888,26 +888,50 @@ async fn spool_replay_preserves_identity_and_invalidation_clears_spool() {
     ));
     resume_state.save(&state_path).unwrap();
 
-    let wire_identity = Some(pesto::resume::PersistedWireIdentity {
+    let wire_identity = pesto::resume::PersistedWireIdentity {
         subject_name: "replay_pst3.bin".into(),
         yenc_name: "replay_pst3.bin".into(),
         from: config.from.clone(),
         date: None,
         unix_date: None,
-    });
+    };
 
-    #[allow(unused_imports)]
-    pesto::spool::write_with_identity(
+    async fn write_pst2(
+        dir: &std::path::Path,
+        file_name: &str,
+        part: u32,
+        message_id: &str,
+        headers: &[u8],
+        body: &[u8],
+        identity: &pesto::resume::PersistedWireIdentity,
+    ) {
+        // PST2 layout (see pesto::spool): [magic][u32 identity_len][identity JSON]
+        // [u32 id_len][id][u32 headers_len][headers][body].
+        let identity_json = serde_json::to_vec(identity).unwrap();
+        let mut buf = Vec::new();
+        buf.extend_from_slice(b"PST2");
+        buf.extend_from_slice(&(identity_json.len() as u32).to_le_bytes());
+        buf.extend_from_slice(&identity_json);
+        buf.extend_from_slice(&(message_id.len() as u32).to_le_bytes());
+        buf.extend_from_slice(message_id.as_bytes());
+        buf.extend_from_slice(&(headers.len() as u32).to_le_bytes());
+        buf.extend_from_slice(headers);
+        buf.extend_from_slice(body);
+        let safe_name = file_name.replace(['/', '\\'], "_");
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join(format!("{safe_name}.{part}.spool")), buf).unwrap();
+    }
+
+    write_pst2(
         &spool_dir,
         "replay_pst3.bin",
         1,
         "pst3-exact@spool.test",
         b"Message-ID: <pst3-exact@spool.test>\r\nSubject: test\r\n",
         b"=ybegin line=128 size=100 name=replay_pst3.bin\r\nfake-body\r\n=yend size=100 crc32=00000000\r\n",
-        &wire_identity.clone().unwrap(),
+        &wire_identity,
     )
-    .await
-    .unwrap();
+    .await;
 
     let inputs = vec![pesto::walk::InputFile {
         path: path.clone(),
@@ -935,18 +959,16 @@ async fn spool_replay_preserves_identity_and_invalidation_clears_spool() {
     ));
     state2.save(&resume_state_path2).unwrap();
 
-    #[allow(unused_imports)]
-    pesto::spool::write_with_identity(
+    write_pst2(
         &spool_dir2,
         "replay_pst3.bin",
         1,
         "stale@spool.test",
         b"Message-ID: <stale@spool.test>\r\nSubject: test\r\n",
         b"=ybegin line=128 size=100 name=replay_pst3.bin\r\nfake-body\r\n=yend size=100 crc32=00000000\r\n",
-        &wire_identity.clone().unwrap(),
+        &wire_identity,
     )
-    .await
-    .unwrap();
+    .await;
 
     assert!(spool_dir2.exists());
 
