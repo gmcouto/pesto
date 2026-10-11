@@ -6,6 +6,7 @@ use tracing::warn;
 
 use crate::article::{default_subject, generate_message_id, obfuscated_name, random_from, Article};
 use crate::config::{Config, ObfuscateMode};
+use crate::crypto::UploadEncryptionAdapter;
 use crate::nntp::pool::ConnectionSlot;
 use crate::yenc;
 
@@ -14,8 +15,17 @@ use super::PostedSegment;
 /// Re-read `seg`'s slice from disk, re-encode it, and post it under a fresh
 /// Message-ID. Deliberately never reuses `seg.message_id` — see the module
 /// doc comment for why reposting under a cursed ID is unsafe.
+///
+/// `adapter` is the upload's [`UploadEncryptionAdapter`]: when present, the
+/// reposted article is re-encrypted with the *same* salt and
+/// `seg.segment_index` the original copy used, so the reposted wire output
+/// keeps the authenticated identity of the first attempt. Posting plaintext
+/// for an encrypted upload would leak the file contents on the wire and
+/// produce an article the NZB's declared `yenc_encrypted` provenance cannot
+/// decrypt (audit P0 / Body Std v1.2 §8).
 pub(super) async fn repost_one(
     config: &Config,
+    adapter: Option<&UploadEncryptionAdapter>,
     slot: &mut ConnectionSlot,
     seg: &PostedSegment,
     groups: &[String],
@@ -61,14 +71,31 @@ pub(super) async fn repost_one(
     // doc comment) — using it here would repost an obfuscated release under
     // its real name, undoing `--obfuscate` the moment one article needs a
     // repost. `wire_name` carries the identity actually posted with.
-    let encoded = yenc::encode_part(
-        &wire_yenc,
-        seg.file_size,
-        spec,
-        &buf,
-        config.line_length,
-        file_crc32,
-    );
+    let encoded = match adapter {
+        Some(adapter) => {
+            let mut encode_buf = Vec::new();
+            adapter
+                .encode_article(
+                    &wire_yenc,
+                    seg.file_size,
+                    spec,
+                    &buf,
+                    config.line_length,
+                    file_crc32,
+                    seg.segment_index,
+                    &mut encode_buf,
+                )
+                .map_err(|e| anyhow::anyhow!("repost: failed to re-encrypt article segment: {e}"))?
+        }
+        None => yenc::encode_part(
+            &wire_yenc,
+            seg.file_size,
+            spec,
+            &buf,
+            config.line_length,
+            file_crc32,
+        ),
+    };
     let (rfc_date, _ts) = &date;
     let mut message_id = generate_message_id(config.message_id_domain.as_deref());
     let article = Article {
@@ -120,6 +147,7 @@ pub(super) async fn repost_one(
                         server_idx: slot.server_idx(),
                         file_index: seg.file_index,
                         total_files: seg.total_files,
+                        segment_index: seg.segment_index,
                     });
                 }
                 Err(e) => {
