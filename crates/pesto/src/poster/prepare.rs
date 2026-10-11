@@ -521,7 +521,7 @@ impl ReleaseLayout {
         }
     }
 
-    /// Compute the globally unique [`SegmentIdentity`] (segment index) for a
+    /// Compute the globally unique segment index for a
     /// given file ordinal and part number.
     ///
     /// This is the CENTRAL segment-index allocator: the raw 1-based rank

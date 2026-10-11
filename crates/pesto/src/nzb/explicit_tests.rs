@@ -481,15 +481,23 @@ fn test_conformance_vectors_index_allocation() {
 
         // Candidate is forbidden (uint32_be contains 0x0A/0x0D).
         assert!(
-            !crate::poster::is_safe_segment_index(candidate),
-            "vector {id}: candidate {candidate} must be forbidden"
+            candidate
+                .to_be_bytes()
+                .iter()
+                .any(|&b| b == 0x0A || b == 0x0D),
+            "vector {id}: candidate {candidate} bytes must contain 0x0A/0x0D"
+        );
+        // The allocator must actually produce the assigned value from the
+        // candidate's rank (the ordinal-th permitted index), exercising the
+        // real allocation path rather than only a predicate.
+        let rank = crate::poster::safe_index_rank(candidate);
+        assert_eq!(
+            crate::poster::nth_safe_segment_index(rank),
+            Some(assigned),
+            "vector {id}: allocator must assign {assigned} at rank {rank}"
         );
         // Assigned value is safe, greater than the candidate, and formats to
         // the expected lowercase 8-char hex.
-        assert!(
-            crate::poster::is_safe_segment_index(assigned),
-            "vector {id}: assigned {assigned} must be safe"
-        );
         assert!(assigned > candidate, "vector {id}: must skip forward");
         assert_eq!(
             format!("{assigned:08x}"),

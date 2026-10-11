@@ -39,10 +39,10 @@ use identity::{
 };
 mod outcome;
 #[cfg(test)]
-pub(crate) use outcome::is_safe_segment_index;
+pub(crate) use outcome::{nth_safe_segment_index, safe_index_rank};
 pub use outcome::{
     nzb_write_decision, should_write_season_nzb, FailedTask, NzbWriteDecision, PostOutcome,
-    PostedSegment, SegmentIdentity,
+    PostedSegment,
 };
 mod options;
 mod orchestrator;
