@@ -79,20 +79,26 @@ pub fn decode_part(body: &[u8]) -> Result<DecodedPart> {
     let ybegin = parse_ybegin(lines[ybegin_idx])?;
 
     let mut idx = ybegin_idx + 1;
-    let (begin, end) = if ybegin.total > 1 {
-        let line = *lines
-            .get(idx)
-            .context("multi-part article is missing its =ypart line")?;
-        anyhow::ensure!(
-            line.starts_with(b"=ypart"),
-            "expected =ypart line after multi-part =ybegin, found something else"
-        );
-        let span = parse_ypart(line)?;
-        idx += 1;
-        span
-    } else {
-        (1, ybegin.size)
-    };
+    // Some posters (e.g. nyuu) emit a `=ypart` line even for single-part
+    // articles (`total=1`), so skip a leading `=ypart` regardless of `total`
+    // instead of decoding it as payload. (yEnc draft 1.3 allows multipart
+    // framing; single-part articles with `=ypart` are a poster quirk we must
+    // tolerate for interoperability.)
+    let (begin, end) =
+        if ybegin.total > 1 || lines.get(idx).is_some_and(|l| l.starts_with(b"=ypart")) {
+            let line = *lines
+                .get(idx)
+                .context("multi-part article is missing its =ypart line")?;
+            anyhow::ensure!(
+                line.starts_with(b"=ypart"),
+                "expected =ypart line after multi-part =ybegin, found something else"
+            );
+            let span = parse_ypart(line)?;
+            idx += 1;
+            span
+        } else {
+            (1, ybegin.size)
+        };
 
     let yend_idx = lines[idx..]
         .iter()
@@ -313,6 +319,44 @@ mod tests {
         assert_eq!(decoded.end, 600);
         assert_eq!(decoded.part_crc32, Some(crc32(&data)));
         assert_eq!(decoded.file_crc32, Some(0xDEAD_BEEF));
+        assert!(decoded.crc_matches());
+    }
+
+    /// nyuu frames every article as multipart, even single-segment files
+    /// (`=ybegin part=1 total=1` followed by `=ypart`). The decoder must skip
+    /// the `=ypart` line instead of yEnc-decoding it as payload.
+    #[test]
+    fn tolerates_ypart_in_single_part_article() {
+        // nyuu frames every article as multipart, even single-segment files
+        // (`=ybegin part=1 total=1` followed by `=ypart`). The decoder must
+        // skip the `=ypart` line instead of yEnc-decoding it as payload.
+        let payload: Vec<u8> = (0u8..=255).cycle().take(300).collect();
+        let encoded = encode_part(
+            "single.bin",
+            payload.len() as u64,
+            PartSpec {
+                number: 1,
+                total: 1,
+                offset: 0,
+            },
+            &payload,
+            128,
+            None,
+        );
+
+        // Rebuild the article body with a `=ypart` line injected after
+        // `=ybegin`, mimicking nyuu's framing.
+        let offset = encoded.body.windows(2).position(|w| w == b"\r\n").unwrap() + 2;
+        let mut body = Vec::with_capacity(encoded.body.len() + 32);
+        body.extend_from_slice(&encoded.body[..offset]);
+        body.extend_from_slice(format!("=ypart begin=1 end={}\r\n", payload.len()).as_bytes());
+        body.extend_from_slice(&encoded.body[offset..]);
+
+        let decoded = decode_part(&body).unwrap();
+        assert_eq!(decoded.data, payload);
+        assert_eq!(decoded.total, 1);
+        assert_eq!(decoded.begin, 1);
+        assert_eq!(decoded.end, payload.len() as u64);
         assert!(decoded.crc_matches());
     }
 
