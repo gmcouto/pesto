@@ -118,7 +118,13 @@ async fn prepare_ready(shared: &Arc<Shared>, mut task: PostTask) -> Option<Ready
                     part: task.part,
                     total: task.total,
                     message_id: existing.message_id,
-                    bytes: existing.bytes,
+                    bytes: if shared.encryption_adapter.is_some() {
+                        // Consistent with commit_result (Body Encryption
+                        // Standard v1.2 "Transport boundary").
+                        task.data.len() as u64
+                    } else {
+                        existing.bytes
+                    },
                     from: Arc::from(from),
                     date,
                     full_crc32: task.file_crc32.unwrap_or(0),
@@ -157,10 +163,11 @@ async fn prepare_ready(shared: &Arc<Shared>, mut task: PostTask) -> Option<Ready
         Some(entry)
             if shared.config.obfuscate != ObfuscateMode::None && entry.wire_identity.is_none() =>
         {
-            // PST1 did not record the logical Subject/yEnc/From values next
-            // to the raw bytes. Replaying it would post one identity while
-            // recording another in resume/check state. Re-encoding is cheap
-            // and gives the segment one coherent identity.
+            // Pre-PST2 spool entries did not record the logical
+            // Subject/yEnc/From values next to the raw bytes. Replaying one
+            // would post one identity while recording another in
+            // resume/check state. Re-encoding is cheap and gives the
+            // segment one coherent identity.
             warn!(
                 file = %task.meta.real_name,
                 part = task.part,
@@ -410,7 +417,15 @@ pub(super) async fn worker(
                     part: p.task.part,
                     total: p.task.total,
                     message_id: p.message_id,
-                    bytes: (p.headers.len() + p.encoded.body.len()) as u64,
+                    // NZB `<segment bytes>` semantics (Body Encryption
+                    // Standard v1.2 "Transport boundary"): encrypted
+                    // releases declare the plaintext segment length,
+                    // ordinary uploads the wire-article length.
+                    bytes: if shared.encryption_adapter.is_some() {
+                        p.task.data.len() as u64
+                    } else {
+                        (p.headers.len() + p.encoded.body.len()) as u64
+                    },
                     from: Arc::from(p.task.from.as_str()),
                     date: p.date.clone(),
                     full_crc32: p.task.file_crc32.unwrap_or(0),

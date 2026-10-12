@@ -449,7 +449,7 @@ async fn post_data_files(
             i += 1;
             // Encrypted uploads only: the layout planner is encryption-gated
             // (see `prepare_resources`), so unencrypted uploads leave the
-            // index at 0 — meaningless without a bootstrap (audit P1).
+            // index at 0 — meaningless without a bootstrap.
             let segment_index = if shared.encryption_adapter.is_some() {
                 shared
                     .release_layout
@@ -572,7 +572,7 @@ async fn push_par2_file(
         let file_crc32 = (i as u32 == last_idx).then(|| crc.finalize());
         let part_number = i as u32 + 1;
         // Encryption-gated, like the data path in `post_data_files`: PAR2
-        // files only carry a segment identity for encrypted uploads (audit P1).
+        // files only carry a segment identity for encrypted uploads.
         let segment_index = if shared.encryption_adapter.is_some() {
             shared
                 .release_layout

@@ -22,7 +22,7 @@ use super::PostedSegment;
 /// keeps the authenticated identity of the first attempt. Posting plaintext
 /// for an encrypted upload would leak the file contents on the wire and
 /// produce an article the NZB's declared `yenc_encrypted` provenance cannot
-/// decrypt (audit P0 / Body Std v1.2 §8).
+/// decrypt (Body Encryption Standard v1.2 §8).
 pub(super) async fn repost_one(
     config: &Config,
     adapter: Option<&UploadEncryptionAdapter>,
@@ -113,6 +113,14 @@ pub(super) async fn repost_one(
     };
     let headers = article.build_headers();
     let wire_bytes = (headers.len() + encoded.body.len()) as u64;
+    // NZB `<segment bytes>` semantics (Body Encryption Standard v1.2
+    // "Transport boundary"): encrypted releases declare the plaintext
+    // segment length, ordinary uploads the wire-article length.
+    let nzb_bytes = if adapter.is_some() {
+        buf.len() as u64
+    } else {
+        wire_bytes
+    };
 
     let max_retries = config.retries.max(1);
     let mut last_err = anyhow::anyhow!("repost: no attempt made");
@@ -140,7 +148,7 @@ pub(super) async fn repost_one(
                         part: seg.part,
                         total: seg.total,
                         message_id,
-                        bytes: wire_bytes,
+                        bytes: nzb_bytes,
                         from: Arc::from(from.as_str()),
                         date: date.clone(),
                         full_crc32: seg.full_crc32,

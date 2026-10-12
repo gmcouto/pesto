@@ -58,8 +58,8 @@ pub fn nth_safe_segment_index(ordinal: u64) -> Option<u32> {
 
 /// The 1-based rank of `index` in the permitted-index sequence: how many
 /// permitted values are `<= index`. The next assigned safe index after a
-/// forbidden candidate is therefore `nth_safe_segment_index(rank)`. Test/
-/// vector helper (see `nzb::explicit_tests::test_conformance_vectors_index_allocation`).
+/// forbidden candidate is therefore `nth_safe_segment_index(rank)`. Test
+/// helper (see `nzb::explicit_tests::index_allocation_vectors_exercise_the_allocator`).
 #[cfg(test)]
 pub(crate) fn safe_index_rank(index: u32) -> u64 {
     let bytes = index.to_be_bytes();

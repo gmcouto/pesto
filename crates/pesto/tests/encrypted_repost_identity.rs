@@ -1,6 +1,7 @@
-//! Regression guards (audit P0): every repost path of an encrypted upload
+//! Regression guards: every repost path of an encrypted upload
 //! must re-post the *authenticated wire form* — re-encrypted with the same
-//! salt and segment index — never plaintext yEnc.
+//! salt and segment index — never plaintext yEnc (Body Encryption Standard
+//! v1.2 §8).
 //!
 //! Covers both paths:
 //! - the end-of-run blind retry (`poster::repost_failed_tasks`): the mock

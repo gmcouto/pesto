@@ -122,7 +122,6 @@ fn zero_length_encrypted_body_round_trips() {
     let salt = control::generate_alphabet_salt();
     let session = Arc::new(EncryptionSession::new(password, salt).unwrap());
     let upload_adapter = UploadEncryptionAdapter::new(session);
-    let _segment_index = 1u32;
     let mut body = Vec::new();
     let encoded = upload_adapter
         .encode_article(
@@ -141,6 +140,9 @@ fn zero_length_encrypted_body_round_trips() {
         )
         .unwrap();
 
+    // Zero-output sanity for empty segments: plaintext is empty (so decoded
+    // data stays empty), file_size=0 — begin==end==1 is permitted (nothing
+    // written to the assembly).
     let decoded = DownloadDecryptionAdapter::with_password(password)
         .decode_article(&encoded.body)
         .unwrap();

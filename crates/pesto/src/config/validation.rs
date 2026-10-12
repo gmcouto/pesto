@@ -29,9 +29,24 @@ pub fn validate_groups(groups: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// Check whether `s` consists strictly of valid XML 1.0 characters.
+///
+/// XML 1.0 Section 2.2 defines valid Char as:
+/// `#x9 | #xA | #xD | [#x20-#xD7FF] | [#xE000-#xFFFD] | [#x10000-#x10FFFF]`
+pub fn is_xml_representable(s: &str) -> bool {
+    s.chars().all(|c| {
+        matches!(
+            c,
+            '\t' | '\n' | '\r' | '\u{20}'..='\u{D7FF}' | '\u{E000}'..='\u{FFFD}' | '\u{10000}'..='\u{10FFFF}'
+        )
+    })
+}
+
 /// Validate encryption password configuration.
 ///
-/// - Rejects empty or whitespace-only password strings.
+/// - Rejects empty password strings.
+/// - Rejects XML-unrepresentable transport password characters before posting (STD-3).
+/// - Preserves valid whitespace (LF, tab, CR) and non-ASCII UTF-8 bytes verbatim without altering.
 /// - Rejects conflicting passwords if both `encrypt_password` and `nzb_password` are specified and differ.
 /// - Rejects a conflicting archive password (`--password`/`compress_password`)
 ///   when it differs from `encrypt_password` — see
@@ -42,12 +57,18 @@ pub fn validate_encryption(
     compress_password: Option<&str>,
 ) -> Result<()> {
     if let Some(pw) = encrypt_password {
-        if pw.trim().is_empty() {
+        if pw.is_empty() {
             bail!("encryption password cannot be empty");
         }
+        if !is_xml_representable(pw) {
+            bail!("encryption password contains characters that cannot be represented in XML");
+        }
         if let Some(nzb_pw) = nzb_password {
-            if nzb_pw.trim().is_empty() {
+            if nzb_pw.is_empty() {
                 bail!("nzb password cannot be empty");
+            }
+            if !is_xml_representable(nzb_pw) {
+                bail!("nzb password contains characters that cannot be represented in XML");
             }
             if nzb_pw != pw {
                 bail!("conflicting passwords: --encrypt-password and --nzb-password cannot differ");
@@ -99,10 +120,17 @@ mod tests {
     }
 
     #[test]
-    fn encryption_validation_whitespace_only_password_rejected() {
-        assert!(validate_encryption(Some("   "), None, None).is_err());
-        assert!(validate_encryption(Some("\t\n"), None, None).is_err());
-        assert!(validate_encryption(Some("secret"), Some("   "), None).is_err());
+    fn encryption_validation_whitespace_passwords_follow_std3_no_alteration() {
+        // STD-3: no silent alteration. A whitespace-only password is a valid
+        // (if unusual) secret — it round-trips through XML verbatim, so it
+        // is accepted as-is. Only the empty string and XML-unrepresentable
+        // bytes are rejected.
+        assert!(validate_encryption(Some("   "), None, None).is_ok());
+        assert!(validate_encryption(Some("\t\n"), None, None).is_ok());
+        // Empty nzb override is still rejected; a whitespace-only one that
+        // MATCHES the encryption password is the same secret.
+        assert!(validate_encryption(Some("secret"), Some(""), None).is_err());
+        assert!(validate_encryption(Some("secret"), Some("other"), None).is_err());
     }
 
     #[test]

@@ -1,4 +1,3 @@
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use super::*;
@@ -13,8 +12,8 @@ fn release_layout_assigns_prefix_base_by_natural_ordinal_not_processing_order() 
     let parts = vec![(2, 2), (1, 1)];
     let layout = ReleaseLayout::from_parts(2, &parts).expect("valid layout");
 
-    assert_eq!(layout.total_files(), 2);
-    assert_eq!(layout.total_segments(), 3);
+    assert_eq!(layout.total_files, 2);
+    assert_eq!(layout.total_segments, 3);
 
     let entry1 = layout.entry(1).expect("entry for ordinal 1");
     assert_eq!(entry1.release_ordinal, 1);
@@ -49,8 +48,8 @@ fn release_layout_planned_par2_index_and_volumes_follow_data_files() {
     let parts = vec![(1, 3), (2, 2), (3, 1), (4, 2), (5, 4)];
     let layout = ReleaseLayout::from_parts(5, &parts).expect("valid layout with PAR2");
 
-    assert_eq!(layout.total_files(), 5);
-    assert_eq!(layout.total_segments(), 12);
+    assert_eq!(layout.total_files, 5);
+    assert_eq!(layout.total_segments, 12);
 
     // Ordinal 1: prefix 0, segments 1..=3
     assert_eq!(layout.entry(1).unwrap().prefix_parts, 0);
@@ -117,7 +116,7 @@ fn release_layout_fails_on_missing_or_duplicate_ordinals() {
 }
 
 #[test]
-fn posted_segment_and_failed_task_carry_planned_index() {
+fn commit_result_records_planned_segment_index() {
     let dir = TempDir::new().unwrap();
     let file_path = dir.path().join("file.bin");
     std::fs::write(&file_path, b"test payload").unwrap();
@@ -196,27 +195,4 @@ fn posted_segment_and_failed_task_carry_planned_index() {
     assert_eq!(failed.len(), 1);
     let failed_task = &failed[0];
     assert_eq!(failed_task.segment_index, 1);
-}
-
-#[test]
-fn failed_task_preserves_planned_segment_index() {
-    let failed = FailedTask {
-        file_name: "video.mkv".into(),
-        client_path: "video.mkv".into(),
-        file_path: PathBuf::from("/tmp/video.mkv"),
-        message_id: "<failed-id-123@domain>".into(),
-        subject_name: "video.mkv".into(),
-        yenc_name: "video.mkv".into(),
-        file_size: 5000000,
-        part: 2,
-        total: 10,
-        from: "user <u@d>".into(),
-        date: (None, None),
-        full_crc32: 0x12345678,
-        file_index: 3,
-        total_files: 5,
-        segment_index: 99,
-    };
-
-    assert_eq!(failed.segment_index, 99);
 }

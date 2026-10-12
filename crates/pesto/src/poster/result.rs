@@ -38,6 +38,16 @@ pub(super) fn commit_result(
     date: (Option<String>, Option<u64>),
     server_idx: usize,
 ) {
+    // NZB `<segment bytes>` semantics (Body Encryption Standard v1.2
+    // "Transport boundary"): for encrypted releases the declared bytes are
+    // the dot-unstuffed PLAINTEXT segment length (they must equal the AAD
+    // `segmentBytes`), while ordinary uploads keep the upstream wire-article
+    // length.
+    let nzb_bytes = if shared.encryption_adapter.is_some() {
+        task.data.len() as u64
+    } else {
+        wire_bytes as u64
+    };
     if posted {
         if let Some(resume) = &shared.resume {
             // In-memory only — no disk write here. Every commit used to
@@ -59,7 +69,7 @@ pub(super) fn commit_result(
                 task.part,
                 SegmentRecord {
                     message_id: message_id.clone(),
-                    bytes: wire_bytes as u64,
+                    bytes: nzb_bytes,
                     confirmed: false,
                     check_disabled: !shared.config.check,
                     server_idx,
@@ -87,7 +97,7 @@ pub(super) fn commit_result(
             part: task.part,
             total: task.total,
             message_id,
-            bytes: wire_bytes as u64,
+            bytes: nzb_bytes,
             from: Arc::from(task.from.as_str()),
             date,
             full_crc32: task.file_crc32.unwrap_or(0),
@@ -214,7 +224,7 @@ pub(super) fn record_failure(
 /// output is identical in identity to the first attempt. Reposting
 /// plaintext for an encrypted upload would leak the file contents on the
 /// wire and produce an article undecryptable under the NZB's declared
-/// `yenc_encrypted` provenance (audit P0).
+/// `yenc_encrypted` provenance (Body Encryption Standard v1.2 §8).
 pub async fn repost_failed_tasks(
     config: &Config,
     adapter: Option<Arc<UploadEncryptionAdapter>>,
@@ -278,7 +288,7 @@ pub async fn repost_failed_tasks(
         // original salt + segment index (the adapter derives the same nonce
         // from the same index, and the session salt is the run's persistent
         // one) so the retried article is the authenticated wire form, not
-        // plaintext (Body Std v1.2 §8; audit P0). Unencrypted uploads keep
+        // plaintext (Body Std v1.2 §8). Unencrypted uploads keep
         // the plain `encode_part` path unchanged.
         let encoded = match adapter.as_ref() {
             Some(adapter) => {

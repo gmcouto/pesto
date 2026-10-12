@@ -85,7 +85,7 @@ pub(super) fn run_merge_season(
 
             if parsed.meta.yenc_encrypted {
                 anyhow::bail!(
-                    "cannot merge encrypted NZB `{}`: merging encrypted NZBs is not supported",
+                    "cannot merge encrypted NZB `{}`: merging encrypted NZBs is not supported in v1",
                     src.display()
                 );
             }

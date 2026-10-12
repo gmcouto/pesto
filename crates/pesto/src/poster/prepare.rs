@@ -356,8 +356,8 @@ pub(super) async fn prepare_inputs(
     // consumes `release_ordinal`) or when `--file-counter` needs it for the
     // `[filenum/total]` prefix: upstream's rank pass was `file_counter`-gated,
     // and unconditionally renumbering every ordinary upload is churn with no
-    // effect on the plain path (audit P23 — same computed value, kept
-    // upstream's shape of a single gated pass).
+    // effect on the plain path — same computed value, kept upstream's shape
+    // of a single gated pass.
     if config.file_counter || config.encrypt_password.is_some() {
         let mut order: Vec<usize> = (0..metas.len()).collect();
         order.sort_by(|&a, &b| natural_cmp(&metas[a].real_name, &metas[b].real_name));
@@ -420,11 +420,6 @@ impl ReleaseLayout {
     /// - Every file has `part_count >= 1`
     /// - Cumulative segments and individual indices do not overflow `u32::MAX`
     pub fn from_parts(total_files: u32, parts: &[(u32, u32)]) -> Result<Self> {
-        Self::from_detailed_parts(total_files, parts)
-    }
-
-    /// Construct a ReleaseLayout from a slice of `(release_ordinal, part_count)`.
-    pub fn from_detailed_parts(total_files: u32, parts: &[(u32, u32)]) -> Result<Self> {
         if total_files == 0 {
             bail!("release layout cannot have 0 total files");
         }
@@ -480,36 +475,6 @@ impl ReleaseLayout {
             total_segments: prefix_parts,
             entries,
         })
-    }
-
-    /// Total files in the release.
-    pub fn total_files(&self) -> u32 {
-        self.total_files
-    }
-
-    /// Total segments in the release.
-    pub fn total_segments(&self) -> u64 {
-        self.total_segments
-    }
-
-    /// Entries in the release layout.
-    pub fn entries(&self) -> &[LayoutEntry] {
-        &self.entries
-    }
-
-    /// Layout fingerprint computed deterministically from layout fields.
-    pub fn fingerprint(&self) -> String {
-        use sha2::{Digest, Sha256};
-        let mut hasher = Sha256::new();
-        hasher.update(self.total_files.to_le_bytes());
-        hasher.update(self.total_segments.to_le_bytes());
-        for entry in &self.entries {
-            hasher.update(entry.release_ordinal.to_le_bytes());
-            hasher.update(entry.part_count.to_le_bytes());
-            hasher.update(entry.prefix_parts.to_le_bytes());
-        }
-        let digest = hasher.finalize();
-        digest.iter().map(|b| format!("{b:02x}")).collect()
     }
 
     /// Get the layout entry for a given 1-based release ordinal.
@@ -603,7 +568,7 @@ impl ReleaseLayout {
         let total_files = u32::try_from(metas.len() + par2_file_count)
             .context("total release files exceed u32")?;
 
-        Self::from_detailed_parts(total_files, &parts_list)
+        Self::from_parts(total_files, &parts_list)
     }
 }
 
@@ -751,7 +716,7 @@ pub(super) async fn prepare_resources(
     // bootstrap carries. Unencrypted uploads have no bootstrap, no nonce and
     // no index, so running the planner there only adds a hand-written PAR2
     // packet-size prediction that can fail ("exceed safe segment-index
-    // capacity") or panic on an upload that never needed it (audit P1).
+    // capacity") or panic on an upload that never needed it.
     // `FileMeta::release_ordinal` is still assigned by `prepare_inputs` for
     // every run; the plain upload path simply never reads it back.
     let release_layout = Arc::new(if config.encrypt_password.is_some() {
@@ -771,7 +736,13 @@ pub(super) async fn prepare_resources(
                         "resume: release layout changed since the saved state was recorded \
                          — clearing session identity, records, and spool"
                     );
+                } else {
+                    eprintln!(
+                        "resume: posting parameters changed since the saved state was recorded \
+                         — clearing session identity, records, and spool"
+                    );
                 }
+                state.invalidate_session();
                 if let Some(dir) = spool_dir {
                     crate::spool::remove_all(dir);
                 }

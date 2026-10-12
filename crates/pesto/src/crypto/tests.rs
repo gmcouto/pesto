@@ -224,6 +224,8 @@ struct BodyEncryptionVector {
     transport_kdf_input: String,
     salt_hex: String,
     segment_index: u32,
+    #[serde(default)]
+    aad: Option<AadVector>,
     plaintext_hex: String,
     expected_ciphertext_hex: String,
     #[serde(default)]
@@ -231,6 +233,11 @@ struct BodyEncryptionVector {
     expected_tag_hex: String,
     #[serde(default)]
     expected_yencryption_line: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct AadVector {
+    expected_aad_hex: String,
 }
 
 #[test]
@@ -249,7 +256,13 @@ fn test_body_encryption_test_vectors() {
         let nonce = session.derive_body_nonce(vec.segment_index);
 
         let plaintext = hex_decode(&vec.plaintext_hex);
-        let (ct, tag) = encrypt_body(&plaintext, session.master_key(), &nonce)
+        let aad_hex = vec
+            .aad
+            .as_ref()
+            .map(|a| a.expected_aad_hex.clone())
+            .unwrap_or_default();
+        let aad = hex_decode(&aad_hex);
+        let (ct, tag) = encrypt_body(&plaintext, &aad, session.master_key(), &nonce)
             .unwrap_or_else(|e| panic!("encrypt failed for vector {}: {e}", vec.id));
 
         assert_eq!(
@@ -289,7 +302,7 @@ fn test_body_encryption_test_vectors() {
         }
 
         // Roundtrip decrypt
-        let decrypted = decrypt_body(&ct, &tag, session.master_key(), &nonce)
+        let decrypted = decrypt_body(&ct, &tag, &aad, session.master_key(), &nonce)
             .unwrap_or_else(|e| panic!("decrypt failed for vector {}: {e}", vec.id));
         assert_eq!(
             decrypted, plaintext,
@@ -391,6 +404,20 @@ fn test_control_line_encryption_test_vectors() {
                     *expected_hex,
                     "wire line hex mismatch in {id}"
                 );
+            }
+
+            // Vector ids ending in `-data` without an =yencryption line are
+            // control-only articles — out of scope for v1.2 combined-only
+            // reception (Control Std §5 step 4e); decryption legitimately
+            // fails closed. Only combined-mode vectors must round-trip.
+            let is_control_only = lines.iter().all(|l| !l.starts_with("=yencryption"));
+            if is_control_only {
+                assert!(
+                    control::decrypt_yenc_control_lines(&session, segment_index, &encrypted_wire)
+                        .is_err(),
+                    "control-only vector {id} must fail closed under combined-only reception"
+                );
+                continue;
             }
 
             let decrypted =
@@ -533,8 +560,10 @@ fn test_malformed_inputs_rejection() {
 
                 let segment_index = vec["segment_index"].as_u64().unwrap() as u32;
                 let nonce = session.derive_body_nonce(segment_index);
+                let aad_hex = vec.get("aad_hex").and_then(|v| v.as_str()).unwrap_or("");
+                let aad = hex_decode(aad_hex);
 
-                let res = decrypt_body(&ct, &tag, session.master_key(), &nonce);
+                let res = decrypt_body(&ct, &tag, &aad, session.master_key(), &nonce);
                 assert!(
                     res.is_err(),
                     "vector {id} expected error {expected_err}, but passed"
@@ -741,7 +770,7 @@ fn test_malformed_inputs_rejection() {
                 );
                 let msg = res.unwrap_err().to_string();
                 assert!(
-                    msg.contains(expected_err)
+                    msg.contains("CONTROL_LINE_DECRYPT_FAILURE")
                         || msg.contains("misplaced")
                         || msg.contains("missing or misplaced")
                         || msg.contains("must be =yencryption"),

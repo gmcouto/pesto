@@ -202,8 +202,6 @@ pub(super) fn escape(s: &str) -> String {
             '>' => out.push_str("&gt;"),
             '"' => out.push_str("&quot;"),
             '\'' => out.push_str("&apos;"),
-            // XML 1.0 forbids C0 controls other than tab / LF / CR.
-            c if c.is_control() && !matches!(c, '\t' | '\n' | '\r') => {}
             _ => out.push(c),
         }
     }

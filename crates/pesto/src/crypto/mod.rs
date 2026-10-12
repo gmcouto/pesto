@@ -24,7 +24,10 @@ pub(crate) mod kdf;
 mod tests;
 
 pub use adapter::{DownloadDecryptionAdapter, UploadEncryptionAdapter};
-pub use control::{extract_bootstrap_from_line1, generate_alphabet_salt};
+pub use control::{
+    decrypt_yenc_control_lines, encrypt_yenc_control_lines, extract_bootstrap_from_line1,
+    generate_alphabet_salt,
+};
 pub use kdf::EncryptionSession;
 
 // Error classification note (yEnc Body Encryption Standard §5 Two-Tier

@@ -11,18 +11,14 @@
 1077 crates/parmesan/src/encoder/gfni_kernels.rs
 897 crates/pesto/src/yenc/x86.rs
 #
-# Run preparation + layout planning (resume, inputs, resources, ReleaseLayout);
-# grew by the encryption-gated layout plumbing.
-821 crates/pesto/src/poster/prepare.rs
-#
 # Focused compatibility/end-to-end test suites that exercise whole pipelines
 # across many modules and are clearer as one scenario per file.
 937 crates/penne/tests/cli_download_end_to_end.rs
 868 crates/penne/tests/check.rs
 855 crates/pesto/tests/integration.rs
 821 crates/pesto/tests/full_shared_obfuscation.rs
-876 crates/pesto/tests/upload_encryption.rs
-920 crates/penne/tests/download_encryption.rs
-980 crates/pesto/src/resume.rs
-1265 crates/pesto/src/crypto/tests.rs
+958 crates/pesto/tests/upload_encryption.rs
+1056 crates/penne/tests/download_encryption.rs
+1008 crates/pesto/src/resume.rs
+1294 crates/pesto/src/crypto/tests.rs
 841 crates/pesto/src/bin/pesto/cli.rs

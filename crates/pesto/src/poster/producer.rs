@@ -477,7 +477,7 @@ pub(super) async fn producer(
                             // the pool (Phase 12b) after encoding the article.
                             // Encryption-gated (see `prepare_resources`):
                             // unencrypted uploads have no bootstrap/index and
-                            // the empty layout would return `None` (audit P1).
+                            // the empty layout returns `None`.
                             let identity = if shared.encryption_adapter.is_some() {
                                 shared
                                     .release_layout

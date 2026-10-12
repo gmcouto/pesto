@@ -297,25 +297,13 @@ impl ResumeState {
     pub fn validate_run(&mut self, current: &RunFingerprint) -> bool {
         if let Some(stored) = &self.fingerprint {
             if stored != current {
-                if self.session_identity.is_some() {
-                    self.session_invalidated = true;
-                }
-                self.segments.clear();
-                self.files.clear();
-                self.archive_stem = None;
-                self.release_prefix = None;
-                self.release_from = None;
+                self.invalidate_session();
                 self.fingerprint = Some(current.clone());
                 return false;
             }
         }
         self.fingerprint = Some(current.clone());
         true
-    }
-
-    /// The session identity recorded for this state, if any.
-    pub fn session_identity(&self) -> Option<&UploadSessionIdentity> {
-        self.session_identity.as_ref()
     }
 
     /// Record (or update) the upload session identity.
@@ -330,9 +318,10 @@ impl ResumeState {
 
     /// Invalidate the entire upload session, clearing session identity (salt and
     /// layout), all segment records, all file fingerprints, archive stem, and shared
-    /// release identity. Only used for encrypted uploads: an encrypted session
-    /// whose layout changed cannot reuse its salt/index space (nonce reuse risk),
-    /// so everything is dropped wholesale.
+    /// release identity. Used when the encrypted session can no longer be trusted:
+    /// a changed posting fingerprint (e.g. `--article-size`) or layout can reuse
+    /// the same key/index space over *different* plaintext — the nonce-reuse risk
+    /// PE-R1 describes — so the salt must be regenerated and every record dropped.
     pub fn invalidate_session(&mut self) {
         self.session_invalidated = true;
         self.session_identity = None;
@@ -351,10 +340,12 @@ impl ResumeState {
     }
 
     /// Validate the current release layout against this session's recorded
-    /// identity. If the stored layout differs from `current_layout`, if any
-    /// recorded segment has an identity inconsistent with `current_layout`, or
-    /// if the session was persisted by a different segment-index allocator
-    /// version, the entire session is invalidated and `false` is returned.
+    /// identity. If the stored layout differs from `current_layout`, the
+    /// entire session is invalidated and `false` is returned. (The posting
+    /// fingerprint — which covers parameters the layout does not capture,
+    /// e.g. `--line-length` — is validated separately by `validate_run`,
+    /// which calls `invalidate_session` on its own mismatch so the salt is
+    /// regenerated there too.)
     pub fn validate_session(&mut self, current_layout: &crate::poster::ReleaseLayout) -> bool {
         // `ReleaseLayout: PartialEq` covers exactly what the old hand-rolled
         // comparison checked (total_files gates entry-count equality, and
@@ -638,6 +629,41 @@ mod tests {
     }
 
     #[test]
+    fn fingerprint_mismatch_invalidates_session_identity_and_salt() {
+        use crate::poster::ReleaseLayout;
+
+        let mut s = ResumeState::default();
+        let fp1 = fp(768_000);
+        assert!(s.validate_run(&fp1));
+
+        let salt = [0x55u8; 16];
+        let layout = ReleaseLayout::from_parts(1, &[(1, 2)]).unwrap();
+        s.set_session_identity(UploadSessionIdentity::new(salt, layout));
+        s.record("a.bin", 1, "id1@x", 100);
+        assert_eq!(s.session_salt(), Some(&salt));
+
+        // Matching fingerprint preserves salt and identity.
+        assert!(s.validate_run(&fp1));
+        assert_eq!(s.session_salt(), Some(&salt));
+        assert_eq!(s.len(), 1);
+
+        // Parameter change (e.g. article size changed 768k -> 384k):
+        // even if layout part count could stay the same on another file,
+        // a fingerprint mismatch MUST invalidate the session salt to prevent nonce reuse (PE-1).
+        let fp2 = fp(384_000);
+        assert!(!s.validate_run(&fp2));
+        assert!(
+            s.session_salt().is_none(),
+            "salt must be cleared on fingerprint change"
+        );
+        assert!(
+            s.take_session_invalidated(),
+            "session_invalidated flag must be set for spool cleanup"
+        );
+        assert_eq!(s.len(), 0, "segments must be cleared");
+    }
+
+    #[test]
     fn file_matches_is_permissive_when_nothing_was_recorded() {
         let s = ResumeState::default();
         assert!(s.file_matches(
@@ -895,7 +921,10 @@ mod tests {
         // Load back: salt/layout/record identity all survive.
         let loaded = ResumeState::load(&path).unwrap();
         assert_eq!(loaded.session_salt(), Some(&salt));
-        assert_eq!(loaded.session_identity().map(|s| &s.layout), Some(&layout));
+        assert_eq!(
+            loaded.session_identity.as_ref().map(|s| &s.layout),
+            Some(&layout)
+        );
         let rec = loaded.get("file1.bin", 1).unwrap();
         assert_eq!(rec.message_id, "msg1@example.com");
         assert_eq!(rec.bytes, 1024);
@@ -904,7 +933,7 @@ mod tests {
         let path2 = dir.path().join("session_state_2.json");
         loaded.save(&path2).unwrap();
         let mut loaded2 = ResumeState::load(&path2).unwrap();
-        assert_eq!(loaded.session_identity(), loaded2.session_identity());
+        assert_eq!(loaded.session_salt(), loaded2.session_salt());
         assert_eq!(loaded.get("file1.bin", 1), loaded2.get("file1.bin", 1));
 
         // The unchanged layout still validates on the loaded state, and a
@@ -912,7 +941,6 @@ mod tests {
         assert!(loaded2.validate_session(&layout));
         let json = r#"{"files":{},"segments":{"a.bin\u00001":{"message_id":"id1@x","bytes":100}}}"#;
         let loaded: ResumeState = serde_json::from_str(json).unwrap();
-        assert!(loaded.session_identity().is_none());
         assert!(loaded.session_salt().is_none());
         assert_eq!(loaded.get("a.bin", 1).unwrap().message_id, "id1@x");
     }
@@ -951,7 +979,7 @@ mod tests {
         let mut s = make_state();
         let added_layout = ReleaseLayout::from_parts(3, &[(1, 2), (2, 3), (3, 1)]).unwrap();
         assert!(!s.validate_session(&added_layout));
-        assert!(s.session_identity().is_none());
+        assert!(s.session_salt().is_none());
         assert!(s.archive_stem().is_none());
         assert!(s.release_identity().is_none());
         assert_eq!(s.len(), 0);
@@ -967,14 +995,14 @@ mod tests {
         let mut s = make_state();
         let removed_layout = ReleaseLayout::from_parts(1, &[(1, 2)]).unwrap();
         assert!(!s.validate_session(&removed_layout));
-        assert!(s.session_identity().is_none());
+        assert!(s.session_salt().is_none());
         assert_eq!(s.len(), 0);
 
         // Resized file (parts for file 1: 5 instead of 2)
         let mut s = make_state();
         let resized_layout = ReleaseLayout::from_parts(2, &[(1, 5), (2, 3)]).unwrap();
         assert!(!s.validate_session(&resized_layout));
-        assert!(s.session_identity().is_none());
+        assert!(s.session_salt().is_none());
         assert_eq!(s.len(), 0);
     }
 }

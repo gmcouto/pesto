@@ -1,7 +1,7 @@
 //! Format-Preserving Encryption for yEnc control lines (NIST SP 800-38G FF1 over Radix 253).
 
 use aes::Aes256;
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use fpe::ff1::{FlexibleNumeralString, FF1};
 
 use super::kdf::EncryptionSession;
@@ -278,84 +278,86 @@ pub fn decrypt_yenc_control_lines(
 
     // Process lines 2..N-1
     //
-    // Header-loop probe semantics (Control Std §5 step 4, amended v1.2):
-    // - FF1 decryption ERROR on a line in the expected-header region fails
-    //   closed under PROVIDER_FAILOVER — it must NEVER become passthrough
-    //   data (out-of-Alphabet bytes in a header position are corruption).
-    // - Decryption SUCCESS whose plaintext does not begin with `=y`
-    //   terminates the loop: this was the first data line, emitted
-    //   unchanged (a data line is not FF1 ciphertext — probing it yields
-    //   garbage plaintext, so the ORIGINAL line content is passed through).
-    //   A corrupted header that still FF1-decrypts (bit flip) lands here;
-    //   the adapter layer then fails closed on the missing/misplaced
-    //   `=yencryption` header, so no unauthenticated content is released.
-    // - Decryption success yielding an unexpected `=y` control header
-    //   (neither the expected `=ypart`/`=yencryption`) is a corruption
-    //   case — fail closed.
-    let mut in_header = true;
-    for (i, line) in active_lines
-        .iter()
-        .enumerate()
-        .take(n.saturating_sub(1))
-        .skip(1)
-    {
-        let line_index = (i + 1) as u32;
-        if in_header {
-            let tweak = session.derive_control_tweak(segment_index, line_index);
-            match ff1_decrypt_line(session.control_key(), &tweak, line.content) {
-                Ok(pt) if pt.starts_with(b"=ypart ") => {
-                    out.extend_from_slice(&pt);
-                    out.extend_from_slice(line.ending);
-                }
-                Ok(pt) if pt.starts_with(b"=yencryption ") => {
-                    out.extend_from_slice(&pt);
-                    out.extend_from_slice(line.ending);
-                    in_header = false;
-                }
-                // Decryption succeeded but yielded an unexpected control
-                // header (e.g. a second =ybegin or a premature =yend): the
-                // line is corrupted or misplaced — fail closed, never emit
-                // it as a data line.
-                Ok(pt) if pt.starts_with(b"=y") => bail!(
-                    "UNEXPECTED_CONTROL_LINE: line {line_index} decrypted to unexpected \
-                     control header while scanning the header region"
-                ),
-                // First data line: decryption succeeded and the plaintext is
-                // not a control line — terminate the header loop and pass
-                // the ORIGINAL line through (a data line is not FF1
-                // ciphertext; probing it produces garbage plaintext).
-                Ok(_) => {
-                    in_header = false;
-                    out.extend_from_slice(line.content);
-                    out.extend_from_slice(line.ending);
-                }
-                // FF1 decryption error on an expected-header line: provider
-                // corruption — fail closed (PROVIDER_FAILOVER), never
-                // passthrough as a data line.
-                Err(e) => {
-                    bail!(e.context(format!(
-                        "control-line decryption failed at line {line_index} in the header region"
-                    )))
-                }
-            }
-        } else {
-            out.extend_from_slice(line.content);
-            out.extend_from_slice(line.ending);
+    // Deterministic combined-mode restoration (Control Std v1.2 §5, step 4):
+    // Header positions are inferred from the restored `=ybegin` line:
+    // - Single-part: Line 1 = =ybegin, Line 2 = =yencryption, D = Line 3
+    // - Multipart: Line 1 = =ybegin, Line 2 = =ypart, Line 3 = =yencryption, D = Line 4
+    // Data lines (D..N-1) are NEVER decrypted, never trial-decrypted, and pass
+    // through untouched byte-for-byte. The footer is strictly Line N (=yend).
+    let is_multipart = pt1
+        .windows(5)
+        .position(|w| w == b"name=")
+        .map(|name_idx| {
+            let kv_prefix = &pt1[..name_idx];
+            kv_prefix
+                .split(|&b| b == b' ' || b == b'\t')
+                .any(|tok| tok.starts_with(b"part="))
+        })
+        .unwrap_or(false);
+
+    let d_start = if is_multipart {
+        if n < 4 {
+            bail!("LINE_TRUNCATED: multipart encrypted article has fewer than 4 lines");
         }
+
+        // Line 2: =ypart
+        let line2 = &active_lines[1];
+        let tweak2 = session.derive_control_tweak(segment_index, 2);
+        let pt2 = ff1_decrypt_line(session.control_key(), &tweak2, line2.content)
+            .context("control-line decryption failed at line 2 in the header region")?;
+        if !pt2.starts_with(b"=ypart ") {
+            bail!("CONTROL_LINE_DECRYPT_FAILURE: line 2 decrypted text does not start with =ypart");
+        }
+        out.extend_from_slice(&pt2);
+        out.extend_from_slice(line2.ending);
+
+        // Line 3: =yencryption
+        let line3 = &active_lines[2];
+        let tweak3 = session.derive_control_tweak(segment_index, 3);
+        let pt3 = ff1_decrypt_line(session.control_key(), &tweak3, line3.content)
+            .context("control-line decryption failed at line 3 in the header region")?;
+        if !pt3.starts_with(b"=yencryption ") {
+            bail!("CONTROL_LINE_DECRYPT_FAILURE: line 3 decrypted text does not start with =yencryption");
+        }
+        out.extend_from_slice(&pt3);
+        out.extend_from_slice(line3.ending);
+
+        3
+    } else {
+        if n < 3 {
+            bail!("LINE_TRUNCATED: single-part encrypted article has fewer than 3 lines");
+        }
+
+        // Line 2: =yencryption
+        let line2 = &active_lines[1];
+        let tweak2 = session.derive_control_tweak(segment_index, 2);
+        let pt2 = ff1_decrypt_line(session.control_key(), &tweak2, line2.content)
+            .context("control-line decryption failed at line 2 in the header region")?;
+        if !pt2.starts_with(b"=yencryption ") {
+            bail!("CONTROL_LINE_DECRYPT_FAILURE: line 2 decrypted text does not start with =yencryption");
+        }
+        out.extend_from_slice(&pt2);
+        out.extend_from_slice(line2.ending);
+
+        2
+    };
+
+    // Data lines: d_start..n-1 pass through untouched
+    for line in &active_lines[d_start..n - 1] {
+        out.extend_from_slice(line.content);
+        out.extend_from_slice(line.ending);
     }
 
-    // Process line N (footer) if N > 1
-    if n > 1 {
-        let footer = &active_lines[n - 1];
-        let line_index = n as u32;
-        let tweak = session.derive_control_tweak(segment_index, line_index);
-        let pt_footer = ff1_decrypt_line(session.control_key(), &tweak, footer.content)?;
-        if !pt_footer.starts_with(b"=yend") {
-            bail!("CONTROL_LINE_DECRYPT_FAILURE: footer decrypted text does not start with =yend");
-        }
-        out.extend_from_slice(&pt_footer);
-        out.extend_from_slice(footer.ending);
+    // Process line N (footer)
+    let footer = &active_lines[n - 1];
+    let line_index = n as u32;
+    let tweak = session.derive_control_tweak(segment_index, line_index);
+    let pt_footer = ff1_decrypt_line(session.control_key(), &tweak, footer.content)?;
+    if !pt_footer.starts_with(b"=yend") {
+        bail!("CONTROL_LINE_DECRYPT_FAILURE: footer decrypted text does not start with =yend");
     }
+    out.extend_from_slice(&pt_footer);
+    out.extend_from_slice(footer.ending);
 
     for blank in trailing_blanks {
         out.extend_from_slice(blank.content);

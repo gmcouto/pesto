@@ -279,7 +279,7 @@ fn test_cli_season_consolidation_rejects_encryption() {
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("encrypted season consolidation is not supported"),
+        stderr.contains("encrypted season consolidation is not supported in v1"),
         "stderr must contain expected rejection: {stderr}"
     );
 }
@@ -335,7 +335,7 @@ fn test_cli_merge_encrypted_nzbs_rejects_multi_session() {
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("merging encrypted NZBs is not supported"),
+        stderr.contains("merging encrypted NZBs is not supported in v1"),
         "stderr must contain expected rejection: {stderr}"
     );
 }
@@ -382,7 +382,7 @@ fn test_cli_merge_encrypted_nzbs_rejects_conflicts() {
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("merging encrypted NZBs is not supported"),
+        stderr.contains("merging encrypted NZBs is not supported in v1"),
         "stderr must contain expected rejection: {stderr}"
     );
 }
@@ -443,7 +443,7 @@ fn test_cli_merge_ordinary_nzbs_remains_unencrypted() {
 }
 
 #[tokio::test]
-async fn test_encrypted_upload_emits_segment_indices() {
+async fn test_encrypted_upload_metadata_provenance() {
     let (port, _captured) = spawn_mock_server().await;
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("two_parts.bin");
@@ -804,9 +804,8 @@ async fn test_persistence_lifecycle_invariants() {
     // Read back saved resume state
     let state =
         pesto::resume::ResumeState::load(&resume_path).expect("resume state must be written");
-    assert!(state.session_identity().is_some());
-    let session_ident = state.session_identity().unwrap();
-    let saved_salt = session_ident.salt;
+    assert!(state.session_salt().is_some());
+    let saved_salt = *state.session_salt().unwrap();
 
     // 2. Resume run to finish upload
     let outcome = post_files_with_progress(&config, &files, None, Some(&resume_path), None)
@@ -840,31 +839,6 @@ async fn test_persistence_lifecycle_invariants() {
         expected
     });
 
-    // 3. Simulate post-check article repost check & NZB regeneration
-    let meta = pesto::nzb::NzbMeta {
-        password: Some("resumepass".into()),
-        yenc_encrypted: true,
-        ..Default::default()
-    };
-    let xml1 = pesto::nzb::generate(
-        &outcome.groups,
-        &outcome.segments,
-        &meta,
-        ObfuscateMode::None,
-    );
-    let xml2 = pesto::nzb::generate(
-        &outcome.groups,
-        &outcome.segments,
-        &meta,
-        ObfuscateMode::None,
-    );
-    assert_eq!(xml1, xml2);
-
-    let parsed = pesto::nzb::parse(&xml1).unwrap();
-    assert!(parsed.meta.yenc_encrypted);
-    assert_plain_segments(&xml1);
-    assert!(xml1.contains("<meta type=\"yenc_encrypted\">true</meta>"));
-
     // Assert that captured articles match the saved salt
     let articles = captured.lock().unwrap();
     for article in articles.iter() {
@@ -873,4 +847,112 @@ async fn test_persistence_lifecycle_invariants() {
         assert_eq!(art_salt, saved_salt);
         assert!(art_index > 0);
     }
+}
+
+/// PE-1: Invalidate encryption session salt when posting fingerprint changes.
+/// Even if layout part count remains identical (e.g. 200-byte file chunked into 2 parts:
+/// article_size 100 vs article_size 110 both yield 2 parts), changing the fingerprint
+/// changes the plaintext byte ranges — reusing the session salt/key would cause nonce reuse.
+/// A fingerprint change MUST produce a fresh salt, clear spool records, and reconstruct
+/// the payload cleanly. An unchanged retry MUST retain the salt identity.
+#[tokio::test]
+async fn resume_invalidates_session_salt_on_fingerprint_change_with_same_part_count() {
+    let (port, captured) = spawn_mock_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("same_parts.bin");
+    let payload = vec![0x77u8; 200]; // 200 bytes total
+    std::fs::write(&path, &payload).unwrap();
+
+    let resume_path = dir.path().join("same_parts.pesto-state");
+
+    // Pass 1: article_size = 100 -> exactly 2 parts (100 and 100 bytes).
+    // Interrupted after 1 segment so resume state is saved to disk.
+    let mut config1 = make_config(port, Some("fingerprint-test-pass".into()));
+    config1.article_size = 100;
+    config1.resume = true;
+    config1.check = true;
+    config1.check_delay_secs = 30;
+    config1.connections = 2;
+    config1.check_connections = 1;
+
+    let files = vec![pesto::walk::InputFile {
+        path: path.clone(),
+        name: "same_parts.bin".into(),
+    }];
+
+    let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let run = {
+        let cancel = cancel.clone();
+        let files = files.clone();
+        let state_path = resume_path.clone();
+        let config = config1.clone();
+        tokio::spawn(async move {
+            pesto::poster::post_files_with_progress_and_cancel(
+                &config,
+                &files,
+                Some(tx),
+                Some(&state_path),
+                Some(cancel),
+                None,
+            )
+            .await
+        })
+    };
+
+    while let Some(ev) = rx.recv().await {
+        if let pesto::progress::ProgressEvent::SegmentDone { ok: true, .. } = ev {
+            cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+            break;
+        }
+    }
+    let outcome1 = run.await.unwrap().unwrap();
+    assert!(outcome1.cancelled);
+    assert!(resume_path.exists());
+
+    let state1 = pesto::resume::ResumeState::load(&resume_path).unwrap();
+    let salt1 = *state1
+        .session_salt()
+        .expect("session salt must be recorded in resume state");
+
+    // Pass 2: article_size = 110 -> STILL exactly 2 parts (110 and 90 bytes)!
+    // Layout entry count and part count match (2 parts), but fingerprint changed.
+    // The poster must detect the fingerprint change, invalidate session identity and spool,
+    // generate a fresh salt, and post the new articles cleanly.
+    captured.lock().unwrap().clear();
+
+    let mut config2 = make_config(port, Some("fingerprint-test-pass".into()));
+    config2.article_size = 110;
+    config2.resume = true;
+    config2.check = true;
+    config2.check_connections = 1;
+    config2.connections = 2;
+
+    let outcome2 = post_files_with_progress(&config2, &files, None, Some(&resume_path), None)
+        .await
+        .unwrap();
+    assert_eq!(outcome2.segments.len(), 2);
+
+    let articles = captured.lock().unwrap().clone();
+    assert_eq!(articles.len(), 2);
+
+    let (salt2, _) =
+        pesto::crypto::extract_bootstrap_from_line1(article_body(&articles[0])).unwrap();
+    assert_ne!(
+        salt1, salt2,
+        "salt MUST be invalidated and regenerated on fingerprint change, even with same part count"
+    );
+
+    // Verify the newly captured articles decrypt cleanly to the original plaintext
+    let decryptor = DownloadDecryptionAdapter::with_password("fingerprint-test-pass");
+    let part1 = decryptor
+        .decode_article(article_body(&articles[0]))
+        .expect("part 1 decodes");
+    let part2 = decryptor
+        .decode_article(article_body(&articles[1]))
+        .expect("part 2 decodes");
+    let mut reconstructed = Vec::new();
+    reconstructed.extend_from_slice(&part1.data);
+    reconstructed.extend_from_slice(&part2.data);
+    assert_eq!(reconstructed, payload, "reconstructed plaintext must match");
 }

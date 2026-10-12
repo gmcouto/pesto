@@ -116,6 +116,7 @@ struct WorkItem {
     file_name: String,
     part: u32,
     message_id: String,
+    bytes: u64,
 }
 
 /// Per-file completion tracking shared across the cache-hit prepass and
@@ -273,6 +274,7 @@ pub async fn download_queue_with_decryptor(
                 file_name: file.name.clone(),
                 part: seg.part,
                 message_id: seg.message_id.clone(),
+                bytes: seg.bytes,
             });
         }
     }
@@ -583,7 +585,16 @@ async fn worker_loop(
         };
 
         let decoded_result = if let Some(ref decryptor) = ctx.decryptor {
-            decryptor.decode_article(&body)
+            decryptor.decode_article(&body).and_then(|decoded| {
+                if item.bytes > 0 && decoded.data.len() as u64 != item.bytes {
+                    anyhow::bail!(
+                        "SEGMENT_BYTES_MISMATCH: fetched article plaintext length ({}) does not match NZB declared bytes ({})",
+                        decoded.data.len(),
+                        item.bytes
+                    );
+                }
+                Ok(decoded)
+            })
         } else {
             decode_part(&body)
         };
@@ -613,8 +624,8 @@ async fn worker_loop(
                 if ctx.decryptor.is_some() {
                     // Decryption/decode failures on an encrypted download are
                     // actionable (tampered copy, wrong password); the plain
-                    // path keeps upstream's silent SegmentCorrupt event (audit
-                    // D10 — no new per-article log on ordinary downloads).
+                    // path keeps upstream's silent SegmentCorrupt event (no
+                    // new per-article log on ordinary downloads).
                     tracing::warn!(
                         message_id = %item.message_id,
                         file = %item.file_name,

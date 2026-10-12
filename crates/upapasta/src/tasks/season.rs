@@ -36,7 +36,7 @@ pub(crate) fn check_season_encryption_preflight(
     is_encrypted: bool,
 ) -> Result<(), &'static str> {
     if folder_mode == crate::app::FolderMode::Season && is_encrypted {
-        Err("encrypted season consolidation is not supported: each episode would be uploaded as its own release before any combined NZB could reference it, and no code path exists to merge those session-specific encrypted articles afterwards; use per-file mode instead")
+        Err("encrypted season consolidation is not supported in v1; use per-file mode instead")
     } else {
         Ok(())
     }

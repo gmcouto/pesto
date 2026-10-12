@@ -33,8 +33,8 @@ pub fn download_decryptor(
         .password
         .as_deref()
         .context("encrypted NZB is missing password metadata")?;
-    if password.trim().is_empty() {
-        bail!("encrypted NZB password is empty or whitespace-only");
+    if password.is_empty() {
+        bail!("encrypted NZB password is empty");
     }
     Ok(Some(std::sync::Arc::new(
         pesto::crypto::DownloadDecryptionAdapter::with_password(password),
@@ -162,12 +162,21 @@ mod tests {
         let decryptor = download_decryptor(&meta_encrypted).unwrap();
         assert!(decryptor.is_some());
 
-        // 4. Encrypted metadata with whitespace-only password errors fail-closed
+        // 4. Encrypted metadata with empty password errors fail-closed.
+        // STD-3: no silent alteration — a whitespace-only password is a
+        // valid (if unusual) secret and creates a decryptor; only the
+        // empty string is rejected.
+        let meta_empty_pwd = pesto::nzb::NzbMeta {
+            yenc_encrypted: true,
+            password: Some(String::new()),
+            ..Default::default()
+        };
+        assert!(download_decryptor(&meta_empty_pwd).is_err());
         let meta_whitespace_pwd = pesto::nzb::NzbMeta {
             yenc_encrypted: true,
             password: Some("   ".into()),
             ..Default::default()
         };
-        assert!(download_decryptor(&meta_whitespace_pwd).is_err());
+        assert!(download_decryptor(&meta_whitespace_pwd).is_ok());
     }
 }

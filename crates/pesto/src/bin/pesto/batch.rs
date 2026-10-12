@@ -189,9 +189,7 @@ pub(super) async fn run_batch(
 
     if season_nzb.is_some() && params.config.encrypt_password.is_some() {
         anyhow::bail!(
-            "encrypted season consolidation is not supported: each episode would be uploaded \
-             as its own release before any combined NZB could reference it, and no code path \
-             exists to merge those session-specific encrypted articles afterwards; \
+            "encrypted season consolidation is not supported in v1; \
              use --each without --season for encrypted uploads"
         );
     }

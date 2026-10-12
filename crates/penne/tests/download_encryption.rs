@@ -1,4 +1,4 @@
-//! Consolidated Penne encrypted-download integration tests (audit D1):
+//! Consolidated Penne encrypted-download integration tests:
 //! multipart decrypt round trip, tamper failover, zero output/no cache on
 //! authentication failure, spoof rejection, cache resume, boundary segment
 //! indices, and the real-PAR2 verify/repair assertions.
@@ -205,6 +205,39 @@ fn tamper_data_line(article: &[u8], data_line_index: usize) -> Vec<u8> {
     assert!(lines.len() > data_line_index + 1);
     lines[data_line_index][0] ^= 0x01;
     lines.into_iter().flatten().collect()
+}
+
+fn tamper_footer_crc(
+    session: &EncryptionSession,
+    segment_index: u32,
+    wire_article: &[u8],
+) -> Vec<u8> {
+    let restored =
+        pesto::crypto::decrypt_yenc_control_lines(session, segment_index, wire_article).unwrap();
+    let text = String::from_utf8_lossy(&restored);
+    let tampered_text = if let Some(idx) = text.find("pcrc32=") {
+        let mut t = text.into_owned();
+        let replacement = if &t[idx + 7..idx + 8] == "f" {
+            "0"
+        } else {
+            "f"
+        };
+        t.replace_range(idx + 7..idx + 8, replacement);
+        t
+    } else if let Some(idx) = text.find("crc32=") {
+        let mut t = text.into_owned();
+        let replacement = if &t[idx + 6..idx + 7] == "f" {
+            "0"
+        } else {
+            "f"
+        };
+        t.replace_range(idx + 6..idx + 7, replacement);
+        t
+    } else {
+        panic!("neither pcrc32 nor crc32 found in yend");
+    };
+    pesto::crypto::encrypt_yenc_control_lines(session, segment_index, tampered_text.as_bytes())
+        .unwrap()
 }
 
 /// Multipart encrypted round trip through the production download path:
@@ -535,6 +568,109 @@ async fn unencrypted_spoof_rejected_for_encrypted_download() {
         penne::cache::load(dest_dir.path(), "spoof-msg-01").is_none(),
         "rejected spoof must not be written to the resume cache"
     );
+}
+
+/// PE-2: A bad ciphertext pcrc32 on a part=1 total=1 article (single-part
+/// with explicit multipart framing) must fail with provider failover
+/// (CorruptSegment) and zero output — the pcrc32 check must not be skipped
+/// just because `total == 1`.
+#[tokio::test]
+async fn single_part_with_pcrc32_mismatch_fails_over_with_zero_output() {
+    let password = "pcrc32-single-part-password";
+    let salt = [0x4Bu8; 16];
+    let session = Arc::new(EncryptionSession::new(password, salt).unwrap());
+
+    let payload = b"single part with tampered ciphertext pcrc32 payload";
+    let enc = encode_article(
+        &session,
+        "single.bin",
+        payload.len() as u64,
+        PartSpec {
+            number: 1,
+            total: 1,
+            offset: 0,
+        },
+        payload,
+        1,
+    );
+
+    // The encoder emits `part=`/`=ypart`/`pcrc32=` framing only when
+    // `spec.total > 1` (see `yenc::encode_part_into`), so `encode_article`
+    // above produced an unframed single-part article. Rebuild it with REAL
+    // `part=1 total=1` framing (nyuu-style) while the control lines are
+    // restored, then re-encrypt them — per combined mode, the framing must
+    // exist before control-line encryption (Body Std v1.2 §5). The good
+    // pcrc32 is the ciphertext CRC the encoder already wrote as `crc32=`.
+    let restored = pesto::crypto::decrypt_yenc_control_lines(&session, 1, &enc).unwrap();
+    let mut lines: Vec<Vec<u8>> = restored
+        .split_inclusive(|&b| b == b'\n')
+        .map(|l| l.to_vec())
+        .collect();
+    assert!(lines[0].starts_with(b"=ybegin line="), "unframed =ybegin");
+    assert!(lines[0].ends_with(b"\r\n"));
+    // =ybegin gains `part=1 total=1` (before `line=`, matching the encoder).
+    lines[0].splice(8..8, b"part=1 total=1 ".iter().copied());
+    // Inject `=ypart` between =ybegin and =yencryption.
+    lines.insert(
+        1,
+        format!("=ypart begin=1 end={}\r\n", payload.len()).into_bytes(),
+    );
+    // Footer: `crc32=<crc>` becomes `part=1 pcrc32=<crc>` (drop `crc32=`).
+    let footer = lines.last_mut().unwrap();
+    assert!(footer.starts_with(b"=yend size="));
+    let crc_pos = footer
+        .windows(6)
+        .position(|w| w == b"crc32=")
+        .expect("footer carries crc32=");
+    footer.splice(crc_pos..crc_pos + 6, b"part=1 pcrc32=".iter().copied());
+
+    let framed = pesto::crypto::encrypt_yenc_control_lines(&session, 1, &lines.concat()).unwrap();
+
+    // Tamper the pcrc32 on the framed article (tamper_footer_crc hits its
+    // `pcrc32=` branch now that the footer carries one).
+    let tampered = tamper_footer_crc(&session, 1, &framed);
+
+    let mut known = HashMap::new();
+    known.insert("pcrc-msg-01".to_string(), tampered);
+    let addr = spawn_fake_server(known);
+
+    let queue = penne::queue::DownloadQueue {
+        files: vec![penne::queue::QueuedFile {
+            name: "single.bin".to_string(),
+            segments: vec![penne::queue::QueuedSegment {
+                message_id: "pcrc-msg-01".to_string(),
+                part: 1,
+                bytes: payload.len() as u64,
+            }],
+        }],
+    };
+
+    let dest_dir = tempfile::tempdir().unwrap();
+    let decryptor = Arc::new(DownloadDecryptionAdapter::with_password(password));
+
+    let outcome = download_queue_with_decryptor(
+        &queue,
+        &[ServerTier::solo(server_entry(addr))],
+        dest_dir.path(),
+        0,
+        None,
+        Some(decryptor),
+    )
+    .await
+    .expect("download finishes with a corrupt segment reported");
+
+    assert!(outcome.segments.is_empty(), "no segment fetched");
+    assert_eq!(outcome.corrupt.len(), 1);
+    assert!(
+        outcome.corrupt[0].error.contains("ciphertext CRC mismatch"),
+        "error must be the ciphertext CRC failure, got: {}",
+        outcome.corrupt[0].error
+    );
+
+    // ZERO-OUTPUT GUARANTEE: no final file, no temp sibling, no cache entry.
+    assert!(!dest_dir.path().join("single.bin").exists());
+    assert!(!dest_dir.path().join("single.bin.penne-part").exists());
+    assert!(penne::cache::load(dest_dir.path(), "pcrc-msg-01").is_none());
 }
 
 /// Cache resume: after an interrupted run, re-downloading the same release

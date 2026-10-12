@@ -1,4 +1,4 @@
-//! Consolidated NZB encryption-metadata tests (audit P9): the former
+//! Consolidated NZB encryption-metadata tests: the former
 //! near-identical generate/parse round-trips collapsed into one writer test,
 //! one fail-closed reader test, one archive-password test, one mixed-release
 //! test, and the two vector runners.
@@ -249,7 +249,7 @@ fn nzb_segment_identity_vectors_run_against_reader_and_decrypt_body() {
     let fixture: serde_json::Value = serde_json::from_str(&content).unwrap();
     let vectors = fixture["vectors"].as_array().expect("vectors array");
 
-    assert_eq!(vectors.len(), 10, "expected exactly 10 test vectors");
+    assert_eq!(vectors.len(), 16, "expected exactly 16 test vectors");
     let mut count = 0;
 
     for vec in vectors {
@@ -313,9 +313,9 @@ fn nzb_segment_identity_vectors_run_against_reader_and_decrypt_body() {
 
                 let session = EncryptionSession::new(pwd, salt).unwrap();
 
-                let decrypt_tampered = |t_index: u32, ct: Vec<u8>, tag: [u8; 16]| {
+                let decrypt_tampered = |t_index: u32, ct: Vec<u8>, tag: [u8; 16], aad: Vec<u8>| {
                     let nonce = session.derive_body_nonce(t_index);
-                    decrypt_body(&ct, &tag, session.master_key(), &nonce)
+                    decrypt_body(&ct, &tag, &aad, session.master_key(), &nonce)
                 };
 
                 if let Some(tampered_segs) = vec.get("tampered_segments").and_then(|v| v.as_array())
@@ -326,8 +326,10 @@ fn nzb_segment_identity_vectors_run_against_reader_and_decrypt_body() {
                         let tag_vec = hex_decode(t_seg["tag_hex"].as_str().unwrap());
                         let mut tag = [0u8; 16];
                         tag.copy_from_slice(&tag_vec);
+                        let aad_hex = t_seg.get("aad_hex").and_then(|v| v.as_str()).unwrap_or("");
+                        let aad = hex_decode(aad_hex);
 
-                        let res = decrypt_tampered(t_index, ct, tag);
+                        let res = decrypt_tampered(t_index, ct, tag, aad);
                         assert!(
                             res.is_err(),
                             "vector {id} tampered segment {t_index} succeeded but must fail"
@@ -339,20 +341,48 @@ fn nzb_segment_identity_vectors_run_against_reader_and_decrypt_body() {
                     let tag_vec = hex_decode(vec["tag_hex"].as_str().unwrap());
                     let mut tag = [0u8; 16];
                     tag.copy_from_slice(&tag_vec);
+                    let aad_hex = vec.get("aad_hex").and_then(|v| v.as_str()).unwrap_or("");
+                    let aad = hex_decode(aad_hex);
 
-                    let res = decrypt_tampered(t_index, ct, tag);
+                    let res = decrypt_tampered(t_index, ct, tag, aad);
                     assert!(
                         res.is_err(),
                         "vector {id} tampered index {t_index} succeeded but must fail"
                     );
                 }
             }
+            "metadata_mutation" => {
+                let parsed = parse(vec["nzb_xml"].as_str().unwrap())
+                    .unwrap_or_else(|e| panic!("vector {id} failed parse: {e}"));
+                assert!(parsed.meta.yenc_encrypted);
+
+                let pwd = vec["password"].as_str().unwrap();
+                let salt_vec = hex_decode(vec["salt_hex"].as_str().unwrap());
+                let mut salt = [0u8; 16];
+                salt.copy_from_slice(&salt_vec);
+
+                let session = EncryptionSession::new(pwd, salt).unwrap();
+                let seg_index = vec["segment_index"].as_u64().unwrap() as u32;
+                let nonce = session.derive_body_nonce(seg_index);
+
+                let ct = hex_decode(vec["ciphertext_hex"].as_str().unwrap());
+                let tag_vec = hex_decode(vec["tag_hex"].as_str().unwrap());
+                let mut tag = [0u8; 16];
+                tag.copy_from_slice(&tag_vec);
+                let aad = hex_decode(vec["aad_hex"].as_str().unwrap());
+
+                let res = decrypt_body(&ct, &tag, &aad, session.master_key(), &nonce);
+                assert!(
+                    res.is_err(),
+                    "vector {id} metadata mutation succeeded but must fail authentication"
+                );
+            }
             other => panic!("unknown category {other}"),
         }
         count += 1;
     }
 
-    assert_eq!(count, 10, "must process exactly 10 vectors");
+    assert_eq!(count, 16, "must process exactly 16 vectors");
 }
 
 /// VEC-07 (index_allocation.json): uploader-skip vectors exercised against

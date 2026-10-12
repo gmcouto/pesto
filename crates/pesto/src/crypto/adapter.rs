@@ -98,7 +98,15 @@ impl UploadEncryptionAdapter {
         body: &mut Vec<u8>,
     ) -> Result<EncodedPart> {
         let nonce = self.session.derive_body_nonce(segment_index);
-        let (ciphertext, tag) = body::encrypt_body(data, self.session.master_key(), &nonce)?;
+        // AAD geometry (Body Encryption Standard v1.2 §2.1): multipart
+        // partBegin is the =ypart `begin` (= offset + 1); single-part
+        // partBegin is 1 (=offset 0 + 1, same formula). segmentBytes is the
+        // plaintext byte count, which equals end-begin+1 (multipart) or the
+        // =ybegin `size` (single-part) by construction.
+        let part_begin = (spec.offset + 1) as u32;
+        let aad =
+            body::format_body_aad(spec.number, part_begin, data.len() as u64, name.as_bytes());
+        let (ciphertext, tag) = body::encrypt_body(data, &aad, self.session.master_key(), &nonce)?;
 
         let mut encoded = yenc::encode_part_into(
             name,
@@ -373,7 +381,7 @@ impl DownloadDecryptionAdapter {
         // Line 1 terminator search must skip the 20-byte bootstrap prefix
         // (which may itself contain 0x0A/0x0D) — exactly what
         // `split_lines_preserving_endings` implements, so reuse it instead
-        // of a second hand-rolled scan (audit D6).
+        // of a second hand-rolled scan.
         let lines = control::split_lines_preserving_endings(body);
         let first_line = lines
             .first()
@@ -406,10 +414,49 @@ impl DownloadDecryptionAdapter {
         // Decode yEnc ciphertext
         let mut decoded = yenc::decode_part(&clean_yenc)?;
 
-        // Ciphertext CRC check before AEAD decryption
+        // Ciphertext CRC check before AEAD decryption. Multipart framing is
+        // carried explicitly by the `=ypart` line: a `pcrc32=` on a
+        // part=1/total=1 article (or on any article carrying `=ypart`) is
+        // the per-part ciphertext CRC and is checked the same way — the
+        // wire CRC describes the ciphertext, so it must verify regardless
+        // of the part count (Body Std v1.2 §5 CRC ordering).
         if !decoded.crc_matches() {
             bail!("ciphertext CRC mismatch");
         }
+
+        // AAD inputs (Body Std v1.2 §2.1): read from the restored article
+        // only. `name` is mandatory in encrypted articles; multipart
+        // geometry comes from the restored `=ypart`, single-part geometry
+        // from the `=ybegin` size.
+        let aad_name = decoded.name.as_bytes();
+        ensure!(
+            !aad_name.is_empty(),
+            "MISSING_AAD_INPUT: =ybegin name parameter is mandatory in encrypted articles"
+        );
+        let segment_bytes = if decoded.file_size == 0 && decoded.data.is_empty() {
+            ensure!(
+                decoded.begin == 1 && decoded.end == 0,
+                "INVALID_GEOMETRY: empty file begin/end mismatch"
+            );
+            0u64
+        } else {
+            ensure!(
+                decoded.begin >= 1 && decoded.begin <= decoded.end,
+                "INVALID_GEOMETRY: part begin must be >= 1 and <= end"
+            );
+            ensure!(
+                decoded.end <= decoded.file_size,
+                "INVALID_GEOMETRY: part end exceeds whole file size"
+            );
+            decoded.end - decoded.begin + 1
+        };
+        ensure!(
+            segment_bytes as usize == decoded.data.len(),
+            "INVALID_GEOMETRY: segment bytes does not match ciphertext length"
+        );
+        let part_number = decoded.part;
+        let part_begin = decoded.begin as u32;
+        let aad = body::format_body_aad(part_number, part_begin, segment_bytes, aad_name);
 
         // Authenticate and decrypt body ciphertext with Zero-Output Guarantee.
         // Typed at origin: Poly1305 failure is provider corruption (retriable).
@@ -417,6 +464,7 @@ impl DownloadDecryptionAdapter {
         let plaintext = body::decrypt_body(
             &decoded.data,
             &yenc_params.tag,
+            &aad,
             session.master_key(),
             &nonce,
         )
