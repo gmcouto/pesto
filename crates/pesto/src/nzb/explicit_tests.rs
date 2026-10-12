@@ -157,6 +157,179 @@ fn encrypted_nzb_reader_rejects_unsupported_version_and_cipher() {
     assert!(parsed.meta.yenc_encrypted);
 }
 
+/// Body Std v1.2 §8 metadata matching: values are trimmed, `yenc_encrypted`
+/// and `yenc_cipher` compare ASCII case-insensitively, `yenc_version` is
+/// exactly `1.2` after trim, and the password is never trimmed.
+fn encrypted_nzb_with_meta(encrypted: &str, version: &str, cipher: &str) -> String {
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<nzb xmlns="http://www.newzbin.com/DTD/2003/nzb">
+  <head>
+    <meta type="password"> keep-spaces </meta>
+    <meta type="yenc_encrypted">{encrypted}</meta>
+    <meta type="yenc_version">{version}</meta>
+    <meta type="yenc_cipher">{cipher}</meta>
+  </head>
+  <file poster="poster@example.com" date="1774300000" subject="[1/1] - &quot;file.bin&quot; yEnc (1/1)">
+    <groups><group>alt.binaries.test</group></groups>
+    <segments>
+      <segment bytes="750000" number="1">art1@example.com</segment>
+    </segments>
+  </file>
+</nzb>"#
+    )
+}
+
+#[test]
+fn encrypted_nzb_metadata_matching_trims_and_ignores_case() {
+    for encrypted in ["true", "TRUE", " true ", "True"] {
+        let xml = encrypted_nzb_with_meta(encrypted, " 1.2 ", "xchacha20-poly1305");
+        let parsed = parse(&xml).unwrap_or_else(|e| panic!("{encrypted:?} must parse: {e}"));
+        assert!(
+            parsed.meta.yenc_encrypted,
+            "{encrypted:?} must mark encrypted"
+        );
+        assert_eq!(
+            parsed.meta.password.as_deref(),
+            Some(" keep-spaces "),
+            "password must never be trimmed"
+        );
+    }
+}
+
+#[test]
+fn encrypted_nzb_metadata_rejects_unsupported_version_and_cipher() {
+    let xml = encrypted_nzb_with_meta("true", "1.3", "XChaCha20-Poly1305");
+    let err = parse(&xml).unwrap_err();
+    assert!(err.to_string().contains("unsupported yenc_version"));
+
+    let xml = encrypted_nzb_with_meta("true", "1.2", "AES");
+    let err = parse(&xml).unwrap_err();
+    assert!(err.to_string().contains("unsupported yenc_cipher"));
+}
+
+/// NZB whose `<head>` carries the given raw meta tags (Round 2: duplicates).
+fn nzb_with_head_tags(head_tags: &str) -> String {
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<nzb xmlns="http://www.newzbin.com/DTD/2003/nzb">
+  <head>
+    {head_tags}
+  </head>
+  <file poster="poster@example.com" date="1774300000" subject="[1/1] - &quot;file.bin&quot; yEnc (1/1)">
+    <groups><group>alt.binaries.test</group></groups>
+    <segments>
+      <segment bytes="750000" number="1">art1@example.com</segment>
+    </segments>
+  </file>
+</nzb>"#
+    )
+}
+
+/// Round 2 fail-open fix: every `yenc_version`/`yenc_cipher` occurrence is
+/// validated when the NZB is encryption-marked, not only the last one.
+#[test]
+fn encrypted_nzb_validates_every_duplicate_version_and_cipher() {
+    let encrypted = r#"<meta type="yenc_encrypted">true</meta>"#;
+
+    let xml = nzb_with_head_tags(&format!(
+        r#"{encrypted}
+    <meta type="yenc_version">1.3</meta>
+    <meta type="yenc_version">1.2</meta>"#
+    ));
+    let err = parse(&xml).unwrap_err();
+    assert!(
+        err.to_string().contains("unsupported yenc_version"),
+        "earlier unsupported version must fail closed: {err}"
+    );
+
+    let xml = nzb_with_head_tags(&format!(
+        r#"{encrypted}
+    <meta type="yenc_version">1.2</meta>
+    <meta type="yenc_version">1.2</meta>
+    <meta type="yenc_cipher">XChaCha20-Poly1305</meta>"#
+    ));
+    let parsed = parse(&xml).expect("identical supported duplicates must parse");
+    assert!(parsed.meta.yenc_encrypted);
+
+    let xml = nzb_with_head_tags(&format!(
+        r#"{encrypted}
+    <meta type="yenc_version">1.2</meta>
+    <meta type="yenc_cipher">XChaCha20-Poly1305</meta>
+    <meta type="yenc_cipher">AES</meta>"#
+    ));
+    let err = parse(&xml).unwrap_err();
+    assert!(
+        err.to_string().contains("unsupported yenc_cipher"),
+        "later unsupported cipher must fail closed: {err}"
+    );
+
+    // Reversed order: the earlier unsupported cipher must not be masked by a
+    // later supported one.
+    let xml = nzb_with_head_tags(&format!(
+        r#"{encrypted}
+    <meta type="yenc_version">1.2</meta>
+    <meta type="yenc_cipher">AES</meta>
+    <meta type="yenc_cipher">XChaCha20-Poly1305</meta>"#
+    ));
+    let err = parse(&xml).unwrap_err();
+    assert!(
+        err.to_string().contains("unsupported yenc_cipher"),
+        "earlier unsupported cipher must fail closed: {err}"
+    );
+
+    // Unencrypted NZBs keep today's behaviour: provenance metadata is not
+    // validated without the `yenc_encrypted` marker.
+    let xml = nzb_with_head_tags(r#"<meta type="yenc_version">1.3</meta>"#);
+    let parsed = parse(&xml).expect("unencrypted NZB must not be validated");
+    assert!(!parsed.meta.yenc_encrypted);
+}
+
+/// Round 3 fail-open fix: a self-closing `<meta/>` is a present, empty value
+/// and must fail closed exactly like `<meta></meta>` (Body Std v1.2 §8).
+#[test]
+fn encrypted_nzb_self_closing_version_and_cipher_fail_closed() {
+    let encrypted = r#"<meta type="yenc_encrypted">true</meta>"#;
+
+    let xml = nzb_with_head_tags(&format!(
+        r#"{encrypted}
+    <meta type="yenc_version"/>"#
+    ));
+    let err = parse(&xml).unwrap_err();
+    assert!(
+        err.to_string().contains("unsupported yenc_version"),
+        "self-closing yenc_version must fail closed: {err}"
+    );
+
+    let xml = nzb_with_head_tags(&format!(
+        r#"{encrypted}
+    <meta type="yenc_version">1.2</meta>
+    <meta type="yenc_cipher"/>"#
+    ));
+    let err = parse(&xml).unwrap_err();
+    assert!(
+        err.to_string().contains("unsupported yenc_cipher"),
+        "self-closing yenc_cipher must fail closed: {err}"
+    );
+
+    // Same form, Start/End spelling: must agree with the self-closing form.
+    let xml = nzb_with_head_tags(&format!(
+        r#"{encrypted}
+    <meta type="yenc_version"></meta>"#
+    ));
+    let err = parse(&xml).unwrap_err();
+    assert!(
+        err.to_string().contains("unsupported yenc_version"),
+        "empty Start/End yenc_version must fail closed: {err}"
+    );
+
+    // Unencrypted NZB: provenance metadata is not validated, so a
+    // self-closing yenc_version is accepted as before.
+    let xml = nzb_with_head_tags(r#"<meta type="yenc_version"/>"#);
+    let parsed = parse(&xml).expect("unencrypted NZB with self-closing yenc_version must parse");
+    assert!(!parsed.meta.yenc_encrypted);
+}
+
 /// A `<meta type="password">` without the `yenc_encrypted` provenance marker
 /// is an archive-extraction password: the NZB is not encrypted, nothing
 /// infers transport identity from it, and regenerating from the parsed

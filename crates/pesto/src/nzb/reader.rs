@@ -28,8 +28,11 @@ pub fn parse(content: &str) -> Result<ParsedNzb> {
     let mut meta = NzbMeta::default();
     let mut segments: Vec<PostedSegment> = Vec::new();
     let mut explicit_yenc_encrypted = false;
-    let mut explicit_yenc_version: Option<String> = None;
-    let mut explicit_yenc_cipher: Option<String> = None;
+    // Every occurrence is kept (not just the last): a duplicated
+    // `yenc_version`/`yenc_cipher` must not let an unsupported earlier value
+    // through (fail-open).
+    let mut explicit_yenc_versions: Vec<String> = Vec::new();
+    let mut explicit_yenc_ciphers: Vec<String> = Vec::new();
 
     let mut current_poster = String::new();
     let mut current_date: Option<u64> = None;
@@ -142,6 +145,12 @@ pub fn parse(content: &str) -> Result<ParsedNzb> {
                         "title" => meta.name = Some(String::new()),
                         "password" => meta.password = Some(String::new()),
                         "category" => meta.category = Some(String::new()),
+                        // A self-closing `<meta/>` is a present, empty value: it
+                        // must be collected exactly like `<meta></meta>` so that
+                        // it fails closed when `yenc_encrypted` is true (Body
+                        // Std v1.2 §8). Empty is already trimmed.
+                        "yenc_version" => explicit_yenc_versions.push(String::new()),
+                        "yenc_cipher" => explicit_yenc_ciphers.push(String::new()),
                         _ => {}
                     }
                 }
@@ -219,14 +228,18 @@ pub fn parse(content: &str) -> Result<ParsedNzb> {
                                 "password" => meta.password = Some(value),
                                 "category" => meta.category = Some(value),
                                 "tag" => meta.tags.push(value),
-                                "yenc_encrypted" if value.trim() == "true" => {
+                                // Body Std v1.2 §8: values are trimmed before
+                                // matching; `yenc_encrypted` and `yenc_cipher`
+                                // compare ASCII case-insensitively. The stored
+                                // password is never trimmed (see "password").
+                                "yenc_encrypted" if value.trim().eq_ignore_ascii_case("true") => {
                                     explicit_yenc_encrypted = true;
                                 }
                                 "yenc_version" => {
-                                    explicit_yenc_version = Some(value.trim().to_string());
+                                    explicit_yenc_versions.push(value.trim().to_string());
                                 }
                                 "yenc_cipher" => {
-                                    explicit_yenc_cipher = Some(value.trim().to_string());
+                                    explicit_yenc_ciphers.push(value.trim().to_string());
                                 }
                                 _ => {}
                             }
@@ -249,13 +262,14 @@ pub fn parse(content: &str) -> Result<ParsedNzb> {
         // STRUCTURAL failure — it would reproduce identically against every
         // server — so the parse fails here (the downloader aborts instead of
         // rotating providers, and releases no plaintext).
-        if let Some(ref ver) = explicit_yenc_version {
+        // Every occurrence is validated, not only the last one.
+        for ver in &explicit_yenc_versions {
             if ver != YENC_SPEC_VERSION {
                 bail!("unsupported yenc_version in nzb: {ver}");
             }
         }
-        if let Some(ref cipher) = explicit_yenc_cipher {
-            if cipher != "XChaCha20-Poly1305" {
+        for cipher in &explicit_yenc_ciphers {
+            if !cipher.eq_ignore_ascii_case("XChaCha20-Poly1305") {
                 bail!("unsupported yenc_cipher in nzb: {cipher}");
             }
         }

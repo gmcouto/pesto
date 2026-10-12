@@ -586,6 +586,13 @@ async fn worker_loop(
 
         let decoded_result = if let Some(ref decryptor) = ctx.decryptor {
             decryptor.decode_article(&body).and_then(|decoded| {
+                // Body Std v1.2 §2.1: the NZB `bytes` attribute is the
+                // plaintext segment length, and checking it is optional (a
+                // MAY). When this check fails, the copy is a corrupt provider
+                // copy. The error goes to the leftover queue as provider
+                // failover (not a METADATA_VALIDATION failure), so the next
+                // server is tried. Only the last server's copy is reported as
+                // SegmentCorrupt.
                 if item.bytes > 0 && decoded.data.len() as u64 != item.bytes {
                     anyhow::bail!(
                         "SEGMENT_BYTES_MISMATCH: fetched article plaintext length ({}) does not match NZB declared bytes ({})",

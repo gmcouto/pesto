@@ -343,6 +343,24 @@ pub fn extract_and_remove_yencryption(input: &[u8]) -> Result<(YEncryptionParams
     Ok((params, out))
 }
 
+/// Raw bytes of the `name=` value on the restored `=ybegin` line (the first
+/// line of `restored`). `name=` is the last `=ybegin` keyword and its value
+/// runs to the end of the line (Body Std v1.2 §2.1), so no byte is decoded.
+fn ybegin_raw_name(restored: &[u8]) -> Result<Vec<u8>> {
+    let end = restored
+        .iter()
+        .position(|&b| b == b'\n')
+        .context("restored article has no =ybegin line terminator")?;
+    let line = restored[..end]
+        .strip_suffix(b"\r")
+        .unwrap_or(&restored[..end]);
+    let pos = line
+        .windows(5)
+        .position(|w| w == b"name=")
+        .context("MISSING_AAD_INPUT: =ybegin line has no name= parameter")?;
+    Ok(line[pos + 5..].to_vec())
+}
+
 const MAX_CACHED_SESSIONS: usize = 16;
 
 type SessionCache = (
@@ -427,8 +445,10 @@ impl DownloadDecryptionAdapter {
         // AAD inputs (Body Std v1.2 §2.1): read from the restored article
         // only. `name` is mandatory in encrypted articles; multipart
         // geometry comes from the restored `=ypart`, single-part geometry
-        // from the `=ybegin` size.
-        let aad_name = decoded.name.as_bytes();
+        // from the `=ybegin` size. The name is the raw bytes after `name=`
+        // on the restored `=ybegin` line: `decoded.name` is lossy UTF-8 and
+        // would change the AAD for a non-UTF-8 name.
+        let aad_name = ybegin_raw_name(&clean_yenc)?;
         ensure!(
             !aad_name.is_empty(),
             "MISSING_AAD_INPUT: =ybegin name parameter is mandatory in encrypted articles"
@@ -456,7 +476,7 @@ impl DownloadDecryptionAdapter {
         );
         let part_number = decoded.part;
         let part_begin = decoded.begin as u32;
-        let aad = body::format_body_aad(part_number, part_begin, segment_bytes, aad_name);
+        let aad = body::format_body_aad(part_number, part_begin, segment_bytes, &aad_name);
 
         // Authenticate and decrypt body ciphertext with Zero-Output Guarantee.
         // Typed at origin: Poly1305 failure is provider corruption (retriable).

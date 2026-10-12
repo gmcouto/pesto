@@ -302,3 +302,131 @@ fn insert_yencryption_line_placement_and_canonical_length() {
     assert!(err.to_string().contains("MISSING_YPART_LINE"), "got: {err}");
     assert_eq!(no_ypart, before, "body must be untouched on failure");
 }
+
+/// Build a single-part encrypted article whose `=ybegin name=` value is the
+/// raw `raw_name` bytes (Body Std v1.2 §2.1). The upload API takes `&str`,
+/// so the article is encoded under an ASCII placeholder of identical length
+/// and the placeholder bytes are overwritten before control-line encryption.
+fn hand_built_article_with_raw_name(
+    password: &str,
+    salt: [u8; 16],
+    segment_index: u32,
+    payload: &[u8],
+    raw_name: &[u8],
+) -> (Vec<u8>, Arc<EncryptionSession>) {
+    let session = Arc::new(EncryptionSession::new(password, salt).unwrap());
+    let placeholder = "cafe.bin";
+    assert_eq!(placeholder.len(), raw_name.len());
+    let nonce = session.derive_body_nonce(segment_index);
+    let aad = body::format_body_aad(1, 1, payload.len() as u64, raw_name);
+    let (ciphertext, tag) =
+        body::encrypt_body(payload, &aad, session.master_key(), &nonce).unwrap();
+
+    let spec = PartSpec {
+        number: 1,
+        total: 1,
+        offset: 0,
+    };
+    let mut wire = yenc::encode_part(
+        placeholder,
+        payload.len() as u64,
+        spec,
+        &ciphertext,
+        128,
+        None,
+    )
+    .body;
+    let needle = format!("name={placeholder}");
+    let pos = wire
+        .windows(needle.len())
+        .position(|w| w == needle.as_bytes())
+        .unwrap();
+    let name_start = pos + "name=".len();
+    wire[name_start..name_start + raw_name.len()].copy_from_slice(raw_name);
+
+    insert_yencryption_line(&mut wire, &salt, &tag, segment_index, false).unwrap();
+    let wire = control::encrypt_yenc_control_lines(&session, segment_index, &wire).unwrap();
+    (wire, session)
+}
+
+#[test]
+fn non_utf8_ybegin_name_authenticates_with_raw_bytes() {
+    let password = "non-utf8-name-password";
+    let salt = [0x5au8; 16];
+    let payload = b"plaintext under a non-UTF-8 name";
+    let raw_name = b"caf\xE9.bin";
+
+    let (wire, _session) = hand_built_article_with_raw_name(password, salt, 7, payload, raw_name);
+    let adapter = DownloadDecryptionAdapter::with_password(password);
+    let decoded = adapter
+        .decode_article(&wire)
+        .expect("article authenticated with the raw =ybegin name bytes must decode");
+    assert_eq!(decoded.data, payload);
+}
+
+#[test]
+fn lossy_ybegin_name_would_change_the_aad() {
+    let password = "non-utf8-name-password";
+    let salt = [0x5au8; 16];
+    let payload = b"plaintext under a non-UTF-8 name";
+    let raw_name = b"caf\xE9.bin";
+    let (wire, session) = hand_built_article_with_raw_name(password, salt, 7, payload, raw_name);
+
+    // What the old code derived the AAD from: the lossy `DecodedPart.name`.
+    let restored = control::decrypt_yenc_control_lines(&session, 7, &wire).unwrap();
+    let (_params, clean) = extract_and_remove_yencryption(&restored).unwrap();
+    let lossy_name = yenc::decode_part(&clean).unwrap().name;
+    assert_ne!(lossy_name.as_bytes(), raw_name);
+
+    let nonce = session.derive_body_nonce(7);
+    let decoded = yenc::decode_part(&clean).unwrap();
+    let (ciphertext, tag) = (decoded.data.clone(), {
+        let params =
+            parse_yencryption_line(control::split_lines_preserving_endings(&restored)[1].content)
+                .unwrap();
+        params.tag
+    });
+    let raw_aad = body::format_body_aad(1, 1, payload.len() as u64, raw_name);
+    let lossy_aad = body::format_body_aad(1, 1, payload.len() as u64, lossy_name.as_bytes());
+    assert_ne!(raw_aad, lossy_aad);
+    assert!(
+        body::decrypt_body(&ciphertext, &tag, &lossy_aad, session.master_key(), &nonce).is_err()
+    );
+    assert_eq!(
+        body::decrypt_body(&ciphertext, &tag, &raw_aad, session.master_key(), &nonce).unwrap(),
+        payload
+    );
+}
+
+#[test]
+fn single_part_article_named_part_equals_round_trips_through_decode_article() {
+    let password = "single-part-part-keyword";
+    let salt = control::generate_alphabet_salt();
+    let session = Arc::new(EncryptionSession::new(password, salt).unwrap());
+    let upload = UploadEncryptionAdapter::new(session);
+    let payload = b"F";
+    let mut scratch = Vec::new();
+    let encoded = upload
+        .encode_article(
+            "my part=2.bin",
+            payload.len() as u64,
+            PartSpec {
+                number: 1,
+                total: 1,
+                offset: 0,
+            },
+            payload,
+            128,
+            None,
+            1u32,
+            &mut scratch,
+        )
+        .unwrap();
+
+    let decoded = DownloadDecryptionAdapter::with_password(password)
+        .decode_article(&encoded.body)
+        .expect("single-part article named `my part=2.bin` must decrypt");
+    assert_eq!(decoded.name, "my part=2.bin");
+    assert_eq!(decoded.part, 1);
+    assert_eq!(decoded.data, payload);
+}
