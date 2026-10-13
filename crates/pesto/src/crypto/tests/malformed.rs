@@ -284,6 +284,23 @@ fn test_malformed_inputs_rejection() {
                     "vector {id}: error '{msg}' should reflect the misplaced header"
                 );
             }
+            "framing" => {
+                // A body-only article lacks the combined-mode bootstrap and
+                // must fail closed at the provider corruption gate.
+                let password = "body-only-password";
+                let download_adapter = DownloadDecryptionAdapter::with_password(password);
+                let body_only = b"=ybegin line=128 size=4 name=meta.bin\r\n=yencryption cipher=XChaCha20-Poly1305 salt=1a2b3c4d5e6f7890abcdef1234567890 index=00000001 tag=ed70d238067735a20783df5e094ccafa\r\ntest\r\n=yend size=4 crc32=d87f7e0c\r\n";
+                let res = download_adapter.decode_article(body_only);
+                assert!(
+                    res.is_err(),
+                    "vector {id}: body-only article must fail closed under the combined-only receiver"
+                );
+                let msg = res.unwrap_err().to_string();
+                assert!(
+                    !msg.contains("test"),
+                    "vector {id}: error must not leak the body bytes"
+                );
+            }
             "metadata_validation" => {
                 // Metadata vectors are pre-fetch gates: they name the NZB
                 // metadata defect and its tier. Route each defect through
@@ -347,30 +364,6 @@ fn test_malformed_inputs_rejection() {
                         assert!(
                             !parsed.meta.yenc_encrypted,
                             "vector {id}: provenance set to false must not enable transport decryption"
-                        );
-                    }
-                    "metadata-04-body-only-vs-combined-only" => {
-                        // Body-only mode is unsupported by this combined-
-                        // only implementation. Pesto has no body-only
-                        // wire shape, so the same defect is expressed as a
-                        // declared-encrypted NZB whose article cannot be
-                        // parsed under combined mode: the adapter must
-                        // reject it fail-closed rather than fall back.
-                        // Exercise the production gate by feeding a body
-                        // that only carries =yencryption framing (no Line
-                        // 1 bootstrap) to the decoder.
-                        let password = "body-only-password";
-                        let download_adapter = DownloadDecryptionAdapter::with_password(password);
-                        let body_only = b"=ybegin line=128 size=4 name=meta.bin\r\n=yencryption cipher=XChaCha20-Poly1305 salt=1a2b3c4d5e6f7890abcdef1234567890 index=00000001 tag=ed70d238067735a20783df5e094ccafa\r\ntest\r\n=yend size=4 crc32=d87f7e0c\r\n";
-                        let res = download_adapter.decode_article(body_only);
-                        assert!(
-                            res.is_err(),
-                            "vector {id}: body-only article must fail closed under the combined-only receiver"
-                        );
-                        let msg = res.unwrap_err().to_string();
-                        assert!(
-                            !msg.contains("test"),
-                            "vector {id}: error must not leak the body bytes"
                         );
                     }
                     other => panic!("unknown metadata vector {other}"),

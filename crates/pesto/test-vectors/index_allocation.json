@@ -1,6 +1,5 @@
 {
   "schema_version": "1.0",
-  "requirement": "VEC-07",
   "description": "Uploader segmentIndex allocation skip vectors: a candidate index whose uint32_be encoding contains 0x0A or 0x0D is forbidden; uploaders MUST skip to the next permitted index.",
   "vectors": [
     {
