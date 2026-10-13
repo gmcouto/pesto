@@ -503,10 +503,35 @@ impl DownloadDecryptionAdapter {
         // Keep ordinary decoding upstream. Supply article-sized geometry at
         // its seam, then restore the original authenticated metadata. In
         // particular, total=1 must not reserve the whole file's capacity.
+        //
+        // The article-sized override replaces the value of the existing
+        // `size=` token among the header keywords (before `name=`) instead
+        // of appending a duplicate token: the ordinary decoder happens to
+        // resolve a repeated keyword last-wins today, but this seam must
+        // not depend on that tie-break. The filename text after `name=` is
+        // never touched. The `size=` token is guaranteed present because
+        // `file_size` was parsed from the same fields above.
+        let header = &lines[0].content[..name_idx];
+        let mut size_span = None;
+        let mut i = 0;
+        while i < header.len() {
+            while i < header.len() && (header[i] == b' ' || header[i] == b'\t') {
+                i += 1;
+            }
+            let start = i;
+            while i < header.len() && header[i] != b' ' && header[i] != b'\t' {
+                i += 1;
+            }
+            if header[start..i].starts_with(b"size=") {
+                size_span = Some((start, i));
+            }
+        }
+        let (size_start, size_end) =
+            size_span.context("INVALID_GEOMETRY: =ybegin missing or invalid size=")?;
         let mut clean_for_decode = Vec::with_capacity(clean_yenc.len());
-        clean_for_decode.extend_from_slice(&lines[0].content[..name_idx]);
-        clean_for_decode.extend_from_slice(format!("size={segment_bytes} ").as_bytes());
-        clean_for_decode.extend_from_slice(&lines[0].content[name_idx..]);
+        clean_for_decode.extend_from_slice(&lines[0].content[..size_start]);
+        clean_for_decode.extend_from_slice(format!("size={segment_bytes}").as_bytes());
+        clean_for_decode.extend_from_slice(&lines[0].content[size_end..]);
         clean_for_decode.extend_from_slice(lines[0].ending);
         for (idx, line) in lines.iter().enumerate().skip(1) {
             if multipart && idx == 1 {
