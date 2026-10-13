@@ -8,7 +8,7 @@ use super::adapter::{parse_yencryption_line, DownloadDecryptionAdapter, UploadEn
 use super::body::{decrypt_body, encrypt_body};
 use super::control::{self, extract_bootstrap_from_line1, ff1_decrypt_line, ff1_encrypt_line};
 use super::kdf::EncryptionSession;
-use crate::yenc::{self, PartSpec};
+use crate::yenc::PartSpec;
 
 fn hex_decode(s: &str) -> Vec<u8> {
     let s = s.trim();
@@ -312,7 +312,6 @@ fn test_body_encryption_test_vectors() {
     }
 }
 
-mod adapter;
 #[derive(Deserialize)]
 struct ControlLineFixture {
     vectors: Vec<serde_json::Value>,

@@ -120,7 +120,7 @@ async fn prepare_ready(shared: &Arc<Shared>, mut task: PostTask) -> Option<Ready
                     message_id: existing.message_id,
                     bytes: if shared.encryption_adapter.is_some() {
                         // Consistent with commit_result (Body Encryption
-                        // Standard v1.2 "Transport boundary").
+                        // Standard v1.2 §2.1).
                         task.data.len() as u64
                     } else {
                         existing.bytes
@@ -418,7 +418,7 @@ pub(super) async fn worker(
                     total: p.task.total,
                     message_id: p.message_id,
                     // NZB `<segment bytes>` semantics (Body Encryption
-                    // Standard v1.2 "Transport boundary"): encrypted
+                    // Standard v1.2 §2.1): encrypted
                     // releases declare the plaintext segment length,
                     // ordinary uploads the wire-article length.
                     bytes: if shared.encryption_adapter.is_some() {

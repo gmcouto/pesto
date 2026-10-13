@@ -383,6 +383,112 @@ async fn tampered_primary_fails_over_to_backup_tier() {
     );
 }
 
+fn single_segment_queue(name: &str, message_id: &str, bytes: u64) -> penne::queue::DownloadQueue {
+    penne::queue::DownloadQueue {
+        files: vec![penne::queue::QueuedFile {
+            name: name.to_string(),
+            segments: vec![penne::queue::QueuedSegment {
+                message_id: message_id.to_string(),
+                part: 1,
+                bytes,
+            }],
+        }],
+    }
+}
+
+/// Body Std v1.2 §2.1: an NZB `bytes` value that disagrees with the
+/// authenticated plaintext length marks the copy corrupt. Every tier is
+/// tried before the segment is reported corrupt, and nothing is written.
+#[tokio::test]
+async fn segment_bytes_mismatch_tries_every_tier_then_reports_corrupt() {
+    let password = "bytes-mismatch-password";
+    let session = Arc::new(EncryptionSession::new(password, [0x67u8; 16]).unwrap());
+    let payload = b"Plaintext whose declared NZB length is deliberately wrong.";
+    let encoded = encode_article(
+        &session,
+        "mismatch.bin",
+        payload.len() as u64,
+        PartSpec {
+            number: 1,
+            total: 1,
+            offset: 0,
+        },
+        payload,
+        1,
+    );
+
+    let counters = [Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0))];
+    let tiers: Vec<ServerTier> = counters
+        .iter()
+        .map(|counter| {
+            let mut known = HashMap::new();
+            known.insert("mismatch-msg-01".to_string(), encoded.clone());
+            ServerTier::solo(server_entry(spawn_fake_server_counting(
+                known,
+                Some(counter.clone()),
+            )))
+        })
+        .collect();
+
+    let queue = single_segment_queue("mismatch.bin", "mismatch-msg-01", payload.len() as u64 + 1);
+    let dest_dir = tempfile::tempdir().unwrap();
+    let decryptor = Arc::new(DownloadDecryptionAdapter::with_password(password));
+    let outcome =
+        download_queue_with_decryptor(&queue, &tiers, dest_dir.path(), 0, None, Some(decryptor))
+            .await
+            .expect("download call should complete");
+
+    assert_eq!(counters[0].load(Ordering::SeqCst), 1);
+    assert_eq!(
+        counters[1].load(Ordering::SeqCst),
+        1,
+        "the mismatch must move on to the next server"
+    );
+    assert_eq!(outcome.corrupt.len(), 1);
+    assert_eq!(outcome.corrupt[0].message_id, "mismatch-msg-01");
+    assert!(outcome.corrupt[0].error.contains("SEGMENT_BYTES_MISMATCH"));
+    assert!(!outcome.segments.contains("mismatch-msg-01"));
+    assert!(!dest_dir.path().join("mismatch.bin").exists());
+    assert!(penne::cache::load(dest_dir.path(), "mismatch-msg-01").is_none());
+}
+
+/// `bytes="0"` means the NZB does not declare a length: the check is skipped.
+#[tokio::test]
+async fn segment_bytes_zero_skips_the_length_check() {
+    let password = "bytes-zero-password";
+    let session = Arc::new(EncryptionSession::new(password, [0x68u8; 16]).unwrap());
+    let payload = b"Plaintext with no declared NZB length.";
+    let encoded = encode_article(
+        &session,
+        "nolen.bin",
+        payload.len() as u64,
+        PartSpec {
+            number: 1,
+            total: 1,
+            offset: 0,
+        },
+        payload,
+        1,
+    );
+    let mut known = HashMap::new();
+    known.insert("nolen-msg-01".to_string(), encoded);
+    let tiers = vec![ServerTier::solo(server_entry(spawn_fake_server(known)))];
+
+    let queue = single_segment_queue("nolen.bin", "nolen-msg-01", 0);
+    let dest_dir = tempfile::tempdir().unwrap();
+    let decryptor = Arc::new(DownloadDecryptionAdapter::with_password(password));
+    let outcome =
+        download_queue_with_decryptor(&queue, &tiers, dest_dir.path(), 0, None, Some(decryptor))
+            .await
+            .expect("download should succeed");
+
+    assert!(outcome.corrupt.is_empty());
+    assert_eq!(
+        std::fs::read(dest_dir.path().join("nolen.bin")).unwrap(),
+        payload
+    );
+}
+
 /// Zero-Output Guarantee on authentication failure: with only a tampered
 /// copy available, a multipart download must report the corrupt segment and
 /// commit nothing — no final file, no temp sibling, no cache entry for the

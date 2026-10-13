@@ -79,8 +79,8 @@ const FIELD_SECTIONS: &[(&str, &str)] = &[
     ("webhook_url", "[notify]"),
     ("ntfy_topic", "[notify]"),
     // [encryption]
-    ("password", "[encryption]"),
-    ("encrypt_password", "[encryption]"),
+    // The key inside `[encryption]` is `password`, not `encrypt_password`.
+    ("encrypt_password", "[encryption] as `password`"),
 ];
 
 /// Given a TOML deserialize error, if it's an `unknown field` rejection for a
@@ -297,13 +297,9 @@ impl Config {
 
         let nzb_password = cli.nzb_password.or(file.output.nzb_password);
         let encrypt_password = cli.encrypt_password.or(file.encryption.password);
-        // The archive password is CLI-only (`--password`); `Config::resolve`
-        // runs before any per-entry lazy resolution, so the raw CLI value is
-        // the right thing to validate here (see `validate_encryption`).
         super::validation::validate_encryption(
             encrypt_password.as_deref(),
             nzb_password.as_deref(),
-            cli.compress_password.as_deref(),
         )?;
 
         Ok(Config {

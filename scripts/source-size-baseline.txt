@@ -18,5 +18,5 @@
 855 crates/pesto/tests/integration.rs
 821 crates/pesto/tests/full_shared_obfuscation.rs
 958 crates/pesto/tests/upload_encryption.rs
-1056 crates/penne/tests/download_encryption.rs
+1162 crates/penne/tests/download_encryption.rs
 803 crates/pesto/src/bin/pesto/cli.rs

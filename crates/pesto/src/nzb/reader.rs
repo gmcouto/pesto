@@ -49,9 +49,17 @@ pub fn parse(content: &str) -> Result<ParsedNzb> {
             current_date = xml_attr(t, "date").and_then(|s| s.parse().ok());
             let subject = xml_attr(t, "subject").unwrap_or_default();
             current_subject_name = strip_part_suffix(&subject);
+            // Standard NZB 1.1 has no `name` attribute on `<file>` — only
+            // `subject`, with the real name as the quoted string inside it,
+            // exactly what `strip_part_suffix` already extracted into
+            // `current_subject_name`. A fully obfuscated subject (no
+            // quotes) yields the raw hash-like text here instead — not the
+            // real name, but a valid starting point for `penne::
+            // deobfuscate` to recover the true one from PAR2.
             current_file_name = current_subject_name.clone();
             file_segment_start = segments.len();
         } else if t == "</file>" {
+            // Back-fill `total` now that we know how many segments this file has.
             let total = (segments.len() - file_segment_start) as u32;
             for seg in &mut segments[file_segment_start..] {
                 seg.total = total;
@@ -82,8 +90,16 @@ pub fn parse(content: &str) -> Result<ParsedNzb> {
             };
             segments.push(PostedSegment {
                 file_name: current_file_name.clone(),
+                // Segments parsed back from an existing `.nzb` (e.g. for
+                // `--merge-season`) have no known source file on this
+                // machine; `file_path` is only meaningful for segments
+                // produced by a live upload, which is the only place a
+                // post-check repost can use it.
                 file_path: Arc::from(Path::new(&current_file_name)),
                 subject_name: Arc::from(current_subject_name.as_str()),
+                // Not recoverable from an .nzb (only `subject_name`, always
+                // the real name, is written) — harmless for the same reason
+                // as `full_crc32` below: never re-encoded once parsed back.
                 wire_name: Arc::from(""),
                 wire_yenc_name: Arc::from(""),
                 file_size: 0,
@@ -93,8 +109,18 @@ pub fn parse(content: &str) -> Result<ParsedNzb> {
                 bytes,
                 from: Arc::from(current_poster.as_str()),
                 date: (None, current_date),
+                // Not recoverable from an .nzb (it only exists on the
+                // `=yend` line of the last segment's body, which the .nzb
+                // never carries) — harmless, since a segment parsed back
+                // from an .nzb (--merge-season) is never re-encoded.
                 full_crc32: 0,
+                // A segment parsed back from an .nzb never re-enters the
+                // check queue (see `PostedSegment::server_idx`).
                 server_idx: 0,
+                // `current_subject_name` already had any `[filenum/total]`
+                // prefix stripped by `strip_filenum_prefix` — this run has no
+                // way to know the original numbering, so it's simply absent
+                // (see `default_subject`'s `None` case) rather than guessed.
                 file_index: 0,
                 total_files: 0,
                 segment_index: 0,
@@ -106,6 +132,7 @@ pub fn parse(content: &str) -> Result<ParsedNzb> {
                     "title" => meta.name = Some(String::new()),
                     "password" => meta.password = Some(String::new()),
                     "category" => meta.category = Some(String::new()),
+                    "tag" => meta.tags.push(String::new()),
                     "yenc_version" => explicit_yenc_versions.push(String::new()),
                     "yenc_cipher" => explicit_yenc_ciphers.push(String::new()),
                     _ => {}
@@ -147,6 +174,13 @@ pub fn parse(content: &str) -> Result<ParsedNzb> {
                     if closed {
                         meta.password = Some(xml_unescape(&full_val));
                     }
+                }
+            } else {
+                match kind.as_str() {
+                    "title" => meta.name = Some(String::new()),
+                    "category" => meta.category = Some(String::new()),
+                    "tag" => meta.tags.push(String::new()),
+                    _ => {}
                 }
             }
         }
@@ -218,6 +252,10 @@ fn xml_text(line: &str, tag: &str) -> Option<String> {
 }
 
 /// Strip the `"name" yEnc (N/M)` or `"name" yEnc` wrapper from a subject line.
+///
+/// Handles both the current yEnc-spec format and the legacy `name (N/M)` format.
+/// Backward compatibility is needed because `pesto --merge-season` can read
+/// NZBs created before the yEnc spec fix (e.g. subjects like `movie.mkv (1/3)`).
 pub(super) fn strip_part_suffix(subject: &str) -> String {
     let unquote = |s: &str| {
         if s.len() >= 2 && s.starts_with('"') && s.ends_with('"') {
@@ -227,6 +265,8 @@ pub(super) fn strip_part_suffix(subject: &str) -> String {
         }
     };
 
+    // New format: "name" yEnc (N/M)  →  strip " yEnc (N/M)"
+    // New format: "name" yEnc        →  strip " yEnc"
     if let Some(pos) = subject.rfind(" yEnc") {
         let tail = &subject[pos + 5..];
         if tail.is_empty() || tail.starts_with(" (") {
@@ -234,6 +274,7 @@ pub(super) fn strip_part_suffix(subject: &str) -> String {
         }
     }
 
+    // Legacy format: name (N/M)
     if let Some(pos) = subject.rfind(" (") {
         let tail = &subject[pos..];
         if tail.contains('/') && tail.ends_with(')') {
@@ -243,6 +284,18 @@ pub(super) fn strip_part_suffix(subject: &str) -> String {
     subject.to_string()
 }
 
+/// Strip a leading `[filenum/files] - ` counter, if present.
+///
+/// `nyuu`'s default subject template is
+/// `[{filenum}/{files}] - "{filename}" yEnc ({part}/{parts})` — that
+/// `[N/M] - ` counter sits *outside* the quoted real name, so without this,
+/// `strip_part_suffix`'s `unquote` never fires (the string starts with `[`,
+/// not `"`) and the counter ends up baked into the "real" file name
+/// `penne::assemble` later joins onto a directory path — a `/` inside
+/// `[01/14]` then splits into a bogus nested directory instead of staying
+/// part of one path component. Falls back to `s` unchanged for any subject
+/// that isn't actually this shape (including `pesto`'s own, which never
+/// emits this prefix — see `ROADMAP.md` "Subject file counter").
 fn strip_filenum_prefix(s: &str) -> &str {
     (|| {
         let rest = s.strip_prefix('[')?;

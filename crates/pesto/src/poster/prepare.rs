@@ -452,13 +452,11 @@ impl ReleaseLayout {
             // cumulative count check above — fail layout construction with an
             // error (never panic) in that case.
             let last_rank = prefix_parts;
-            match nth_safe_segment_index(last_rank) {
-                Some(idx) => idx,
-                None => bail!(
-                    "release layout total segments ({last_rank}) exceed the safe \
-                     segment-index capacity of u32"
-                ),
-            };
+            anyhow::ensure!(
+                nth_safe_segment_index(last_rank).is_some(),
+                "release layout total segments ({last_rank}) exceed the safe \
+                 segment-index capacity of u32"
+            );
         }
 
         Ok(ReleaseLayout {

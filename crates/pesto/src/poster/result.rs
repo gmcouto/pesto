@@ -39,7 +39,7 @@ pub(super) fn commit_result(
     server_idx: usize,
 ) {
     // NZB `<segment bytes>` semantics (Body Encryption Standard v1.2
-    // "Transport boundary"): for encrypted releases the declared bytes are
+    // §2.1): for encrypted releases the declared bytes are
     // the dot-unstuffed PLAINTEXT segment length (they must equal the AAD
     // `segmentBytes`), while ordinary uploads keep the upstream wire-article
     // length.

@@ -114,7 +114,7 @@ pub(super) async fn repost_one(
     let headers = article.build_headers();
     let wire_bytes = (headers.len() + encoded.body.len()) as u64;
     // NZB `<segment bytes>` semantics (Body Encryption Standard v1.2
-    // "Transport boundary"): encrypted releases declare the plaintext
+    // §2.1): encrypted releases declare the plaintext
     // segment length, ordinary uploads the wire-article length.
     let nzb_bytes = if adapter.is_some() {
         buf.len() as u64

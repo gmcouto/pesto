@@ -1,9 +1,12 @@
 //! Tests for `DownloadDecryptionAdapter` and `UploadEncryptionAdapter`.
 
+use super::super::control::extract_bootstrap_from_line1;
 use super::super::{control, kdf::EncryptionSession};
 use super::*;
 use crate::yenc::{self, PartSpec};
 use std::sync::Arc;
+
+mod public_api;
 
 #[test]
 fn test_multi_salt_session_caching() {
@@ -475,13 +478,6 @@ fn encrypted_missing_name_or_crc_fails_closed() {
     }
 }
 
-#[test]
-fn session_derivation_reports_cost() {
-    let started = std::time::Instant::now();
-    EncryptionSession::new("timing-fixture", [1; 16]).unwrap();
-    eprintln!("Argon2id 64 MiB derivation: {:?}", started.elapsed());
-}
-
 // Body Standard v1.2 §2.1/§5: physical multipart geometry and pcrc32
 // apply even when total=1. Build authenticated fixtures independently of
 // the total-based ordinary decoder and leave that decoder unchanged.
@@ -688,4 +684,71 @@ fn huge_physical_multipart_range_fails_without_panic_or_output() {
         let error = result.expect_err("untrusted range must release no output");
         assert!(error.to_string().contains("PROVIDER_FAILOVER"), "{error}");
     }
+}
+
+#[test]
+fn concurrent_workers_derive_each_salt_once() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let adapter = Arc::new(DownloadDecryptionAdapter::with_password("single-flight"));
+    let salts = [[0x31u8; 16], [0x32u8; 16]];
+    let derivations = [AtomicUsize::new(0), AtomicUsize::new(0)];
+
+    std::thread::scope(|scope| {
+        for worker in 0..16 {
+            let adapter = &adapter;
+            let derivations = &derivations;
+            scope.spawn(move || {
+                let which = worker % 2;
+                let salt = salts[which];
+                let session = adapter
+                    .get_or_derive_session(salt, || {
+                        derivations[which].fetch_add(1, Ordering::SeqCst);
+                        // Hold the derivation open so every worker overlaps it.
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                        EncryptionSession::new("single-flight", salt)
+                    })
+                    .unwrap();
+                assert_eq!(session.salt(), salt);
+            });
+        }
+    });
+
+    assert_eq!(derivations[0].load(Ordering::SeqCst), 1);
+    assert_eq!(derivations[1].load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn encrypted_multipart_yend_never_carries_whole_file_crc() {
+    // Body Std v1.2 §5 step 5: a multipart =yend carries only pcrc32, even on
+    // the last part when the caller supplies a whole-file CRC.
+    let session = Arc::new(EncryptionSession::new("no-file-crc", [0x41u8; 16]).unwrap());
+    let upload_adapter = UploadEncryptionAdapter::new(session.clone());
+    let payload = b"last part of a two part file";
+    let mut body = Vec::new();
+    let encoded = upload_adapter
+        .encode_article(
+            "two.bin",
+            100,
+            PartSpec {
+                number: 2,
+                total: 2,
+                offset: 72,
+            },
+            payload,
+            128,
+            Some(0xDEAD_BEEF),
+            2,
+            &mut body,
+        )
+        .unwrap();
+
+    let clear = control::decrypt_yenc_control_lines(&session, 2, &encoded.body).unwrap();
+    let text = String::from_utf8_lossy(&clear);
+    let yend = text
+        .lines()
+        .find(|line| line.starts_with("=yend"))
+        .expect("restored article has a =yend line");
+    assert!(yend.contains(" pcrc32="), "{yend}");
+    assert!(!yend.contains(" crc32="), "{yend}");
 }

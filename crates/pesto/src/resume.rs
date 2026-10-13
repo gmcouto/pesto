@@ -347,10 +347,6 @@ impl ResumeState {
     /// which calls `invalidate_session` on its own mismatch so the salt is
     /// regenerated there too.)
     pub fn validate_session(&mut self, current_layout: &crate::poster::ReleaseLayout) -> bool {
-        // `ReleaseLayout: PartialEq` covers exactly what the old hand-rolled
-        // comparison checked (total_files gates entry-count equality, and
-        // total_segments is derived from the entry part counts by
-        // construction) — so compare the whole layout directly.
         if let Some(stored) = &self.session_identity {
             if stored.layout != *current_layout {
                 self.invalidate_session();

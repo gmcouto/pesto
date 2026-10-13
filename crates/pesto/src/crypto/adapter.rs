@@ -2,7 +2,7 @@
 
 use anyhow::{bail, ensure, Context, Result};
 use std::collections::{HashMap, VecDeque};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use zeroize::Zeroizing;
 
 use super::body;
@@ -85,6 +85,11 @@ impl UploadEncryptionAdapter {
     /// 3. yEnc-encodes `ciphertext` into `body` buffer.
     /// 4. Injects `=yencryption` control line.
     /// 5. FF1-encrypts all control lines over Radix 253, prepending 16-byte salt to line 1.
+    ///
+    /// `_file_crc32` is accepted for call-site symmetry with the ordinary
+    /// encoder but never written: a plaintext whole-file CRC on the last
+    /// multipart `=yend` must not be emitted (Body Std v1.2 §5 step 5), and a
+    /// ciphertext whole-file CRC cannot be computed per segment.
     #[allow(clippy::too_many_arguments)]
     pub fn encode_article(
         &self,
@@ -93,7 +98,7 @@ impl UploadEncryptionAdapter {
         spec: PartSpec,
         data: &[u8],
         line_len: usize,
-        file_crc32: Option<u32>,
+        _file_crc32: Option<u32>,
         segment_index: u32,
         body: &mut Vec<u8>,
     ) -> Result<EncodedPart> {
@@ -111,15 +116,8 @@ impl UploadEncryptionAdapter {
             body::format_body_aad(spec.number, part_begin, data.len() as u64, name.as_bytes());
         let (ciphertext, tag) = body::encrypt_body(data, &aad, self.session.master_key(), &nonce)?;
 
-        let mut encoded = yenc::encode_part_into(
-            name,
-            file_size,
-            spec,
-            &ciphertext,
-            line_len,
-            file_crc32,
-            body,
-        );
+        let mut encoded =
+            yenc::encode_part_into(name, file_size, spec, &ciphertext, line_len, None, body);
 
         // Format and insert the =yencryption control line: after =ypart
         // (multipart) or after =ybegin (single-part). A multipart body
@@ -184,9 +182,8 @@ pub fn parse_yencryption_line(line: &[u8]) -> Result<YEncryptionParams> {
     let tokens: Vec<&str> = text.split(' ').collect();
     if tokens.len() != 5 {
         // The vectors distinguish a missing first parameter from a generic
-        // count error: bare `=yencryption` (or anything without a cipher
-        // token) is MISSING_CIPHER.
-        if tokens.len() < 2 && !tokens.iter().skip(1).any(|t| t.starts_with("cipher=")) {
+        // count error: bare `=yencryption` is MISSING_CIPHER.
+        if tokens.len() < 2 {
             bail!("MISSING_CIPHER: cipher parameter missing");
         }
         bail!(
@@ -351,10 +348,14 @@ fn ybegin_raw_name(restored: &[u8]) -> Result<Vec<u8>> {
 
 const MAX_CACHED_SESSIONS: usize = 16;
 
-type SessionCache = (
-    HashMap<[u8; 16], Arc<EncryptionSession>>,
-    VecDeque<[u8; 16]>,
-);
+/// One slot per salt so concurrent workers that miss the cache for the same
+/// salt share a single Argon2id derivation instead of each running their own.
+///
+/// Derivation failure is deterministic for a given password and salt, so the
+/// slot stores the error message and later callers see the same failure.
+type SessionSlot = Arc<OnceLock<std::result::Result<Arc<EncryptionSession>, String>>>;
+
+type SessionCache = (HashMap<[u8; 16], SessionSlot>, VecDeque<[u8; 16]>);
 
 /// Thin adapter presenting standard yEnc decode contract for downloaded articles.
 pub struct DownloadDecryptionAdapter {
@@ -579,7 +580,8 @@ impl DownloadDecryptionAdapter {
 
         // Zero-output guarantee: replace data with authenticated plaintext.
         // CRC normalization — recompute over the authenticated plaintext (Body
-        // Standard §10 permits clear OR recompute; recompute preserves the
+        // Std v1.2 §5, Downstream CRC Normalization, permits clear OR
+        // recompute; recompute preserves the
         // downstream per-part verification that clearing would drop). The
         // plaintext here is post-Poly1305-auth, so the CRC describes verified
         // data. The wire `crc32=`/`pcrc32=` values cover ciphertext and are
@@ -598,37 +600,43 @@ impl DownloadDecryptionAdapter {
     }
 
     fn get_or_create_session(&self, salt: [u8; 16]) -> Result<Arc<EncryptionSession>> {
-        // Recover the cache from a poisoned lock as in the other cache accesses.
-        // above — a poisoned mutex in the download hot path fails closed as a
-        // mapped crypto error instead of panicking.
-        let guard = self
-            .cached_sessions
-            .lock()
-            .map_err(|_| anyhow::anyhow!("session cache lock poisoned"))?;
-        if let Some(session) = guard.0.get(&salt) {
-            return Ok(session.clone());
-        }
+        self.get_or_derive_session(salt, || EncryptionSession::new(&self.password, salt))
+    }
 
-        drop(guard);
-        let session = Arc::new(EncryptionSession::new(&self.password, salt)?);
-        let mut guard = self
-            .cached_sessions
-            .lock()
-            .map_err(|_| anyhow::anyhow!("session cache lock poisoned"))?;
-        if let Some(existing) = guard.0.get(&salt) {
-            return Ok(existing.clone());
-        }
-        if guard.0.len() == MAX_CACHED_SESSIONS {
-            if let Some(oldest) = guard.1.pop_front() {
-                guard.0.remove(&oldest);
+    fn get_or_derive_session(
+        &self,
+        salt: [u8; 16],
+        derive: impl FnOnce() -> Result<EncryptionSession>,
+    ) -> Result<Arc<EncryptionSession>> {
+        // A poisoned lock fails closed as a crypto error instead of panicking.
+        let slot = {
+            let mut guard = self
+                .cached_sessions
+                .lock()
+                .map_err(|_| anyhow::anyhow!("session cache lock poisoned"))?;
+            if let Some(slot) = guard.0.get(&salt) {
+                slot.clone()
+            } else {
+                if guard.0.len() == MAX_CACHED_SESSIONS {
+                    if let Some(oldest) = guard.1.pop_front() {
+                        guard.0.remove(&oldest);
+                    }
+                }
+                let slot = SessionSlot::default();
+                guard.0.insert(salt, slot.clone());
+                guard.1.push_back(salt);
+                slot
             }
-        }
-        guard.0.insert(salt, session.clone());
-        guard.1.push_back(salt);
-        Ok(session)
+        };
+
+        // Derive outside the map lock so different salts run in parallel; the
+        // slot runs the 64 MiB Argon2id derivation once per salt while other
+        // workers for the same salt wait for its result.
+        slot.get_or_init(|| derive().map(Arc::new).map_err(|e| format!("{e:#}")))
+            .clone()
+            .map_err(|e| anyhow::anyhow!(e))
     }
 }
 
 #[cfg(test)]
-#[path = "adapter_tests.rs"]
-mod adapter_tests;
+mod tests;
