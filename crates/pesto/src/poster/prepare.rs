@@ -20,6 +20,7 @@ use super::connections::split_connections;
 use super::file_md5_16k;
 use super::identity::{normalize_client_path, obfuscated_yenc_name, resolve_date};
 use super::outcome::nth_safe_segment_index;
+pub(crate) use super::par2::geometry::{par2_base_packets_len, par2_volume_len};
 use super::par2::par2_geometry;
 use super::FileMeta;
 
@@ -325,7 +326,6 @@ pub(super) async fn prepare_inputs(
             // Assigned below, once `metas`' final posting order is settled —
             // see the natural order pass after the File-ID sort.
             release_ordinal: 0,
-            file_index: 0,
         }));
     }
 
@@ -369,14 +369,8 @@ pub(super) async fn prepare_inputs(
             .into_iter()
             .zip(rank)
             .map(|(m, release_ordinal)| {
-                let file_index = if config.file_counter {
-                    release_ordinal
-                } else {
-                    0
-                };
                 Arc::new(FileMeta {
                     release_ordinal,
-                    file_index,
                     ..(*m).clone()
                 })
             })
@@ -395,7 +389,6 @@ pub(super) async fn prepare_inputs(
 /// and prefix part sum (total segments preceding this file in release order).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LayoutEntry {
-    pub release_ordinal: u32,
     pub part_count: u32,
     pub prefix_parts: u64,
 }
@@ -407,7 +400,6 @@ pub struct LayoutEntry {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReleaseLayout {
     pub(crate) total_files: u32,
-    pub(crate) total_segments: u64,
     pub(crate) entries: Vec<LayoutEntry>,
 }
 
@@ -446,7 +438,6 @@ impl ReleaseLayout {
                 bail!("release layout file {ord} has zero parts");
             }
             entries.push(LayoutEntry {
-                release_ordinal: ord,
                 part_count: count,
                 prefix_parts,
             });
@@ -472,7 +463,6 @@ impl ReleaseLayout {
 
         Ok(ReleaseLayout {
             total_files,
-            total_segments: prefix_parts,
             entries,
         })
     }
@@ -517,7 +507,6 @@ impl ReleaseLayout {
     pub(crate) fn empty() -> Self {
         ReleaseLayout {
             total_files: 0,
-            total_segments: 0,
             entries: Vec::new(),
         }
     }
@@ -533,6 +522,12 @@ impl ReleaseLayout {
         let mut parts_list = Vec::with_capacity(metas.len() + 16);
 
         for meta in metas {
+            if meta.size >= (1u64 << 32) {
+                bail!(
+                    "Encrypted file size must be less than 4 GiB (2^32 bytes): {}",
+                    meta.client_path
+                );
+            }
             let segs = yenc::segments(meta.size, article_size);
             let part_count =
                 u32::try_from(segs.len()).context("data file part count exceeds u32")?;
@@ -544,6 +539,10 @@ impl ReleaseLayout {
             let base_len = par2_base_packets_len(metas, par2_slice_size);
 
             if publish_index {
+                anyhow::ensure!(
+                    base_len < (1u64 << 32),
+                    "Encrypted PAR2 index size must be less than 4 GiB (2^32 bytes)"
+                );
                 let index_ordinal = metas.len() as u32 + 1;
                 let index_parts = u32::try_from(yenc::segments(base_len, article_size).len())
                     .context("PAR2 index part count exceeds u32")?;
@@ -551,10 +550,13 @@ impl ReleaseLayout {
             }
 
             let volumes = layout::plan_volumes(recovery_count as u32);
-            let index_offset = u32::from(publish_index);
             for (vol_idx, vol) in volumes.iter().enumerate() {
-                let vol_ordinal = metas.len() as u32 + 1 + index_offset + vol_idx as u32;
+                let vol_ordinal = super::par2_volume_ordinal(metas.len(), publish_index, vol_idx);
                 let vol_len = par2_volume_len(base_len, vol.count, par2_slice_size);
+                anyhow::ensure!(
+                    vol_len < (1u64 << 32),
+                    "Encrypted PAR2 volume size must be less than 4 GiB (2^32 bytes)"
+                );
                 let vol_parts = u32::try_from(yenc::segments(vol_len, article_size).len())
                     .context("PAR2 volume part count exceeds u32")?;
                 parts_list.push((vol_ordinal, vol_parts));
@@ -570,36 +572,6 @@ impl ReleaseLayout {
 
         Self::from_parts(total_files, &parts_list)
     }
-}
-
-/// Compute the exact byte length of PAR2 base packets (Main + Creator + FileDesc + IFSC)
-/// without performing any file reads or hashes.
-pub(crate) fn par2_base_packets_len(metas: &[Arc<FileMeta>], par2_slice_size: usize) -> u64 {
-    let mut total: u64 = 64 + 12 + 16 * metas.len() as u64; // Main packet
-    total += 72; // Creator packet ("pesto")
-    let s = par2_slice_size.max(1);
-    for meta in metas {
-        let path_len = meta.client_path.len();
-        let padded_path = (path_len + 3) & !3;
-        total += 64 + 56 + padded_path as u64; // File Description
-
-        let slice_count = if meta.size == 0 {
-            0
-        } else {
-            (meta.size as usize).div_ceil(s)
-        };
-        total += 64 + 16 + 20 * slice_count as u64; // IFSC
-    }
-    total
-}
-
-/// Compute the exact byte length of a PAR2 recovery volume.
-pub(crate) fn par2_volume_len(
-    base_packets_len: u64,
-    recovery_slice_count: u32,
-    par2_slice_size: usize,
-) -> u64 {
-    base_packets_len + (recovery_slice_count as u64) * (68 + par2_slice_size as u64)
 }
 
 /// Connection, buffer-pool and PAR2 geometry resources prepared before the

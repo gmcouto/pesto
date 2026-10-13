@@ -97,6 +97,9 @@ impl UploadEncryptionAdapter {
         segment_index: u32,
         body: &mut Vec<u8>,
     ) -> Result<EncodedPart> {
+        if file_size >= (1u64 << 32) {
+            bail!("SIZE_OVERFLOW: encrypted file size must be less than 4 GiB (2^32 bytes)");
+        }
         let nonce = self.session.derive_body_nonce(segment_index);
         // AAD geometry (Body Encryption Standard v1.2 §2.1): multipart
         // partBegin is the =ypart `begin` (= offset + 1); single-part
@@ -300,21 +303,6 @@ pub fn extract_and_remove_yencryption(input: &[u8]) -> Result<(YEncryptionParams
         );
         2
     } else if lines[1].content.starts_with(b"=yencryption") {
-        let is_multipart = lines[0]
-            .content
-            .windows(5)
-            .position(|w| w == b"name=")
-            .map(|name_idx| {
-                let kv_prefix = &lines[0].content[..name_idx];
-                kv_prefix
-                    .split(|&b| b == b' ' || b == b'\t')
-                    .any(|tok| tok.starts_with(b"part="))
-            })
-            .unwrap_or(false);
-        ensure!(
-            !is_multipart,
-            "misplaced =yencryption: multipart =ybegin requires =ypart before =yencryption"
-        );
         1
     } else {
         bail!("missing or misplaced =yencryption header line");
@@ -429,8 +417,116 @@ impl DownloadDecryptionAdapter {
             );
         }
 
-        // Decode yEnc ciphertext
-        let mut decoded = yenc::decode_part(&clean_yenc)?;
+        let multipart = control::split_lines_preserving_endings(&clean_yenc)
+            .get(1)
+            .is_some_and(|line| line.content.starts_with(b"=ypart"));
+
+        let lines = control::split_lines_preserving_endings(&clean_yenc);
+        // Body Standard v1.2 §2.1/§5: preserve physical multipart metadata
+        // independently of the ordinary decoder's total-based framing.
+        let multipart_metadata = if multipart {
+            let range = std::str::from_utf8(lines[1].content)
+                .context("INVALID_GEOMETRY: =ypart has non-ASCII fields")?;
+            let field = |key: &str| -> Result<u64> {
+                range
+                    .split_whitespace()
+                    .find_map(|token| token.strip_prefix(key))
+                    .and_then(|value| value.parse().ok())
+                    .with_context(|| format!("INVALID_GEOMETRY: =ypart missing or invalid {key}"))
+            };
+            let begin = field("begin=")?;
+            let end = field("end=")?;
+            let pcrc = lines
+                .iter()
+                .find(|line| line.content.starts_with(b"=yend"))
+                .and_then(|line| {
+                    line.content
+                        .split(|&b| b == b' ' || b == b'\t')
+                        .find_map(|token| token.strip_prefix(b"pcrc32="))
+                })
+                .filter(|value| value.len() == 8)
+                .and_then(|value| std::str::from_utf8(value).ok())
+                .and_then(|value| u32::from_str_radix(value, 16).ok())
+                .context("PROVIDER_FAILOVER: missing or invalid ciphertext pcrc32 CRC")?;
+            Some((begin, end, pcrc))
+        } else {
+            None
+        };
+
+        let name_idx = lines[0]
+            .content
+            .windows(5)
+            .position(|w| w == b"name=")
+            .context("MISSING_AAD_INPUT: =ybegin line has no name= parameter")?;
+        let fields = std::str::from_utf8(&lines[0].content[..name_idx])
+            .context("INVALID_GEOMETRY: =ybegin has non-ASCII fields")?;
+        let file_size = fields
+            .split_whitespace()
+            .filter_map(|token| token.strip_prefix("size="))
+            .next_back()
+            .and_then(|value| value.parse::<u64>().ok())
+            .context("INVALID_GEOMETRY: =ybegin missing or invalid size=")?;
+        let (begin, end) = multipart_metadata
+            .map(|(begin, end, _)| (begin, end))
+            .unwrap_or((1, file_size));
+        // Body Standard v1.2 §2.1/§5: validate untrusted geometry before
+        // the ordinary decoder can reserve memory from the declared range.
+        ensure!(
+            file_size < (1u64 << 32) && begin < (1u64 << 32) && end < (1u64 << 32),
+            "PROVIDER_FAILOVER: SIZE_OVERFLOW: encrypted file size/offset exceeds 4 GiB (2^32 bytes)"
+        );
+        let segment_bytes = if file_size == 0 {
+            ensure!(
+                begin == 1 && end == 0,
+                "PROVIDER_FAILOVER: INVALID_GEOMETRY: empty file begin/end mismatch"
+            );
+            0
+        } else {
+            ensure!(
+                begin >= 1 && begin <= end && end <= file_size,
+                "PROVIDER_FAILOVER: INVALID_GEOMETRY: part range is outside the file"
+            );
+            end - begin + 1
+        };
+        ensure!(
+            segment_bytes <= clean_yenc.len() as u64,
+            "PROVIDER_FAILOVER: INVALID_GEOMETRY: segment range exceeds article length"
+        );
+        let is_multi = fields
+            .split_whitespace()
+            .filter_map(|token| token.strip_prefix("total="))
+            .next_back()
+            .and_then(|value| value.parse::<u32>().ok())
+            .is_some_and(|total| total > 1);
+
+        // Keep ordinary decoding upstream. Supply article-sized geometry at
+        // its seam, then restore the original authenticated metadata. In
+        // particular, total=1 must not reserve the whole file's capacity.
+        let mut clean_for_decode = Vec::with_capacity(clean_yenc.len());
+        clean_for_decode.extend_from_slice(&lines[0].content[..name_idx]);
+        clean_for_decode.extend_from_slice(format!("size={segment_bytes} ").as_bytes());
+        clean_for_decode.extend_from_slice(&lines[0].content[name_idx..]);
+        clean_for_decode.extend_from_slice(lines[0].ending);
+        for (idx, line) in lines.iter().enumerate().skip(1) {
+            if multipart && idx == 1 {
+                if is_multi {
+                    clean_for_decode.extend_from_slice(
+                        format!("=ypart begin=1 end={segment_bytes}").as_bytes(),
+                    );
+                    clean_for_decode.extend_from_slice(line.ending);
+                }
+            } else {
+                clean_for_decode.extend_from_slice(line.content);
+                clean_for_decode.extend_from_slice(line.ending);
+            }
+        }
+        let mut decoded = yenc::decode_part(&clean_for_decode)?;
+        decoded.file_size = file_size;
+        decoded.begin = begin;
+        decoded.end = end;
+        if let Some((_, _, pcrc)) = multipart_metadata {
+            decoded.part_crc32 = Some(pcrc);
+        }
 
         // Ciphertext CRC check before AEAD decryption. Multipart framing is
         // carried explicitly by the `=ypart` line: a `pcrc32=` on a
@@ -438,6 +534,14 @@ impl DownloadDecryptionAdapter {
         // the per-part ciphertext CRC and is checked the same way — the
         // wire CRC describes the ciphertext, so it must verify regardless
         // of the part count (Body Std v1.2 §5 CRC ordering).
+        ensure!(
+            if multipart {
+                decoded.part_crc32.is_some()
+            } else {
+                decoded.file_crc32.is_some()
+            },
+            "PROVIDER_FAILOVER: missing ciphertext CRC"
+        );
         if !decoded.crc_matches() {
             bail!("ciphertext CRC mismatch");
         }
@@ -453,23 +557,6 @@ impl DownloadDecryptionAdapter {
             !aad_name.is_empty(),
             "MISSING_AAD_INPUT: =ybegin name parameter is mandatory in encrypted articles"
         );
-        let segment_bytes = if decoded.file_size == 0 && decoded.data.is_empty() {
-            ensure!(
-                decoded.begin == 1 && decoded.end == 0,
-                "INVALID_GEOMETRY: empty file begin/end mismatch"
-            );
-            0u64
-        } else {
-            ensure!(
-                decoded.begin >= 1 && decoded.begin <= decoded.end,
-                "INVALID_GEOMETRY: part begin must be >= 1 and <= end"
-            );
-            ensure!(
-                decoded.end <= decoded.file_size,
-                "INVALID_GEOMETRY: part end exceeds whole file size"
-            );
-            decoded.end - decoded.begin + 1
-        };
         ensure!(
             segment_bytes as usize == decoded.data.len(),
             "INVALID_GEOMETRY: segment bytes does not match ciphertext length"
@@ -479,7 +566,7 @@ impl DownloadDecryptionAdapter {
         let aad = body::format_body_aad(part_number, part_begin, segment_bytes, &aad_name);
 
         // Authenticate and decrypt body ciphertext with Zero-Output Guarantee.
-        // Typed at origin: Poly1305 failure is provider corruption (retriable).
+        // Poly1305 failure is provider corruption (retriable).
         let nonce = session.derive_body_nonce(segment_index);
         let plaintext = body::decrypt_body(
             &decoded.data,
@@ -511,10 +598,10 @@ impl DownloadDecryptionAdapter {
     }
 
     fn get_or_create_session(&self, salt: [u8; 16]) -> Result<Arc<EncryptionSession>> {
-        // Same poisoned-tolerant policy as `has_decryption_credentials`
+        // Recover the cache from a poisoned lock as in the other cache accesses.
         // above — a poisoned mutex in the download hot path fails closed as a
         // mapped crypto error instead of panicking.
-        let mut guard = self
+        let guard = self
             .cached_sessions
             .lock()
             .map_err(|_| anyhow::anyhow!("session cache lock poisoned"))?;
@@ -522,7 +609,15 @@ impl DownloadDecryptionAdapter {
             return Ok(session.clone());
         }
 
+        drop(guard);
         let session = Arc::new(EncryptionSession::new(&self.password, salt)?);
+        let mut guard = self
+            .cached_sessions
+            .lock()
+            .map_err(|_| anyhow::anyhow!("session cache lock poisoned"))?;
+        if let Some(existing) = guard.0.get(&salt) {
+            return Ok(existing.clone());
+        }
         if guard.0.len() == MAX_CACHED_SESSIONS {
             if let Some(oldest) = guard.1.pop_front() {
                 guard.0.remove(&oldest);

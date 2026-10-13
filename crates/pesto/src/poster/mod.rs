@@ -77,11 +77,20 @@ struct FileMeta {
     /// 1-based position in the release order (natural order for data files,
     /// followed by PAR2 index and volumes). Always assigned.
     release_ordinal: u32,
-    /// This file's 1-based position among every file in the release (data
-    /// files, then the PAR2 index, then the PAR2 volumes) — used for the
-    /// `--file-counter` `[filenum/total]` subject prefix. Meaningless
-    /// (left as `0`) when `Shared::total_files` is `0`, i.e. the flag is off.
-    file_index: u32,
+}
+
+impl FileMeta {
+    fn file_index(&self, total_files: u32) -> u32 {
+        if total_files > 0 {
+            self.release_ordinal
+        } else {
+            0
+        }
+    }
+}
+
+fn par2_volume_ordinal(data_files: usize, publish_index: bool, volume_index: usize) -> u32 {
+    data_files as u32 + 1 + u32::from(publish_index) + volume_index as u32
 }
 
 /// How many dedicated yEnc workers fill the ready-article queue.
@@ -327,8 +336,11 @@ async fn post_pregenerated_release(
             .release_prefix
             .as_deref()
             .map(|prefix| layout::volume_name(prefix, *vol));
-        let index_offset = u32::from(shared.config.obfuscate.policy().publish_par2_index);
-        let release_ordinal = metas.len() as u32 + 1 + index_offset + vol_idx as u32;
+        let release_ordinal = par2_volume_ordinal(
+            metas.len(),
+            shared.config.obfuscate.policy().publish_par2_index,
+            vol_idx,
+        );
         push_par2_file(
             &vol_path,
             vol_name,
@@ -454,7 +466,7 @@ async fn post_data_files(
                 shared
                     .release_layout
                     .segment_identity(meta.release_ordinal, i)
-                    .expect("valid segment identity for planned data file")
+                    .context("valid segment identity for planned data file")?
             } else {
                 0
             };
@@ -550,11 +562,6 @@ async fn push_par2_file(
         date,
         size,
         release_ordinal,
-        file_index: if shared.config.file_counter {
-            release_ordinal
-        } else {
-            0
-        },
     });
 
     // Whole-file CRC-32 accumulated as this same loop reads the file for
@@ -577,7 +584,7 @@ async fn push_par2_file(
             shared
                 .release_layout
                 .segment_identity(release_ordinal, part_number)
-                .expect("valid segment identity for planned PAR2 file")
+                .context("valid segment identity for planned PAR2 file")?
         } else {
             0
         };

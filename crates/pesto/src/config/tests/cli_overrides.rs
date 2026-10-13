@@ -244,24 +244,18 @@ fn cli_rejects_conflicting_encrypt_and_nzb_password() {
 }
 
 #[test]
-fn cli_rejects_conflicting_archive_and_encrypt_password() {
-    // `--compress --password A --encrypt E` with
-    // A != E would silently lose the archive password — the NZB
-    // `<meta type="password">` carries only the encryption password — so the
-    // combination is rejected at config resolution, before any posting work.
-    let result = Config::resolve(
+fn cli_accepts_independent_archive_and_encrypt_passwords() {
+    let cfg = Config::resolve(
         minimal_file(),
         Overrides {
             encrypt_password: Some("encrypt-pw".into()),
             compress_password: Some("archive-pw".into()),
             ..Default::default()
         },
-    );
-    let err = result.expect_err("conflicting archive/encrypt passwords must be rejected");
-    assert!(
-        err.to_string().contains("conflicting passwords"),
-        "got: {err:#}"
-    );
+    )
+    .unwrap();
+    assert_eq!(cfg.encrypt_password.as_deref(), Some("encrypt-pw"));
+    assert_eq!(cfg.compress_password.as_deref(), Some("archive-pw"));
 }
 
 #[test]

@@ -3,9 +3,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use anyhow::{bail, Context, Result};
-use quick_xml::events::Event;
-use quick_xml::reader::Reader;
+use anyhow::{bail, Result};
 
 use crate::poster::PostedSegment;
 
@@ -13,256 +11,149 @@ use super::{NzbMeta, ParsedNzb, YENC_SPEC_VERSION};
 
 /// Parse a `.nzb` document and reconstruct its [`PostedSegment`] list.
 ///
-/// Encrypted releases (indicated by `<meta type="yenc_encrypted">true</meta>`)
-/// are marked `meta.yenc_encrypted`; a declared-encrypted NZB with unsupported
-/// `yenc_version`/`yenc_cipher` provenance is rejected fail-closed (Body
-/// Encryption Standard v1.2 §8).
+/// The parser targets the format produced by [`crate::nzb::generate`] but
+/// tolerates minor whitespace variation. Attributes must use double quotes.
+/// Segments are sorted by `(file_name, part)` before returning so they can be
+/// passed directly to [`crate::nzb::generate`].
 pub fn parse(content: &str) -> Result<ParsedNzb> {
-    let mut reader = Reader::from_str(content);
-    // Crucial: do not trim text so that leading/trailing whitespace (LF, tabs)
-    // in element content like <meta type="password"> is preserved verbatim.
-    reader.config_mut().trim_text(false);
-
     let mut poster = String::new();
     let mut groups: Vec<String> = Vec::new();
     let mut meta = NzbMeta::default();
     let mut segments: Vec<PostedSegment> = Vec::new();
     let mut explicit_yenc_encrypted = false;
-    // Every occurrence is kept (not just the last): a duplicated
-    // `yenc_version`/`yenc_cipher` must not let an unsupported earlier value
-    // through (fail-open).
     let mut explicit_yenc_versions: Vec<String> = Vec::new();
     let mut explicit_yenc_ciphers: Vec<String> = Vec::new();
 
+    let mut current_file_name = String::new();
+    let mut current_subject_name = String::new();
+    let mut file_segment_start: usize = 0;
+    let mut in_groups = false;
+    let mut in_file = false;
+
     let mut current_poster = String::new();
     let mut current_date: Option<u64> = None;
-    let mut current_subject_name = String::new();
-    let mut current_file_name = String::new();
-    let mut file_segment_start: usize = 0;
-    let mut in_file = false;
-    let mut in_groups = false;
-    let mut in_group = false;
-    let mut in_meta: Option<String> = None;
-    let mut in_segment: Option<(u64, u32)> = None; // (bytes, number)
 
-    let mut text_buf = String::new();
-    let mut buf = Vec::new();
+    let lines = split_lines_preserving_endings(content);
+    let mut idx = 0;
+    while idx < lines.len() {
+        let (line, ending) = lines[idx];
+        let t = line.trim();
 
-    loop {
-        match reader.read_event_into(&mut buf) {
-            Ok(Event::Start(e)) => {
-                let local_name = e.local_name();
-                match local_name.as_ref() {
-                    b"file" => {
-                        in_file = true;
-                        in_groups = false;
-                        current_poster.clear();
-                        current_date = None;
-                        current_subject_name.clear();
-                        current_file_name.clear();
-                        file_segment_start = segments.len();
-
-                        for attr in e.attributes() {
-                            let attr = attr.context("malformed attribute in <file>")?;
-                            match attr.key.local_name().as_ref() {
-                                b"poster" => {
-                                    current_poster = attr
-                                        .decode_and_unescape_value(reader.decoder())?
-                                        .into_owned();
-                                    if poster.is_empty() {
-                                        poster = current_poster.clone();
-                                    }
-                                }
-                                b"date" => {
-                                    let s = attr.decode_and_unescape_value(reader.decoder())?;
-                                    current_date = s.parse().ok();
-                                }
-                                b"subject" => {
-                                    let s = attr.decode_and_unescape_value(reader.decoder())?;
-                                    current_subject_name = strip_part_suffix(&s);
-                                    current_file_name = current_subject_name.clone();
-                                }
-                                _ => {}
-                            }
-                        }
+        if t.starts_with("<file ") {
+            in_file = true;
+            in_groups = false;
+            current_poster = xml_attr(t, "poster").unwrap_or_default();
+            if poster.is_empty() {
+                poster = current_poster.clone();
+            }
+            current_date = xml_attr(t, "date").and_then(|s| s.parse().ok());
+            let subject = xml_attr(t, "subject").unwrap_or_default();
+            current_subject_name = strip_part_suffix(&subject);
+            current_file_name = current_subject_name.clone();
+            file_segment_start = segments.len();
+        } else if t == "</file>" {
+            let total = (segments.len() - file_segment_start) as u32;
+            for seg in &mut segments[file_segment_start..] {
+                seg.total = total;
+            }
+            in_file = false;
+        } else if t == "<groups>" {
+            in_groups = true;
+        } else if t == "</groups>" {
+            in_groups = false;
+        } else if in_groups {
+            if let Some(g) = xml_text(t, "group") {
+                if !groups.contains(&g) {
+                    groups.push(g);
+                }
+            }
+        } else if in_file && t.starts_with("<segment ") {
+            let bytes: u64 = xml_attr(t, "bytes")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
+            let part: u32 = xml_attr(t, "number")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
+            let raw_id = xml_text(t, "segment").unwrap_or_default();
+            let message_id = if raw_id.starts_with('<') {
+                raw_id
+            } else {
+                format!("<{raw_id}>")
+            };
+            segments.push(PostedSegment {
+                file_name: current_file_name.clone(),
+                file_path: Arc::from(Path::new(&current_file_name)),
+                subject_name: Arc::from(current_subject_name.as_str()),
+                wire_name: Arc::from(""),
+                wire_yenc_name: Arc::from(""),
+                file_size: 0,
+                part,
+                total: 0, // fixed up when </file> is seen
+                message_id,
+                bytes,
+                from: Arc::from(current_poster.as_str()),
+                date: (None, current_date),
+                full_crc32: 0,
+                server_idx: 0,
+                file_index: 0,
+                total_files: 0,
+                segment_index: 0,
+            });
+        } else if t.starts_with("<meta ") {
+            let kind = xml_attr(t, "type").unwrap_or_default();
+            if t.ends_with("/>") {
+                match kind.as_str() {
+                    "title" => meta.name = Some(String::new()),
+                    "password" => meta.password = Some(String::new()),
+                    "category" => meta.category = Some(String::new()),
+                    "yenc_version" => explicit_yenc_versions.push(String::new()),
+                    "yenc_cipher" => explicit_yenc_ciphers.push(String::new()),
+                    _ => {}
+                }
+            } else if let Some(value) = xml_text(t, "meta") {
+                match kind.as_str() {
+                    "title" => meta.name = Some(value),
+                    "password" => meta.password = Some(value),
+                    "category" => meta.category = Some(value),
+                    "tag" => meta.tags.push(value),
+                    "yenc_encrypted" if value.trim().eq_ignore_ascii_case("true") => {
+                        explicit_yenc_encrypted = true;
                     }
-                    b"groups" => {
-                        in_groups = true;
+                    "yenc_version" => {
+                        explicit_yenc_versions.push(value.trim().to_string());
                     }
-                    b"group" => {
-                        in_group = true;
-                        text_buf.clear();
-                    }
-                    b"segment" => {
-                        let mut bytes = 0u64;
-                        let mut number = 0u32;
-                        for attr in e.attributes() {
-                            let attr = attr.context("malformed attribute in <segment>")?;
-                            match attr.key.local_name().as_ref() {
-                                b"bytes" => {
-                                    let s = attr.decode_and_unescape_value(reader.decoder())?;
-                                    bytes = s.parse().unwrap_or(0);
-                                }
-                                b"number" => {
-                                    let s = attr.decode_and_unescape_value(reader.decoder())?;
-                                    number = s.parse().unwrap_or(0);
-                                }
-                                _ => {}
-                            }
-                        }
-                        in_segment = Some((bytes, number));
-                        text_buf.clear();
-                    }
-                    b"meta" => {
-                        let mut meta_type = String::new();
-                        for attr in e.attributes() {
-                            let attr = attr.context("malformed attribute in <meta>")?;
-                            if attr.key.local_name().as_ref() == b"type" {
-                                meta_type = attr
-                                    .decode_and_unescape_value(reader.decoder())?
-                                    .into_owned();
-                            }
-                        }
-                        in_meta = Some(meta_type);
-                        text_buf.clear();
+                    "yenc_cipher" => {
+                        explicit_yenc_ciphers.push(value.trim().to_string());
                     }
                     _ => {}
                 }
-            }
-            Ok(Event::Empty(e)) => {
-                let local_name = e.local_name();
-                if local_name.as_ref() == b"meta" {
-                    let mut meta_type = String::new();
-                    for attr in e.attributes() {
-                        let attr = attr.context("malformed attribute in <meta>")?;
-                        if attr.key.local_name().as_ref() == b"type" {
-                            meta_type = attr
-                                .decode_and_unescape_value(reader.decoder())?
-                                .into_owned();
+            } else if kind == "password" {
+                if let Some(open_tag_end) = line.find('>') {
+                    let mut full_val = String::from(&line[open_tag_end + 1..]);
+                    full_val.push_str(ending);
+                    let mut closed = false;
+                    while idx + 1 < lines.len() {
+                        idx += 1;
+                        let (next_line, next_ending) = lines[idx];
+                        if let Some(close_pos) = next_line.find("</meta>") {
+                            full_val.push_str(&next_line[..close_pos]);
+                            closed = true;
+                            break;
+                        } else {
+                            full_val.push_str(next_line);
+                            full_val.push_str(next_ending);
                         }
                     }
-                    match meta_type.as_str() {
-                        "title" => meta.name = Some(String::new()),
-                        "password" => meta.password = Some(String::new()),
-                        "category" => meta.category = Some(String::new()),
-                        // A self-closing `<meta/>` is a present, empty value: it
-                        // must be collected exactly like `<meta></meta>` so that
-                        // it fails closed when `yenc_encrypted` is true (Body
-                        // Std v1.2 §8). Empty is already trimmed.
-                        "yenc_version" => explicit_yenc_versions.push(String::new()),
-                        "yenc_cipher" => explicit_yenc_ciphers.push(String::new()),
-                        _ => {}
+                    if closed {
+                        meta.password = Some(xml_unescape(&full_val));
                     }
                 }
             }
-            Ok(Event::Text(t)) => {
-                if in_meta.is_some() || (in_groups && in_group) || (in_file && in_segment.is_some())
-                {
-                    let unescaped = t.unescape().context("invalid XML text content")?;
-                    text_buf.push_str(&unescaped);
-                }
-            }
-            Ok(Event::CData(c)) => {
-                if in_meta.is_some() || (in_groups && in_group) || (in_file && in_segment.is_some())
-                {
-                    let text = std::str::from_utf8(&c).context("invalid UTF-8 in CDATA")?;
-                    text_buf.push_str(text);
-                }
-            }
-            Ok(Event::End(e)) => {
-                let local_name = e.local_name();
-                match local_name.as_ref() {
-                    b"file" => {
-                        in_file = false;
-                        let total = (segments.len() - file_segment_start) as u32;
-                        for seg in &mut segments[file_segment_start..] {
-                            seg.total = total;
-                        }
-                    }
-                    b"groups" => {
-                        in_groups = false;
-                    }
-                    b"group" => {
-                        in_group = false;
-                        let g = text_buf.trim().to_string();
-                        if !g.is_empty() && !groups.contains(&g) {
-                            groups.push(g);
-                        }
-                        text_buf.clear();
-                    }
-                    b"segment" => {
-                        if let Some((bytes, part)) = in_segment.take() {
-                            let raw_id = text_buf.trim().to_string();
-                            let message_id = if raw_id.starts_with('<') {
-                                raw_id
-                            } else {
-                                format!("<{raw_id}>")
-                            };
-                            segments.push(PostedSegment {
-                                file_name: current_file_name.clone(),
-                                file_path: Arc::from(Path::new(&current_file_name)),
-                                subject_name: Arc::from(current_subject_name.as_str()),
-                                wire_name: Arc::from(""),
-                                wire_yenc_name: Arc::from(""),
-                                file_size: 0,
-                                part,
-                                total: 0,
-                                message_id,
-                                bytes,
-                                from: Arc::from(current_poster.as_str()),
-                                date: (None, current_date),
-                                full_crc32: 0,
-                                server_idx: 0,
-                                file_index: 0,
-                                total_files: 0,
-                                segment_index: 0,
-                            });
-                        }
-                        text_buf.clear();
-                    }
-                    b"meta" => {
-                        if let Some(meta_type) = in_meta.take() {
-                            let value = std::mem::take(&mut text_buf);
-                            match meta_type.as_str() {
-                                "title" => meta.name = Some(value),
-                                "password" => meta.password = Some(value),
-                                "category" => meta.category = Some(value),
-                                "tag" => meta.tags.push(value),
-                                // Body Std v1.2 §8: values are trimmed before
-                                // matching; `yenc_encrypted` and `yenc_cipher`
-                                // compare ASCII case-insensitively. The stored
-                                // password is never trimmed (see "password").
-                                "yenc_encrypted" if value.trim().eq_ignore_ascii_case("true") => {
-                                    explicit_yenc_encrypted = true;
-                                }
-                                "yenc_version" => {
-                                    explicit_yenc_versions.push(value.trim().to_string());
-                                }
-                                "yenc_cipher" => {
-                                    explicit_yenc_ciphers.push(value.trim().to_string());
-                                }
-                                _ => {}
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            Ok(Event::Eof) => break,
-            Err(e) => bail!("XML parse error: {e}"),
-            _ => {}
         }
-        buf.clear();
+        idx += 1;
     }
 
-    // Encryption provenance: explicit `yenc_encrypted` meta (v1.2 §8).
     if explicit_yenc_encrypted {
-        // Fail-closed gating (Body Encryption Standard v1.2 §8): a
-        // declared-encrypted NZB with unsupported provenance metadata is a
-        // STRUCTURAL failure — it would reproduce identically against every
-        // server — so the parse fails here (the downloader aborts instead of
-        // rotating providers, and releases no plaintext).
-        // Every occurrence is validated, not only the last one.
         for ver in &explicit_yenc_versions {
             if ver != YENC_SPEC_VERSION {
                 bail!("unsupported yenc_version in nzb: {ver}");
@@ -286,11 +177,47 @@ pub fn parse(content: &str) -> Result<ParsedNzb> {
     })
 }
 
+fn split_lines_preserving_endings(content: &str) -> Vec<(&str, &str)> {
+    let mut lines = Vec::new();
+    let mut rest = content;
+    while !rest.is_empty() {
+        if let Some(pos) = rest.find('\n') {
+            let (line_with_lf, remaining) = rest.split_at(pos + 1);
+            let (line, ending) = if let Some(stripped) = line_with_lf[..pos].strip_suffix('\r') {
+                (stripped, "\r\n")
+            } else {
+                (&line_with_lf[..pos], "\n")
+            };
+            lines.push((line, ending));
+            rest = remaining;
+        } else {
+            lines.push((rest, ""));
+            break;
+        }
+    }
+    lines
+}
+
+/// Extract the value of `name="..."` from an XML tag string.
+fn xml_attr(tag: &str, name: &str) -> Option<String> {
+    let key = format!("{name}=\"");
+    let start = tag.find(&key)? + key.len();
+    let end = tag[start..].find('"')? + start;
+    Some(xml_unescape(&tag[start..end]))
+}
+
+/// Extract text content from `<tag ...>text</tag>` on a single line.
+fn xml_text(line: &str, tag: &str) -> Option<String> {
+    let open_end = line.find('>')?;
+    let close = format!("</{tag}>");
+    let close_start = line.rfind(&close)?;
+    if close_start < open_end + 1 {
+        return None;
+    }
+    Some(xml_unescape(&line[open_end + 1..close_start]))
+}
+
 /// Strip the `"name" yEnc (N/M)` or `"name" yEnc` wrapper from a subject line.
-///
-/// Handles both the current yEnc-spec format and the legacy `name (N/M)` format.
-/// Backward compatibility is needed because `pesto --merge-season` can read
-/// NZBs created before the yEnc spec fix (e.g. subjects like `movie.mkv (1/3)`).
 pub(super) fn strip_part_suffix(subject: &str) -> String {
     let unquote = |s: &str| {
         if s.len() >= 2 && s.starts_with('"') && s.ends_with('"') {
@@ -300,8 +227,6 @@ pub(super) fn strip_part_suffix(subject: &str) -> String {
         }
     };
 
-    // New format: "name" yEnc (N/M)  →  strip " yEnc (N/M)"
-    // New format: "name" yEnc        →  strip " yEnc"
     if let Some(pos) = subject.rfind(" yEnc") {
         let tail = &subject[pos + 5..];
         if tail.is_empty() || tail.starts_with(" (") {
@@ -309,7 +234,6 @@ pub(super) fn strip_part_suffix(subject: &str) -> String {
         }
     }
 
-    // Legacy format: name (N/M)
     if let Some(pos) = subject.rfind(" (") {
         let tail = &subject[pos..];
         if tail.contains('/') && tail.ends_with(')') {
@@ -319,7 +243,6 @@ pub(super) fn strip_part_suffix(subject: &str) -> String {
     subject.to_string()
 }
 
-/// Strip a leading `[filenum/files] - ` counter, if present.
 fn strip_filenum_prefix(s: &str) -> &str {
     (|| {
         let rest = s.strip_prefix('[')?;
@@ -333,4 +256,13 @@ fn strip_filenum_prefix(s: &str) -> &str {
             .and_then(|()| after.strip_prefix(" - "))
     })()
     .unwrap_or(s)
+}
+
+/// Reverse the XML entity escaping applied by [`escape`].
+fn xml_unescape(s: &str) -> String {
+    s.replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
 }

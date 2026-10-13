@@ -6,7 +6,7 @@ use crate::article::default_subject;
 use crate::config::ObfuscateMode;
 use crate::poster::PostedSegment;
 
-use super::{escape, NzbMeta, YENC_SPEC_VERSION};
+use super::{escape, escape_xml_entities, NzbMeta, YENC_SPEC_VERSION};
 
 /// Generate the contents of an `.nzb` file describing the posted segments.
 ///
@@ -69,7 +69,12 @@ pub fn generate(
 
     out.push_str("  <head>\n");
     for (k, v) in &metas {
-        out.push_str(&format!("    <meta type=\"{}\">{}</meta>\n", k, escape(v)));
+        let escaped = if *k == "password" && meta.yenc_encrypted {
+            escape_xml_entities(v)
+        } else {
+            escape(v)
+        };
+        out.push_str(&format!("    <meta type=\"{}\">{}</meta>\n", k, escaped));
     }
     if let Some(tmdb_id) = &meta.tmdb_id {
         out.push_str(&format!(

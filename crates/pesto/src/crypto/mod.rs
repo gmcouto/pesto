@@ -34,7 +34,6 @@ pub use kdf::EncryptionSession;
 // model; Control Std §8): crypto failures carry their classification in the
 // message itself. Callers route every decode/decrypt failure to provider
 // failover (penne's corrupt-copy path), while NZB parse failures are
-// structural and already fatal before any network access — no downcastable
-// error-kind envelope is needed. The wire error-code strings (e.g.
+// structural and already fatal before any network access. The wire error-code strings (e.g.
 // `UNSUPPORTED_CIPHER`, `CONTROL_LINE_DECRYPT_FAILURE`) are conformance
 // surface matched by the malformed-input vectors and MUST NOT change.

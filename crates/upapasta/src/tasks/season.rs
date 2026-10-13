@@ -59,17 +59,17 @@ mod season_nzb_gate_tests {
         assert!(check_season_encryption_preflight(FolderMode::Season, true).is_err());
     }
 
-    /// Production `should_write_season_pack` is what the Season
+    /// T16b: production `should_write_season_pack` is what the Season
     /// `fs::write` calls. `folder_ok == false` (had_failures, including
     /// MissingConfirmed with `--allow-incomplete-nzb`) is incomplete.
     #[test]
-    fn season_pack_folder_ok_writes_pack() {
+    fn t16b_folder_ok_writes_pack() {
         assert!(should_write_season_pack(false, true, false));
         assert_eq!(season_pack_skip_message(false, true, false), None);
     }
 
     #[test]
-    fn season_pack_folder_ok_false_does_not_write_pack() {
+    fn t16b_folder_ok_false_does_not_write_pack() {
         assert!(!should_write_season_pack(false, false, false));
         assert_eq!(
             season_pack_skip_message(false, false, false),
@@ -78,7 +78,7 @@ mod season_nzb_gate_tests {
     }
 
     #[test]
-    fn season_pack_cancelled_does_not_write_pack() {
+    fn t16b_cancelled_does_not_write_pack() {
         assert!(!should_write_season_pack(true, true, false));
         assert_eq!(
             season_pack_skip_message(true, true, false),
@@ -87,7 +87,7 @@ mod season_nzb_gate_tests {
     }
 
     #[test]
-    fn season_pack_empty_segments_does_not_write_pack() {
+    fn t16b_empty_segments_does_not_write_pack() {
         assert!(!should_write_season_pack(false, true, true));
         assert_eq!(
             season_pack_skip_message(false, true, true),

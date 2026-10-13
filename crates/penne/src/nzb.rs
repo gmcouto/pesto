@@ -163,7 +163,7 @@ mod tests {
         assert!(decryptor.is_some());
 
         // 4. Encrypted metadata with empty password errors fail-closed.
-        // STD-3: no silent alteration — a whitespace-only password is a
+        // no silent alteration — a whitespace-only password is a
         // valid (if unusual) secret and creates a decryptor; only the
         // empty string is rejected.
         let meta_empty_pwd = pesto::nzb::NzbMeta {

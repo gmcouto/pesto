@@ -260,7 +260,13 @@ impl Connection {
     /// §3.1.1 requires dot-stuffing (Body Std v1.2 §9 transport boundary).
     /// A body not ending in CRLF gets one appended before the terminator.
     async fn write_body(&mut self, body: &[u8]) -> Result<()> {
-        if yenc_body_has_leading_dot(body) {
+        if body.starts_with(b"=ybegin") {
+            debug_assert!(
+                !yenc_body_has_leading_dot(body),
+                "yEnc body must not contain a line starting with '.';                  NNTP would treat it as end-of-article"
+            );
+            self.write_all_timeout(body).await?;
+        } else if yenc_body_has_leading_dot(body) {
             let mut stuffed_body = Vec::with_capacity(body.len() + 16);
             dot_stuff(body, &mut stuffed_body);
             self.write_all_timeout(&stuffed_body).await?;

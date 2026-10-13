@@ -79,14 +79,7 @@ pub fn decode_part(body: &[u8]) -> Result<DecodedPart> {
     let ybegin = parse_ybegin(lines[ybegin_idx])?;
 
     let mut idx = ybegin_idx + 1;
-    // An article is multipart if and only if `part=` was present on `=ybegin`
-    // (yEnc draft 1.3). We also recognize a leading `=ypart` line for
-    // interoperability with posters that omit or misplace `part=`.
-    // An article is multipart if and only if `part=` was present on `=ybegin`
-    // (yEnc draft 1.3). We also recognize a leading `=ypart` line for
-    // interoperability with posters that omit or misplace `part=`.
-    let is_multipart = ybegin.has_part || lines.get(idx).is_some_and(|l| l.starts_with(b"=ypart"));
-    let (begin, end) = if is_multipart {
+    let (begin, end) = if ybegin.total > 1 {
         let line = *lines
             .get(idx)
             .context("multi-part article is missing its =ypart line")?;
@@ -113,10 +106,7 @@ pub fn decode_part(body: &[u8]) -> Result<DecodedPart> {
     }
 
     let yend = parse_yend(lines[yend_idx])?;
-    // In multipart, yEnc draft 1.3 mandates `pcrc32=`. If a multipart footer
-    // carries only `crc32=`, `pcrc32` is `None` (CRC gate skipped) — we must
-    // not fall back to `crc32=` here as it would false-fail non-final parts.
-    let (part_crc32, file_crc32) = if is_multipart {
+    let (part_crc32, file_crc32) = if ybegin.total > 1 {
         (yend.pcrc32, yend.crc32)
     } else {
         (yend.crc32, yend.crc32)
@@ -165,7 +155,6 @@ fn decode_data_line(out: &mut Vec<u8>, line: &[u8]) {
 }
 
 struct YBegin {
-    has_part: bool,
     part: u32,
     total: u32,
     line_len: usize,
@@ -204,7 +193,6 @@ fn parse_ybegin(line: &[u8]) -> Result<YBegin> {
     }
 
     Ok(YBegin {
-        has_part: part.is_some(),
         part: part.unwrap_or(1),
         total: total.unwrap_or(1),
         line_len: line_len.context("=ybegin line missing line=")?,
@@ -328,13 +316,10 @@ mod tests {
         assert!(decoded.crc_matches());
     }
 
-    /// nyuu frames every article as multipart, even single-segment files
-    /// (`=ybegin part=1 total=1` followed by `=ypart`). The decoder must skip
-    /// the `=ypart` line instead of yEnc-decoding it as payload — an
-    /// interoperability necessity for encrypted nyuu posts reaching the
-    /// ordinary decode path.
+    /// An ordinary `=ybegin part=1 total=1` article without `=ypart` decodes
+    /// without error (strictly upstream rule: `total > 1` is multipart).
     #[test]
-    fn tolerates_ypart_in_single_part_article() {
+    fn ordinary_part1_total1_without_ypart_decodes() {
         let payload: Vec<u8> = (0u8..=255).cycle().take(300).collect();
         let encoded = encode_part(
             "single.bin",
@@ -349,88 +334,14 @@ mod tests {
             None,
         );
 
-        // Rebuild the article body with a `=ypart` line injected after
-        // `=ybegin`, mimicking nyuu's framing.
-        let offset = encoded.body.windows(2).position(|w| w == b"\r\n").unwrap() + 2;
-        let mut body = Vec::with_capacity(encoded.body.len() + 32);
-        body.extend_from_slice(&encoded.body[..offset]);
-        body.extend_from_slice(format!("=ypart begin=1 end={}\r\n", payload.len()).as_bytes());
-        body.extend_from_slice(&encoded.body[offset..]);
+        assert!(!encoded.body.windows(6).any(|w| w == b"=ypart"));
 
-        let decoded = decode_part(&body).unwrap();
+        let decoded =
+            decode_part(&encoded.body).expect("ordinary part=1 total=1 must decode without =ypart");
         assert_eq!(decoded.data, payload);
         assert_eq!(decoded.total, 1);
-        assert_eq!(decoded.begin, 1);
-        assert_eq!(decoded.end, payload.len() as u64);
-        assert!(decoded.crc_matches());
-    }
-
-    /// PE-2: an article framed `part=1 total=1` with `=ypart` (nyuu-style
-    /// single-part framing) selects the multipart CRC mapping: `part_crc32`
-    /// comes from `=yend pcrc32=`, so a wrong `pcrc32=` is recorded as
-    /// `Some(wrong)` and fails `crc_matches()` instead of being ignored.
-    #[test]
-    fn single_part_with_explicit_framing_uses_pcrc32() {
-        let payload = b"explicit part=1 total=1 framing payload";
-        let encoded = encode_part(
-            "explicit.bin",
-            payload.len() as u64,
-            PartSpec {
-                number: 1,
-                total: 1,
-                offset: 0,
-            },
-            payload,
-            128,
-            None,
-        );
-
-        let good_crc = crc32(payload);
-        let wrong_crc = good_crc ^ 0xDEAD_BEEF;
-
-        // Rebuild the body with real `part=1 total=1` framing: `part=1
-        // total=1` on `=ybegin`, an injected `=ypart`, the encoded data
-        // lines unchanged, and a `=yend ... pcrc32=` footer.
-        let lines = split_lines(&encoded.body);
-        assert!(lines.first().unwrap().starts_with(b"=ybegin line="));
-        let mut body = Vec::new();
-        body.extend_from_slice(
-            format!(
-                "=ybegin part=1 total=1 line=128 size={} name=explicit.bin\r\n",
-                payload.len()
-            )
-            .as_bytes(),
-        );
-        body.extend_from_slice(format!("=ypart begin=1 end={}\r\n", payload.len()).as_bytes());
-        for line in &lines[1..lines.len() - 1] {
-            body.extend_from_slice(line);
-            body.extend_from_slice(b"\r\n");
-        }
-        body.extend_from_slice(
-            format!(
-                "=yend size={} part=1 pcrc32={wrong_crc:08x}\r\n",
-                payload.len()
-            )
-            .as_bytes(),
-        );
-
-        let decoded = decode_part(&body).unwrap();
         assert_eq!(decoded.part, 1);
-        assert_eq!(decoded.total, 1);
-        assert_eq!(decoded.begin, 1);
-        assert_eq!(decoded.end, payload.len() as u64);
-        assert_eq!(decoded.part_crc32, Some(wrong_crc));
-        assert!(!decoded.crc_matches());
-
-        // With the correct pcrc32 the CRC check must hold.
-        let bad_needle = format!("pcrc32={wrong_crc:08x}");
-        let pos = find_subslice(&body, bad_needle.as_bytes()).unwrap();
-        body[pos..pos + bad_needle.len()]
-            .copy_from_slice(format!("pcrc32={good_crc:08x}").as_bytes());
-
-        let good_decoded = decode_part(&body).unwrap();
-        assert_eq!(good_decoded.part_crc32, Some(good_crc));
-        assert!(good_decoded.crc_matches());
+        assert!(decoded.crc_matches());
     }
 
     #[test]

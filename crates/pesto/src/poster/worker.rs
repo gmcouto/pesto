@@ -129,7 +129,7 @@ async fn prepare_ready(shared: &Arc<Shared>, mut task: PostTask) -> Option<Ready
                     date,
                     full_crc32: task.file_crc32.unwrap_or(0),
                     server_idx: existing.server_idx,
-                    file_index: task.meta.file_index,
+                    file_index: task.meta.file_index(shared.total_files),
                     total_files: shared.total_files,
                     // The article was already posted encrypted under this
                     // identity (yEnc Body Encryption Standard v1.2 §8); a
@@ -163,11 +163,10 @@ async fn prepare_ready(shared: &Arc<Shared>, mut task: PostTask) -> Option<Ready
         Some(entry)
             if shared.config.obfuscate != ObfuscateMode::None && entry.wire_identity.is_none() =>
         {
-            // Pre-PST2 spool entries did not record the logical
-            // Subject/yEnc/From values next to the raw bytes. Replaying one
-            // would post one identity while recording another in
-            // resume/check state. Re-encoding is cheap and gives the
-            // segment one coherent identity.
+            // PST1 did not record the logical Subject/yEnc/From values next
+            // to the raw bytes. Replaying it would post one identity while
+            // recording another in resume/check state. Re-encoding is cheap
+            // and gives the segment one coherent identity.
             warn!(
                 file = %task.meta.real_name,
                 part = task.part,
@@ -262,7 +261,8 @@ async fn prepare_ready(shared: &Arc<Shared>, mut task: PostTask) -> Option<Ready
                 &task.subject_name,
                 task.part,
                 task.total,
-                (shared.total_files > 0).then_some((task.meta.file_index, shared.total_files)),
+                (shared.total_files > 0)
+                    .then_some((task.meta.file_index(shared.total_files), shared.total_files)),
             ),
             date: rfc_date.clone(),
             no_archive: shared.config.no_archive,
@@ -432,7 +432,7 @@ pub(super) async fn worker(
                     // Nothing was actually posted in dry-run mode, so there's
                     // no real server and no check queue — see the field doc.
                     server_idx: 0,
-                    file_index: p.task.meta.file_index,
+                    file_index: p.task.meta.file_index(shared.total_files),
                     total_files: shared.total_files,
                     segment_index: p.task.segment_index,
                 });

@@ -19,6 +19,10 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
 - **NZB encryption metadata.**
   Encrypted uploads emit `<meta type="yenc_encrypted">true</meta>`, `<meta type="yenc_version">1.2</meta>`, and `<meta type="yenc_cipher">XChaCha20-Poly1305</meta>` in the NZB `<head>`; segment elements stay plain NZB 1.1. `NzbMeta` gains `yenc_encrypted`, `yenc_version`, and `yenc_cipher` fields, and `Config`/`FileConfig` gain the `[encryption]` section.
 
+### Changed
+
+- **`repost_failed_tasks` signature update**: adds an `adapter: Option<Arc<UploadEncryptionAdapter>>` argument for encrypted article retry; ordinary callers pass `None`.
+
 ## [0.10.4] — 2026-09-12
 
 ### Fixed

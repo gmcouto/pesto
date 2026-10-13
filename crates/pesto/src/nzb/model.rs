@@ -202,6 +202,27 @@ pub(super) fn escape(s: &str) -> String {
             '>' => out.push_str("&gt;"),
             '"' => out.push_str("&quot;"),
             '\'' => out.push_str("&apos;"),
+            // XML 1.0 forbids C0 controls other than tab / LF / CR.
+            c if c.is_control() && !matches!(c, '\t' | '\n' | '\r') => {}
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// Escape the five XML predefined entities without filtering control characters.
+///
+/// Encrypted passwords may contain U+007F..U+009F (Body Encryption Standard v1.2 §8)
+/// and must not be filtered by C0/control character stripping.
+pub(super) fn escape_xml_entities(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&apos;"),
             _ => out.push(c),
         }
     }

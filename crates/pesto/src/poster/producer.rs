@@ -482,7 +482,7 @@ pub(super) async fn producer(
                                 shared
                                     .release_layout
                                     .segment_identity(meta.release_ordinal, i)
-                                    .expect("valid segment identity for planned data file")
+                                    .context("valid segment identity for planned data file")?
                             } else {
                                 0
                             };
@@ -745,10 +745,11 @@ pub(super) async fn producer(
                             .release_prefix
                             .as_deref()
                             .map(|prefix| layout::volume_name(prefix, *vol));
-                        let index_offset =
-                            u32::from(shared.config.obfuscate.policy().publish_par2_index);
-                        let release_ordinal =
-                            metas.len() as u32 + 1 + index_offset + vol_idx as u32;
+                        let release_ordinal = super::par2_volume_ordinal(
+                            metas.len(),
+                            shared.config.obfuscate.policy().publish_par2_index,
+                            vol_idx,
+                        );
                         push_par2_file(
                             &vol_path,
                             vol_name,

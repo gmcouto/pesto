@@ -65,6 +65,7 @@ pub(super) async fn run(tuning: pesto::memory::ThreadTuning) -> Result<()> {
     let nzb_default = nzb_default.or_else(|| file_config.output.nzb.clone());
     // Read before `file_config` is consumed by `Config::resolve`.
     let session_log_enabled = !cli.no_session_log && file_config.output.session_log.unwrap_or(true);
+    prepare_encrypt_password(&mut cli, &mut std::io::stdout(), &mut std::io::stderr())?;
     let config = Arc::new(Config::resolve(file_config, cli.overrides())?);
     let json_mode = cli.output_format.trim().eq_ignore_ascii_case("json");
 
@@ -395,5 +396,55 @@ fn print_welcome() {
             "Set $HOME or $XDG_CONFIG_HOME so pesto can locate a config file,\n\
              or pass every setting as a flag (see `pesto --help`)."
         ),
+    }
+}
+
+// Keep password generation at command dispatch; querying overrides has no output.
+fn prepare_encrypt_password(
+    cli: &mut Cli,
+    stdout: &mut impl std::io::Write,
+    stderr: &mut impl std::io::Write,
+) -> Result<()> {
+    if cli.encrypt_password.is_none() && cli.encrypt.as_deref() == Some("") {
+        let pass = pesto::compress::random_password();
+        if cli.output_format.trim().eq_ignore_ascii_case("json") {
+            writeln!(stderr, "encryption password: {pass}")?;
+        } else {
+            writeln!(stdout, "encryption password: {pass}")?;
+        }
+        cli.encrypt_password = Some(pass);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bare_encrypt_prints_generated_password_once() {
+        for format in ["text", "json"] {
+            let mut cli =
+                Cli::try_parse_from(["pesto", "--encrypt", "--output-format", format, "file.bin"])
+                    .unwrap();
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            prepare_encrypt_password(&mut cli, &mut stdout, &mut stderr).unwrap();
+            let password = cli.overrides().encrypt_password.unwrap();
+            assert!(!password.is_empty());
+            prepare_encrypt_password(&mut cli, &mut stdout, &mut stderr).unwrap();
+            assert_eq!(
+                cli.overrides().encrypt_password.as_deref(),
+                Some(password.as_str())
+            );
+            let expected = format!("encryption password: {password}\n");
+            let (output, unused) = if format == "json" {
+                (&stderr, &stdout)
+            } else {
+                (&stdout, &stderr)
+            };
+            assert_eq!(output, expected.as_bytes());
+            assert!(unused.is_empty());
+        }
     }
 }

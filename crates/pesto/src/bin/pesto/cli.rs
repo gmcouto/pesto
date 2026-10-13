@@ -651,21 +651,10 @@ pub(super) struct Cli {
 impl Cli {
     /// Build config [`Overrides`] from the parsed flags.
     pub(super) fn overrides(&self) -> Overrides {
-        let encrypt_password = match (&self.encrypt_password, &self.encrypt) {
-            (Some(pass), _) if !pass.is_empty() => Some(pass.clone()),
-            (None, Some(pass)) if !pass.is_empty() => Some(pass.clone()),
-            (None, Some(pass)) if pass.is_empty() => {
-                let pass = pesto::compress::random_password();
-                if self.output_format.trim().eq_ignore_ascii_case("json") {
-                    eprintln!("encryption password: {pass}");
-                } else {
-                    println!("encryption password: {pass}");
-                }
-                Some(pass)
-            }
-            (Some(pass), _) if pass.is_empty() => Some(String::new()),
-            _ => None,
-        };
+        let encrypt_password = self
+            .encrypt_password
+            .clone()
+            .or_else(|| self.encrypt.clone());
 
         Overrides {
             host: self.host.clone(),
@@ -811,31 +800,4 @@ impl Cli {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use clap::Parser;
-
-    #[test]
-    fn test_bare_encrypt_preserves_positional_files() {
-        let args = vec!["pesto", "--encrypt", "file.mkv"];
-        let cli = Cli::try_parse_from(args).expect("parsing should succeed");
-        assert_eq!(cli.encrypt, Some("".to_string()));
-        assert_eq!(cli.files, vec![PathBuf::from("file.mkv")]);
-    }
-
-    #[test]
-    fn test_explicit_encrypt_with_equals_preserves_positional_files() {
-        let args = vec!["pesto", "--encrypt=my_secret", "file.mkv"];
-        let cli = Cli::try_parse_from(args).expect("parsing should succeed");
-        assert_eq!(cli.encrypt, Some("my_secret".to_string()));
-        assert_eq!(cli.files, vec![PathBuf::from("file.mkv")]);
-    }
-
-    #[test]
-    fn test_encrypt_password_preserves_positional_files() {
-        let args = vec!["pesto", "--encrypt-password", "my_secret", "file.mkv"];
-        let cli = Cli::try_parse_from(args).expect("parsing should succeed");
-        assert_eq!(cli.encrypt_password, Some("my_secret".to_string()));
-        assert_eq!(cli.files, vec![PathBuf::from("file.mkv")]);
-    }
-}
+mod tests;

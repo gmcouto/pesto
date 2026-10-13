@@ -13,15 +13,12 @@ fn release_layout_assigns_prefix_base_by_natural_ordinal_not_processing_order() 
     let layout = ReleaseLayout::from_parts(2, &parts).expect("valid layout");
 
     assert_eq!(layout.total_files, 2);
-    assert_eq!(layout.total_segments, 3);
 
     let entry1 = layout.entry(1).expect("entry for ordinal 1");
-    assert_eq!(entry1.release_ordinal, 1);
     assert_eq!(entry1.part_count, 1);
     assert_eq!(entry1.prefix_parts, 0);
 
     let entry2 = layout.entry(2).expect("entry for ordinal 2");
-    assert_eq!(entry2.release_ordinal, 2);
     assert_eq!(entry2.part_count, 2);
     assert_eq!(entry2.prefix_parts, 1);
 
@@ -49,7 +46,6 @@ fn release_layout_planned_par2_index_and_volumes_follow_data_files() {
     let layout = ReleaseLayout::from_parts(5, &parts).expect("valid layout with PAR2");
 
     assert_eq!(layout.total_files, 5);
-    assert_eq!(layout.total_segments, 12);
 
     // Ordinal 1: prefix 0, segments 1..=3
     assert_eq!(layout.entry(1).unwrap().prefix_parts, 0);
@@ -131,7 +127,6 @@ fn commit_result_records_planned_segment_index() {
         date: (None, None),
         size: 12,
         release_ordinal: 1,
-        file_index: 1,
     });
 
     let task = PostTask {
@@ -195,4 +190,64 @@ fn commit_result_records_planned_segment_index() {
     assert_eq!(failed.len(), 1);
     let failed_task = &failed[0];
     assert_eq!(failed_task.segment_index, 1);
+}
+
+#[test]
+fn encrypted_layout_refuses_four_gib_before_article_production() {
+    let mut meta = meta_with_name(std::path::Path::new("huge.bin"), "huge.bin");
+    meta.size = 1u64 << 32;
+    let err = ReleaseLayout::build(&[Arc::new(meta)], &dry_run_config(), 0, 2048).unwrap_err();
+    assert!(err.to_string().contains("2^32"));
+}
+
+#[test]
+fn encrypted_layout_refuses_oversized_generated_par2_volumes() {
+    let metas: Vec<_> = (0..4)
+        .map(|index| {
+            let name = format!("file{index}.bin");
+            let mut meta = meta_with_name(std::path::Path::new(&name), &name);
+            meta.size = 3 * (1u64 << 30);
+            meta.release_ordinal = index + 1;
+            Arc::new(meta)
+        })
+        .collect();
+    let mut config = dry_run_config();
+    config.par2 = 100;
+    config.par2_slice_size = Some(1 << 20);
+    let (slice_size, slices, recovery) = crate::poster::par2::par2_geometry(&metas, &config);
+    assert_eq!((slice_size, slices, recovery), (1 << 20, 12288, 12288));
+    for mode in [
+        crate::config::ObfuscateMode::None,
+        crate::config::ObfuscateMode::Full,
+    ] {
+        config.obfuscate = mode;
+        let err = ReleaseLayout::build(&metas, &config, recovery, slice_size).unwrap_err();
+        assert!(
+            err.to_string().contains("PAR2 volume") && err.to_string().contains("2^32"),
+            "{err}"
+        );
+    }
+    // Smaller recovery plans remain accepted with identical data-file limits.
+    assert!(ReleaseLayout::build(&metas, &config, 5, slice_size).is_ok());
+}
+
+#[test]
+fn encrypted_layout_refuses_oversized_published_par2_index() {
+    let metas: Vec<_> = (0..5)
+        .map(|index| {
+            let name = format!("file{index}.bin");
+            let mut meta = meta_with_name(std::path::Path::new(&name), &name);
+            meta.size = 3 * (1u64 << 30);
+            meta.release_ordinal = index + 1;
+            Arc::new(meta)
+        })
+        .collect();
+    // Exercise the planner's index bound directly with metadata only;
+    // no multi-GiB files or checksum arrays are allocated.
+    assert!(prepare::par2_base_packets_len(&metas, 64) >= 1u64 << 32);
+    let err = ReleaseLayout::build(&metas, &dry_run_config(), 1, 64).unwrap_err();
+    assert!(
+        err.to_string().contains("PAR2 index") && err.to_string().contains("2^32"),
+        "{err}"
+    );
 }

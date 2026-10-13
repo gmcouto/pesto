@@ -330,7 +330,7 @@ fn escape_preserves_tab_lf_cr_verbatim() {
     // XML 1.0 permits tab/LF/CR in content; the parser (quick-xml with
     // trim_text(false)) round-trips them unchanged, so the writer must
     // emit them verbatim too — a password containing LF must survive the
-    // generate/parse round trip byte-for-byte (STD-3 no silent alteration).
+    // generate/parse round trip byte-for-byte .
     assert_eq!(escape("keep\ttab"), "keep\ttab");
     assert_eq!(escape("line1\nline2"), "line1\nline2");
     assert_eq!(escape("cr\rreturned"), "cr\rreturned");
@@ -695,92 +695,4 @@ fn parse_preserves_declared_parts_without_compacting() {
     assert_eq!(parsed.segments[1].part, 3);
 }
 
-#[test]
-fn parse_minified_xml_and_multiple_metas_per_line() {
-    // PE-3: Minified XML on a single line, multiple <meta> tags on one line,
-    // and arbitrary metadata element ordering must all parse cleanly.
-    let xml = "<nzb xmlns=\"http://www.newzbin.com/DTD/2003/nzb\"><head><meta type=\"yenc_version\">1.2</meta><meta type=\"category\">Movies</meta><meta type=\"password\">secret-min</meta><meta type=\"yenc_encrypted\">true</meta><meta type=\"yenc_cipher\">XChaCha20-Poly1305</meta></head><file poster=\"p@x\" date=\"1700000000\" subject=\"&quot;file.bin&quot; yEnc (1/1)\"><groups><group>alt.binaries.test</group></groups><segments><segment bytes=\"1024\" number=\"1\">id1@x</segment></segments></file></nzb>";
-
-    let parsed = parse(xml).expect("minified XML must parse successfully");
-    assert!(parsed.meta.yenc_encrypted);
-    assert_eq!(parsed.meta.password.as_deref(), Some("secret-min"));
-    assert_eq!(parsed.meta.category.as_deref(), Some("Movies"));
-    assert_eq!(parsed.segments.len(), 1);
-    assert_eq!(parsed.segments[0].file_name, "file.bin");
-    assert_eq!(parsed.segments[0].bytes, 1024);
-}
-
-#[test]
-fn parse_xml_with_namespace_prefixes() {
-    // PE-3: XML elements and attributes carrying namespace prefixes (e.g. nzb:meta, n:file)
-    // must be recognized by their local element names.
-    let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
-<nzb:nzb xmlns:nzb="http://www.newzbin.com/DTD/2003/nzb">
-  <nzb:head>
-    <nzb:meta type="password">ns-pass</nzb:meta>
-    <nzb:meta type="yenc_encrypted">true</nzb:meta>
-    <nzb:meta type="yenc_version">1.2</nzb:meta>
-    <nzb:meta type="yenc_cipher">XChaCha20-Poly1305</nzb:meta>
-    <nzb:meta type="title">Prefixed Show</nzb:meta>
-  </nzb:head>
-  <nzb:file poster="ns-poster@example.com" date="1700000000" subject="&quot;prefixed.mkv&quot; yEnc (1/1)">
-    <nzb:groups>
-      <nzb:group>alt.binaries.prefixed</nzb:group>
-    </nzb:groups>
-    <nzb:segments>
-      <nzb:segment bytes="2048" number="1">ns-msg-01@example.com</nzb:segment>
-    </nzb:segments>
-  </nzb:file>
-</nzb:nzb>"#;
-
-    let parsed = parse(xml).expect("prefixed XML must parse cleanly");
-    assert!(parsed.meta.yenc_encrypted);
-    assert_eq!(parsed.meta.password.as_deref(), Some("ns-pass"));
-    assert_eq!(parsed.meta.name.as_deref(), Some("Prefixed Show"));
-    assert_eq!(parsed.groups, vec!["alt.binaries.prefixed"]);
-    assert_eq!(parsed.segments.len(), 1);
-    assert_eq!(parsed.segments[0].file_name, "prefixed.mkv");
-    assert_eq!(parsed.segments[0].bytes, 2048);
-}
-
-#[test]
-fn password_preserves_lf_tab_non_ascii_verbatim() {
-    // PE-4 & STD-3: passwords containing LF, tabs, and non-ASCII UTF-8 bytes
-    // must survive generation and parsing without alteration or trimming.
-    let complex_password = "first-line\nsecond-line\twith tab and Schlüssel🔑";
-    let meta = NzbMeta {
-        password: Some(complex_password.to_string()),
-        yenc_encrypted: true,
-        ..Default::default()
-    };
-    let s = seg("data.bin", 1, 1, "<msg@test>");
-    let xml = generate(
-        &["alt.binaries.test".into()],
-        &[s],
-        &meta,
-        ObfuscateMode::None,
-    );
-
-    let parsed = parse(&xml).expect("generated XML with complex password must parse");
-    assert_eq!(
-        parsed.meta.password.as_deref(),
-        Some(complex_password),
-        "password with LF, tab, and UTF-8 characters must match byte-for-byte"
-    );
-}
-
-#[test]
-fn xml_unrepresentable_password_rejected_by_validation() {
-    // PE-4 & STD-3: XML-unrepresentable transport password characters must be
-    // rejected before posting (no silent dropping or modification).
-    use crate::config::validation::{is_xml_representable, validate_encryption};
-
-    assert!(!is_xml_representable("bad\u{0001}pass"));
-    assert!(!is_xml_representable("bad\u{0000}pass"));
-    assert!(!is_xml_representable("bad\u{000b}pass")); // vertical tab is forbidden in XML 1.0
-    assert!(is_xml_representable("valid\t\n\rpass 🔑"));
-
-    let err = validate_encryption(Some("forbidden\u{0001}"), None, None)
-        .expect_err("XML-forbidden transport password must be rejected");
-    assert!(err.to_string().contains("cannot be represented in XML"));
-}
+mod password;

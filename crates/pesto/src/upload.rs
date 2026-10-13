@@ -452,9 +452,9 @@ pub async fn run_upload(
             group: outcome.groups.first().cloned().unwrap_or_default(),
             groups: outcome.groups.join(":"),
             password: config
-                .nzb_password
+                .encrypt_password
                 .as_deref()
-                .or(config.encrypt_password.as_deref())
+                .or(config.nzb_password.as_deref())
                 .or(config.compress_password.as_deref())
                 .unwrap_or("")
                 .to_string(),

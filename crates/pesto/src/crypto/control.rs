@@ -279,12 +279,13 @@ pub fn decrypt_yenc_control_lines(
     // Process lines 2..N-1
     //
     // Deterministic combined-mode restoration (Control Std v1.2 §5, step 4):
-    // Header positions are inferred from the restored `=ybegin` line:
-    // - Single-part: Line 1 = =ybegin, Line 2 = =yencryption, D = Line 3
-    // - Multipart: Line 1 = =ybegin, Line 2 = =ypart, Line 3 = =yencryption, D = Line 4
-    // Data lines (D..N-1) are NEVER decrypted, never trial-decrypted, and pass
-    // through untouched byte-for-byte. The footer is strictly Line N (=yend).
-    let is_multipart = pt1
+    // Physical line 2 is decrypted first using lineIndex = 2.
+    // - If line 2 starts with `=ypart `, it is multipart: line 3 must decrypt to `=yencryption `,
+    //   and restored `=ybegin` (pt1) must contain `part=` (otherwise INVALID_MULTIPART_FRAMING).
+    // - If line 2 starts with `=yencryption `, it is single-part:
+    //   and restored `=ybegin` (pt1) must NOT contain `part=` (otherwise MISPLACED_ENCRYPTION_HEADER).
+    // - If line 2 starts with neither, fail with CONTROL_LINE_DECRYPT_FAILURE.
+    let pt1_has_part = pt1
         .windows(5)
         .position(|w| w == b"name=")
         .map(|name_idx| {
@@ -295,19 +296,32 @@ pub fn decrypt_yenc_control_lines(
         })
         .unwrap_or(false);
 
+    if n < 3 {
+        bail!("LINE_TRUNCATED: encrypted article has fewer than 3 lines");
+    }
+
+    // Line 2: Decrypt with lineIndex=2 per Control Std v1.2 §5, step 4.
+    let line2 = &active_lines[1];
+    let tweak2 = session.derive_control_tweak(segment_index, 2);
+    let pt2 = ff1_decrypt_line(session.control_key(), &tweak2, line2.content)
+        .context("control-line decryption failed at line 2 in the header region")?;
+
+    let is_multipart = if pt2.starts_with(b"=ypart ") {
+        true
+    } else if pt2.starts_with(b"=yencryption ") {
+        false
+    } else {
+        bail!("CONTROL_LINE_DECRYPT_FAILURE: line 2 decrypted text starts with neither =ypart nor =yencryption");
+    };
+
     let d_start = if is_multipart {
         if n < 4 {
             bail!("LINE_TRUNCATED: multipart encrypted article has fewer than 4 lines");
         }
-
-        // Line 2: =ypart
-        let line2 = &active_lines[1];
-        let tweak2 = session.derive_control_tweak(segment_index, 2);
-        let pt2 = ff1_decrypt_line(session.control_key(), &tweak2, line2.content)
-            .context("control-line decryption failed at line 2 in the header region")?;
-        if !pt2.starts_with(b"=ypart ") {
-            bail!("CONTROL_LINE_DECRYPT_FAILURE: line 2 decrypted text does not start with =ypart");
+        if !pt1_has_part {
+            bail!("INVALID_MULTIPART_FRAMING: multipart article missing part= on line 1");
         }
+
         out.extend_from_slice(&pt2);
         out.extend_from_slice(line2.ending);
 
@@ -324,18 +338,10 @@ pub fn decrypt_yenc_control_lines(
 
         3
     } else {
-        if n < 3 {
-            bail!("LINE_TRUNCATED: single-part encrypted article has fewer than 3 lines");
+        if pt1_has_part {
+            bail!("MISPLACED_ENCRYPTION_HEADER: single-part article has part= parameter on line 1");
         }
 
-        // Line 2: =yencryption
-        let line2 = &active_lines[1];
-        let tweak2 = session.derive_control_tweak(segment_index, 2);
-        let pt2 = ff1_decrypt_line(session.control_key(), &tweak2, line2.content)
-            .context("control-line decryption failed at line 2 in the header region")?;
-        if !pt2.starts_with(b"=yencryption ") {
-            bail!("CONTROL_LINE_DECRYPT_FAILURE: line 2 decrypted text does not start with =yencryption");
-        }
         out.extend_from_slice(&pt2);
         out.extend_from_slice(line2.ending);
 

@@ -43,11 +43,11 @@ impl EncryptionSession {
         self.salt
     }
 
-    pub fn master_key(&self) -> &[u8; 32] {
+    pub(crate) fn master_key(&self) -> &[u8; 32] {
         &self.master_key
     }
 
-    pub fn control_key(&self) -> &[u8; 32] {
+    pub(crate) fn control_key(&self) -> &[u8; 32] {
         &self.control_key
     }
 
