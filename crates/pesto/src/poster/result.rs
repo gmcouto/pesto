@@ -335,6 +335,18 @@ pub async fn repost_failed_tasks(
         };
         let headers = article.build_headers();
         let wire_bytes = (headers.len() + encoded.body.len()) as u64;
+        // NZB `<segment bytes>` semantics (Body Encryption Standard v1.2
+        // §2.1): encrypted releases declare the PLAINTEXT segment length
+        // (it must equal the AAD `segmentBytes`), ordinary uploads the
+        // wire-article length — identical to `commit_result` and
+        // `check::repost_one`. Without this, a recovered encrypted article
+        // decrypts fine but Penne's size check rejects the NZB
+        // (SEGMENT_BYTES_MISMATCH).
+        let nzb_bytes = if adapter.is_some() {
+            buf.len() as u64
+        } else {
+            wire_bytes
+        };
 
         let mut ok = false;
         for attempt in 1..=max_retries {
@@ -391,7 +403,7 @@ pub async fn repost_failed_tasks(
                 part: task.part,
                 total: task.total,
                 message_id,
-                bytes: wire_bytes,
+                bytes: nzb_bytes,
                 server_idx: slot.server_idx(),
                 from: Arc::from(task.from.as_str()),
                 date: task.date.clone(),

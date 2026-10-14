@@ -284,28 +284,7 @@ pub(crate) fn handle_upload_trigger(app: &mut App, tx: mpsc::UnboundedSender<App
                     None => {
                         if let Some(ref dir) = nzb_out_dir {
                             let out = dir.join(format!("{label}.nzb"));
-                            let meta = pesto::nzb::NzbMeta {
-                                name: Some(label.clone()),
-                                password: config
-                                    .nzb_password
-                                    .clone()
-                                    .or_else(|| config.compress_password.clone()),
-                                category: config.nzb_category.clone(),
-                                tmdb_id: config.tmdb_id.clone(),
-                                imdb_id: config.imdb_id.clone(),
-                                tvdb_id: config.tvdb_id.as_deref().map(|id| {
-                                    format!(
-                                        "{}/{id}",
-                                        config
-                                            .tvdb_kind
-                                            .unwrap_or(pesto::nzb::TvdbKind::Series)
-                                            .as_str()
-                                    )
-                                }),
-                                mal_id: config.mal_id.clone(),
-                                tags: config.nzb_tags.clone(),
-                                ..Default::default()
-                            };
+                            let meta = season_nzb_meta(&config, label.clone());
                             let xml = pesto::nzb::generate(
                                 &config.groups,
                                 &all_segments,
@@ -378,6 +357,39 @@ pub(crate) fn handle_upload_trigger(app: &mut App, tx: mpsc::UnboundedSender<App
             cancelled: any_cancelled,
         });
     });
+}
+
+/// Build the `<head>` metadata for the consolidated season-pack NZB.
+///
+/// Encryption provenance (Body Encryption Standard v1.2 §8): the pack rides
+/// the same encrypted wire config as its episodes, so it carries the marker
+/// and the same password precedence as the per-episode artifacts — transport
+/// (encryption) password, then NZB extraction password, then the existing
+/// season/compression fallback.
+fn season_nzb_meta(config: &Config, label: String) -> pesto::nzb::NzbMeta {
+    pesto::nzb::NzbMeta {
+        name: Some(label),
+        password: config
+            .encrypt_password
+            .clone()
+            .or_else(|| config.nzb_password.clone())
+            .or_else(|| config.compress_password.clone()),
+        category: config.nzb_category.clone(),
+        tmdb_id: config.tmdb_id.clone(),
+        imdb_id: config.imdb_id.clone(),
+        tvdb_id: config.tvdb_id.as_deref().map(|id| {
+            format!(
+                "{}/{id}",
+                config
+                    .tvdb_kind
+                    .unwrap_or(pesto::nzb::TvdbKind::Series)
+                    .as_str()
+            )
+        }),
+        mal_id: config.mal_id.clone(),
+        tags: config.nzb_tags.clone(),
+        yenc_encrypted: config.encrypt_password.is_some(),
+    }
 }
 
 /// Constructs a minimal Config that exercises the full hot path in dry-run mode.
@@ -752,3 +764,6 @@ pub(crate) async fn run_real_upload(
 
     Ok(outcome)
 }
+
+#[cfg(test)]
+mod tests;

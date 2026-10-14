@@ -236,7 +236,7 @@ async fn encrypted_nzb_sugo_job_round_trip() {
 
 #[tokio::test]
 async fn encrypted_nzb_sugo_tampered_job_fails_cleanly() {
-    let password = "sugo-tamper-canary-pass-999";
+    let password = "tampered.bin-password";
     let (status, message) = run_encrypted_job("tampered.bin", "sugo_tamper@test", true).await;
     assert_eq!(
         status,

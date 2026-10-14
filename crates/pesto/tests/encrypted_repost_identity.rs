@@ -33,26 +33,40 @@ type CapturedArticles = Arc<Mutex<Vec<Vec<u8>>>>;
 /// all connections, globally) are answered with a 441 refusal before any
 /// later POST succeeds. All STATs succeed, so no check-path repost
 /// interferes with the blind-retry assertions.
-fn spawn_mock_server(post_failures: usize) -> (SocketAddr, CapturedArticles, Arc<AtomicUsize>) {
+///
+/// Refused articles are captured in `refused_articles` too: the blind-retry
+/// scenario compares the refused initial attempt's raw bytes against the
+/// accepted retry's bytes to prove identity stability.
+fn spawn_mock_server(
+    post_failures: usize,
+) -> (
+    SocketAddr,
+    CapturedArticles,
+    Arc<AtomicUsize>,
+    CapturedArticles,
+) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
     let articles = Arc::new(Mutex::new(Vec::new()));
+    let refused_articles: CapturedArticles = Arc::new(Mutex::new(Vec::new()));
     let refused = Arc::new(AtomicUsize::new(0));
 
     let articles_clone = Arc::clone(&articles);
+    let refused_articles_clone = Arc::clone(&refused_articles);
     let refused_clone = Arc::clone(&refused);
     std::thread::spawn(move || {
         for stream in listener.incoming() {
             let Ok(stream) = stream else { continue };
             let articles = Arc::clone(&articles_clone);
+            let refused_articles = Arc::clone(&refused_articles_clone);
             let refused = Arc::clone(&refused_clone);
             std::thread::spawn(move || {
-                handle_connection(stream, articles, refused, post_failures);
+                handle_connection(stream, articles, refused_articles, refused, post_failures);
             });
         }
     });
 
-    (addr, articles, refused)
+    (addr, articles, refused, refused_articles)
 }
 
 /// Like [`spawn_mock_server`], but the first `stat_misses` STAT commands
@@ -86,6 +100,7 @@ fn spawn_mock_server_with_stat_misses(
 fn handle_connection(
     stream: TcpStream,
     articles: CapturedArticles,
+    refused_articles: CapturedArticles,
     refused: Arc<AtomicUsize>,
     post_failures: usize,
 ) {
@@ -133,11 +148,14 @@ fn handle_connection(
                 if writer.write_all(b"240 article received\r\n").is_err() {
                     return;
                 }
-            } else if writer
-                .write_all(b"441 article rejected (forced test failure)\r\n")
-                .is_err()
-            {
-                return;
+            } else {
+                refused_articles.lock().unwrap().push(article);
+                if writer
+                    .write_all(b"441 article rejected (forced test failure)\r\n")
+                    .is_err()
+                {
+                    return;
+                }
             }
         } else if command.starts_with("STAT ") {
             if writer.write_all(b"223 0 <id> article exists\r\n").is_err() {
@@ -357,7 +375,7 @@ async fn encrypted_blind_retry_reposts_encrypted_wire_with_same_identity() {
     // (`poster::repost_failed_tasks`). The retry must re-encrypt with the
     // same salt/index — posting plaintext there is the P0 leak this test
     // guards against.
-    let (addr, articles, refused) = spawn_mock_server(1);
+    let (addr, articles, refused, refused_articles) = spawn_mock_server(1);
 
     let dir = tempfile::tempdir().unwrap();
     let input = dir.path().join("retry.bin");
@@ -402,6 +420,87 @@ async fn encrypted_blind_retry_reposts_encrypted_wire_with_same_identity() {
         outcome.segments[0].segment_index, indices[0],
         "retry must preserve the original segment identity"
     );
+
+    // PESTO-R6-1: the recovered segment's NZB `bytes` must be the PLAINTEXT
+    // segment length (64), not the wire-article length (446). The AAD binds
+    // `segmentBytes` to the plaintext, so a wire-length declaration makes
+    // Penne reject the otherwise-valid article (SEGMENT_BYTES_MISMATCH).
+    assert_eq!(
+        outcome.segments[0].bytes,
+        plaintext.len() as u64,
+        "blind-retry PostedSegment.bytes must be the plaintext length, not wire length"
+    );
+
+    // The generated NZB must carry the same plaintext length: serialize the
+    // outcome and parse it back (Body Encryption Standard v1.2 §8 requires
+    // producers to declare plaintext segment bytes).
+    let meta = pesto::nzb::NzbMeta {
+        password: Some("retry-pass-123".into()),
+        yenc_encrypted: true,
+        ..Default::default()
+    };
+    let xml = pesto::nzb::generate(
+        &outcome.groups,
+        &outcome.segments,
+        &meta,
+        ObfuscateMode::None,
+    );
+    let parsed = pesto::nzb::parse(&xml).unwrap();
+    assert_eq!(parsed.segments.len(), outcome.segments.len());
+    assert_eq!(
+        parsed.segments[0].bytes,
+        plaintext.len() as u64,
+        "parsed NZB segment bytes must equal the plaintext length (64), not wire length (446)"
+    );
+    assert!(
+        xml.contains(&format!("<segment bytes=\"{}\"", plaintext.len())),
+        "generated NZB XML must declare bytes=\"{}\"",
+        plaintext.len()
+    );
+
+    // Identity stability between the initial attempt and the retry: the
+    // refused in-run article and the accepted retry article must carry the
+    // same ciphertext body (same salt + segment index ⇒ deterministic
+    // re-encryption) and the same Message-ID.
+    let refused_captured = refused_articles.lock().unwrap().clone();
+    assert_eq!(
+        refused_captured.len(),
+        1,
+        "the refused in-run attempt's article must be captured"
+    );
+    let initial = &refused_captured[0];
+    let retry = &captured[0];
+    assert_eq!(
+        article_body(initial),
+        article_body(retry),
+        "retry article body must be byte-identical to the initial attempt \
+         (same ciphertext, salt and segment index)"
+    );
+    assert_eq!(
+        article_message_id(initial),
+        article_message_id(retry),
+        "retry must reuse the initial attempt's Message-ID"
+    );
+    // Sanity: the initial attempt's ciphertext is not plaintext either.
+    assert!(
+        !article_body(initial).starts_with(b"=ybegin"),
+        "the refused initial attempt must already be encrypted wire form"
+    );
+}
+
+/// Extract the `Message-ID` header value (including angle brackets) from a
+/// captured raw article.
+fn article_message_id(article: &[u8]) -> String {
+    let text = String::from_utf8_lossy(article);
+    for line in text.split("\r\n") {
+        if let Some(value) = line
+            .strip_prefix("Message-ID:")
+            .or_else(|| line.strip_prefix("Message-Id:"))
+        {
+            return value.trim().to_string();
+        }
+    }
+    panic!("captured article has no Message-ID header");
 }
 
 #[tokio::test(flavor = "multi_thread")]
