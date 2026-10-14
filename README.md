@@ -584,8 +584,7 @@ pesto --encrypt movie.mkv
 
 # Encrypt with an explicit password
 pesto --encrypt=MySecret42 movie.mkv
-# or
-pesto --encrypt-password MySecret42 movie.mkv
+# `--encrypt-password=MySecret42` is an alias of `--encrypt=MySecret42`
 ```
 
 ### Configuration
@@ -605,8 +604,7 @@ password = "MySecretPassword"
 
 ### Unsupported Operations
 
-- **Season Consolidation (`--season`) and NZB merging:** Not supported for encrypted releases in v1. Encrypted consolidation would require re-uploading or merging articles that were already posted under their own session identity, and no code path exists for that; encrypted season/merge requests are rejected up front, before any upload starts.
-- **Archive Passwords vs Transport Encryption:** An archive password passed to `--password` encrypts the archive file itself. It is distinct from `--encrypt`, which activates yEnc body and control-line transport encryption. When both are set they must be equal (the NZB `<meta type="password">` carries the encryption password; conflicting combinations are rejected before posting). Conforming downloaders inspect `<meta type="yenc_encrypted">true</meta>` to distinguish transport encryption from archive extraction passwords.
+- **Archive Passwords vs Transport Encryption:** An archive password passed to `--password` encrypts the archive file itself. It is distinct from `--encrypt`, which activates yEnc body and control-line transport encryption. If both are set, the transport password wins for the NZB `<meta type="password">`. Conforming downloaders inspect `<meta type="yenc_encrypted">true</meta>` to distinguish transport encryption from archive extraction passwords.
 
 ### Protocol Status
 
@@ -1278,8 +1276,7 @@ picked up automatically — no config change needed.
 | `--compress-temp-dir <DIR>` | `compression.temp_dir` | OS temp dir | Where the `--compress` archive is staged before posting |
 | `--password [PASSWORD]` | — | — | Archive password; bare flag = random |
 | **Encryption** | | | |
-| `--encrypt [PASSWORD]` | `encryption.password` | off | Enable yEnc body & control-line encryption; bare flag generates random password |
-| `--encrypt-password <PASS>` | `encryption.password` | — | Explicit password for yEnc body and control-line encryption |
+| `--encrypt [PASSWORD]` | `encryption.password` | off | Enable yEnc body & control-line encryption; bare flag generates random password; `--encrypt-password` is an alias |
 | **Output** | | | |
 | `-o`, `--out <PATH>` | `output.nzb` | derived | Explicit `.nzb` output path |
 | `--nzb-dir <DIR>` | `output.nzb_dir` | — | Directory where `.nzb` files are saved |

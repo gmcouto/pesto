@@ -1074,8 +1074,7 @@ picked up automatically — no config change needed.
 | `--compress-volume-size <SIZE>` | `compression.volume_size` | off | Split the archive into volumes (e.g. `500m`, `4g`); `rar`/`7z` only, rejected with `--compress=zip` |
 | `--password [PASSWORD]` | — | — | Archive password; bare flag = random |
 | **Encryption** | | | |
-| `--encrypt [PASSWORD]` | `encryption.password` | off | Enable yEnc body & control-line encryption; bare flag generates random password |
-| `--encrypt-password <PASS>` | `encryption.password` | — | Explicit password for yEnc body and control-line encryption |
+| `--encrypt [PASSWORD]` | `encryption.password` | off | Enable yEnc body & control-line encryption; bare flag generates random password; `--encrypt-password` is an alias |
 | **Output** | | | |
 | `-o`, `--out <PATH>` | `output.nzb` | derived | Explicit `.nzb` output path |
 | `--nzb-dir <DIR>` | `output.nzb_dir` | — | Directory where `.nzb` files are saved |

@@ -55,7 +55,6 @@ fn physical_multipart_wire(session: &Arc<EncryptionSession>, file_size: u64) -> 
             },
             b"test",
             128,
-            None,
             1,
             &mut Vec::new(),
         )

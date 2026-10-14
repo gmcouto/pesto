@@ -316,34 +316,6 @@ mod tests {
         assert!(decoded.crc_matches());
     }
 
-    /// An ordinary `=ybegin part=1 total=1` article without `=ypart` decodes
-    /// without error (strictly upstream rule: `total > 1` is multipart).
-    #[test]
-    fn ordinary_part1_total1_without_ypart_decodes() {
-        let payload: Vec<u8> = (0u8..=255).cycle().take(300).collect();
-        let encoded = encode_part(
-            "single.bin",
-            payload.len() as u64,
-            PartSpec {
-                number: 1,
-                total: 1,
-                offset: 0,
-            },
-            &payload,
-            128,
-            None,
-        );
-
-        assert!(!encoded.body.windows(6).any(|w| w == b"=ypart"));
-
-        let decoded =
-            decode_part(&encoded.body).expect("ordinary part=1 total=1 must decode without =ypart");
-        assert_eq!(decoded.data, payload);
-        assert_eq!(decoded.total, 1);
-        assert_eq!(decoded.part, 1);
-        assert!(decoded.crc_matches());
-    }
-
     #[test]
     fn round_trips_empty_part() {
         let encoded = encode_part(

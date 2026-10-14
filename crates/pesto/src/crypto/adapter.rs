@@ -86,10 +86,9 @@ impl UploadEncryptionAdapter {
     /// 4. Injects `=yencryption` control line.
     /// 5. FF1-encrypts all control lines over Radix 253, prepending 16-byte salt to line 1.
     ///
-    /// `_file_crc32` is accepted for call-site symmetry with the ordinary
-    /// encoder but never written: a plaintext whole-file CRC on the last
-    /// multipart `=yend` must not be emitted (Body Std v1.2 §5 step 5), and a
-    /// ciphertext whole-file CRC cannot be computed per segment.
+    /// A plaintext whole-file CRC on the last multipart `=yend` is never
+    /// written (Body Std v1.2 §5 step 5), and a ciphertext whole-file CRC
+    /// cannot be computed per segment.
     #[allow(clippy::too_many_arguments)]
     pub fn encode_article(
         &self,
@@ -98,7 +97,6 @@ impl UploadEncryptionAdapter {
         spec: PartSpec,
         data: &[u8],
         line_len: usize,
-        _file_crc32: Option<u32>,
         segment_index: u32,
         body: &mut Vec<u8>,
     ) -> Result<EncodedPart> {
@@ -364,11 +362,7 @@ pub struct DownloadDecryptionAdapter {
 }
 
 impl DownloadDecryptionAdapter {
-    /// Build a decryption adapter for `password`. The caller configured
-    /// transport decryption for this download, so any unencrypted article
-    /// starting with `=ybegin` is rejected as `UNAUTHENTICATED_ARTICLE`
-    /// (fail closed): accepting it would release unauthenticated plaintext
-    /// and violate the Zero-Output Guarantee.
+    /// Build a decryption adapter for `password`.
     pub fn with_password(password: &str) -> Self {
         Self {
             password: Zeroizing::new(password.to_string()),
@@ -379,7 +373,10 @@ impl DownloadDecryptionAdapter {
     /// Decode an article wire body, restoring encrypted control lines and decrypting body ciphertext.
     ///
     /// The `segmentIndex` and salt are taken from the article bootstrap.
-    /// Strictly guarantees Zero-Output on authentication failure.
+    /// The caller configured transport decryption for this download, so any
+    /// unencrypted article starting with `=ybegin` is rejected as
+    /// `UNAUTHENTICATED_ARTICLE` (fail closed): accepting it would release
+    /// unauthenticated plaintext and violate the Zero-Output Guarantee.
     pub fn decode_article(&self, body: &[u8]) -> Result<DecodedPart> {
         if body.starts_with(b"=ybegin") {
             bail!("UNAUTHENTICATED_ARTICLE: unencrypted article received for encrypted segment");
@@ -418,13 +415,12 @@ impl DownloadDecryptionAdapter {
             );
         }
 
-        let multipart = control::split_lines_preserving_endings(&clean_yenc)
-            .get(1)
-            .is_some_and(|line| line.content.starts_with(b"=ypart"));
-
         let lines = control::split_lines_preserving_endings(&clean_yenc);
         // Body Standard v1.2 §2.1/§5: preserve physical multipart metadata
         // independently of the ordinary decoder's total-based framing.
+        let multipart = lines
+            .get(1)
+            .is_some_and(|line| line.content.starts_with(b"=ypart"));
         let multipart_metadata = if multipart {
             let range = std::str::from_utf8(lines[1].content)
                 .context("INVALID_GEOMETRY: =ypart has non-ASCII fields")?;
@@ -445,7 +441,6 @@ impl DownloadDecryptionAdapter {
                         .split(|&b| b == b' ' || b == b'\t')
                         .find_map(|token| token.strip_prefix(b"pcrc32="))
                 })
-                .filter(|value| value.len() == 8)
                 .and_then(|value| std::str::from_utf8(value).ok())
                 .and_then(|value| u32::from_str_radix(value, 16).ok())
                 .context("PROVIDER_FAILOVER: missing or invalid ciphertext pcrc32 CRC")?;

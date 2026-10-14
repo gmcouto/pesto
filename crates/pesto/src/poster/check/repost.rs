@@ -81,7 +81,6 @@ pub(super) async fn repost_one(
                     spec,
                     &buf,
                     config.line_length,
-                    file_crc32,
                     seg.segment_index,
                     &mut encode_buf,
                 )

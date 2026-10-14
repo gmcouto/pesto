@@ -74,19 +74,13 @@ struct FileMeta {
     /// Fixed dates have `Some` RFC but `None` timestamp.
     date: (Option<String>, Option<u64>),
     size: u64,
-    /// 1-based position in the release order (natural order for data files,
-    /// followed by PAR2 index and volumes). Always assigned.
-    release_ordinal: u32,
-}
-
-impl FileMeta {
-    fn file_index(&self, total_files: u32) -> u32 {
-        if total_files > 0 {
-            self.release_ordinal
-        } else {
-            0
-        }
-    }
+    /// This file's 1-based position among every file in the release (data
+    /// files, then the PAR2 index, then the PAR2 volumes) — used for the
+    /// `--file-counter` `[filenum/total]` subject prefix and, for encrypted
+    /// uploads, for `ReleaseLayout::segment_identity`. Meaningful only when
+    /// `Shared::total_files > 0`; encrypted uploads always assign it, while
+    /// unencrypted uploads zero it when `--file-counter` is off.
+    file_index: u32,
 }
 
 fn par2_volume_ordinal(data_files: usize, publish_index: bool, volume_index: usize) -> u32 {
@@ -316,12 +310,12 @@ async fn post_pregenerated_release(
         let index_name = layout::index_name(par2_release_base(&metas[0].real_name));
         let index_path = par2_dir.join(&index_name);
         let wire_override = shared.release_prefix.as_deref().map(layout::index_name);
-        let release_ordinal = metas.len() as u32 + 1;
+        let file_index = metas.len() as u32 + 1;
         push_par2_file(
             &index_path,
             index_name,
             wire_override,
-            release_ordinal,
+            file_index,
             shared,
             tx,
         )
@@ -336,20 +330,9 @@ async fn post_pregenerated_release(
             .release_prefix
             .as_deref()
             .map(|prefix| layout::volume_name(prefix, *vol));
-        let release_ordinal = par2_volume_ordinal(
-            metas.len(),
-            shared.config.obfuscate.policy().publish_par2_index,
-            vol_idx,
-        );
-        push_par2_file(
-            &vol_path,
-            vol_name,
-            wire_override,
-            release_ordinal,
-            shared,
-            tx,
-        )
-        .await?;
+        let index_offset = u32::from(shared.config.obfuscate.policy().publish_par2_index);
+        let file_index = metas.len() as u32 + 1 + index_offset + vol_idx as u32;
+        push_par2_file(&vol_path, vol_name, wire_override, file_index, shared, tx).await?;
     }
     Ok(())
 }
@@ -465,7 +448,7 @@ async fn post_data_files(
             let segment_index = if shared.encryption_adapter.is_some() {
                 shared
                     .release_layout
-                    .segment_identity(meta.release_ordinal, i)
+                    .segment_identity(meta.file_index, i)
                     .context("valid segment identity for planned data file")?
             } else {
                 0
@@ -501,7 +484,7 @@ async fn push_par2_file(
     path: &PathBuf,
     real_name: String,
     wire_override: Option<String>,
-    release_ordinal: u32,
+    file_index: u32,
     shared: &Arc<Shared>,
     tx: &TaskDispatcher<PostTask>,
 ) -> Result<()> {
@@ -561,7 +544,11 @@ async fn push_par2_file(
         from,
         date,
         size,
-        release_ordinal,
+        file_index: if shared.config.file_counter {
+            file_index
+        } else {
+            0
+        },
     });
 
     // Whole-file CRC-32 accumulated as this same loop reads the file for
@@ -583,7 +570,7 @@ async fn push_par2_file(
         let segment_index = if shared.encryption_adapter.is_some() {
             shared
                 .release_layout
-                .segment_identity(release_ordinal, part_number)
+                .segment_identity(file_index, part_number)
                 .context("valid segment identity for planned PAR2 file")?
         } else {
             0

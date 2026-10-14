@@ -319,14 +319,10 @@ pub(super) struct Cli {
         value_name = "PASSWORD",
         num_args = 0..=1,
         default_missing_value = "",
-        require_equals = true
+        require_equals = true,
+        alias = "encrypt-password"
     )]
     pub(super) encrypt: Option<String>,
-
-    /// Encryption password for yEnc body and control-line encryption
-    /// [config: encryption.password].
-    #[arg(long, value_name = "PASS")]
-    pub(super) encrypt_password: Option<String>,
 
     /// Category written to `<meta type="category">` in the `.nzb`
     /// [config: output.nzb_category].
@@ -651,11 +647,6 @@ pub(super) struct Cli {
 impl Cli {
     /// Build config [`Overrides`] from the parsed flags.
     pub(super) fn overrides(&self) -> Overrides {
-        let encrypt_password = self
-            .encrypt_password
-            .clone()
-            .or_else(|| self.encrypt.clone());
-
         Overrides {
             host: self.host.clone(),
             port: self.port,
@@ -738,7 +729,7 @@ impl Cli {
                 })
             }),
             nzb_password: self.nzb_password.clone(),
-            encrypt_password,
+            encrypt_password: self.encrypt.clone(),
             nzb_category: self.nzb_category.clone(),
             nzb_tags: self.nzb_tag.clone(),
             tmdb: self.tmdb.clone(),

@@ -147,7 +147,6 @@ fn test_malformed_inputs_rejection() {
                         spec,
                         payload,
                         128,
-                        None,
                         segment_index,
                         &mut body,
                     )
@@ -228,7 +227,6 @@ fn test_malformed_inputs_rejection() {
                         spec,
                         payload,
                         128,
-                        None,
                         segment_index,
                         &mut body,
                     )

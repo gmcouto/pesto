@@ -129,7 +129,7 @@ async fn prepare_ready(shared: &Arc<Shared>, mut task: PostTask) -> Option<Ready
                     date,
                     full_crc32: task.file_crc32.unwrap_or(0),
                     server_idx: existing.server_idx,
-                    file_index: task.meta.file_index(shared.total_files),
+                    file_index: task.meta.file_index,
                     total_files: shared.total_files,
                     // The article was already posted encrypted under this
                     // identity (yEnc Body Encryption Standard v1.2 §8); a
@@ -209,7 +209,6 @@ async fn prepare_ready(shared: &Arc<Shared>, mut task: PostTask) -> Option<Ready
                 spec,
                 &task.data,
                 shared.config.line_length,
-                file_crc32,
                 task.segment_index,
                 &mut encode_buf,
             ) {
@@ -261,8 +260,7 @@ async fn prepare_ready(shared: &Arc<Shared>, mut task: PostTask) -> Option<Ready
                 &task.subject_name,
                 task.part,
                 task.total,
-                (shared.total_files > 0)
-                    .then_some((task.meta.file_index(shared.total_files), shared.total_files)),
+                (shared.total_files > 0).then_some((task.meta.file_index, shared.total_files)),
             ),
             date: rfc_date.clone(),
             no_archive: shared.config.no_archive,
@@ -432,7 +430,7 @@ pub(super) async fn worker(
                     // Nothing was actually posted in dry-run mode, so there's
                     // no real server and no check queue — see the field doc.
                     server_idx: 0,
-                    file_index: p.task.meta.file_index(shared.total_files),
+                    file_index: p.task.meta.file_index,
                     total_files: shared.total_files,
                     segment_index: p.task.segment_index,
                 });

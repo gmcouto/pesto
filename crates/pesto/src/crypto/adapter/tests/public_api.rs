@@ -40,7 +40,6 @@ fn test_adapter_strict_header_order() {
             spec_single,
             payload,
             128,
-            None,
             segment_index_single,
             &mut body_single,
         )
@@ -71,7 +70,6 @@ fn test_adapter_strict_header_order() {
             spec_multi,
             payload,
             128,
-            None,
             segment_index_multi,
             &mut body_multi,
         )
@@ -107,7 +105,6 @@ fn test_adapter_ciphertext_crc_validation() {
             spec,
             payload,
             128,
-            None,
             segment_index,
             &mut body,
         )
@@ -170,7 +167,6 @@ fn test_adapter_zero_output_rejection_matrix() {
             spec,
             payload,
             128,
-            None,
             segment_index,
             &mut body,
         )
@@ -315,7 +311,6 @@ fn header_loop_ff1_error_fails_closed_not_passthrough() {
             },
             payload,
             128,
-            None,
             segment_index,
             &mut body,
         )
@@ -397,8 +392,7 @@ fn encrypted_segments_normalize_crc_metadata_regression() {
                 offset: 0,
             },
             payload,
-            128,
-            Some(0xDEADBEEF), // wire =yend carries a (ciphertext) file CRC
+            128, // wire =yend carries a (ciphertext) file CRC
             segment_index,
             &mut body,
         )

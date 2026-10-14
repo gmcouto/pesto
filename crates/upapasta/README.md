@@ -40,5 +40,4 @@ password = "MySecretPassword"
 When configured, uploads are encrypted and the generated NZB carries
 `<meta type="yenc_encrypted">true</meta>` with the `<meta type="password">`
 transport password. See the root pesto README's Encryption section for the
-wire format and status. Encrypted season consolidation is not supported in
-v1 and is rejected before any upload starts.
+wire format and status.

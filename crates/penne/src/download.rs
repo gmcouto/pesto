@@ -53,7 +53,7 @@ use std::time::Duration;
 use anyhow::Result;
 use pesto::config::ServerEntry;
 use pesto::crypto::DownloadDecryptionAdapter;
-use pesto::yenc::decode_part;
+use pesto::yenc::{decode_part, DecodedPart};
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::task::JoinSet;
 
@@ -157,6 +157,19 @@ struct PassContext {
     decryptor: Option<Arc<DownloadDecryptionAdapter>>,
 }
 
+/// Decode a fetched (or cached) article body, restoring encrypted control
+/// lines and authenticating the body when a decryptor is configured.
+/// Ordinary downloads go straight to `decode_part` exactly as before.
+fn decode_body(
+    decryptor: &Option<Arc<DownloadDecryptionAdapter>>,
+    body: &[u8],
+) -> anyhow::Result<DecodedPart> {
+    match decryptor {
+        Some(decryptor) => decryptor.decode_article(body),
+        None => decode_part(body),
+    }
+}
+
 /// Fetch and decode every segment in `queue` from `tiers`, tried in
 /// priority order. Within each tier, up to every member server's own
 /// `connections` workers run concurrently, pooled together — see
@@ -242,12 +255,7 @@ pub async fn download_queue_with_decryptor(
     for file in &queue.files {
         for seg in &file.segments {
             if let Some(cached) = cache::load(dest_dir, &seg.message_id) {
-                let decoded_result = if let Some(ref d) = decryptor {
-                    d.decode_article(&cached)
-                } else {
-                    decode_part(&cached)
-                };
-                if let Ok(decoded) = decoded_result {
+                if let Ok(decoded) = decode_body(&decryptor, &cached) {
                     emit(&progress, || ProgressEvent::SegmentDownloaded {
                         file_name: file.name.clone(),
                         part: seg.part,
@@ -266,9 +274,7 @@ pub async fn download_queue_with_decryptor(
                 }
                 // A corrupted cache entry (shouldn't happen, but a killed
                 // write mid-flush is possible) falls through to a normal
-                // network fetch rather than failing the segment outright; a
-                // successful refetch overwrites it (`cache::store` is a
-                // plain `fs::write`), so no explicit eviction is needed.
+                // network fetch rather than failing the segment outright.
             }
             pending.push(WorkItem {
                 file_name: file.name.clone(),
@@ -584,27 +590,27 @@ async fn worker_loop(
             }
         };
 
-        let decoded_result = if let Some(ref decryptor) = ctx.decryptor {
-            decryptor.decode_article(&body).and_then(|decoded| {
-                // Body Std v1.2 §2.1: the NZB `bytes` attribute is the
-                // plaintext segment length, and checking it is optional (a
-                // MAY). When this check fails, the copy is a corrupt provider
-                // copy. The error goes to the leftover queue as provider
-                // failover (not a METADATA_VALIDATION failure), so the next
-                // server is tried. Only the last server's copy is reported as
-                // SegmentCorrupt.
-                if item.bytes > 0 && decoded.data.len() as u64 != item.bytes {
-                    anyhow::bail!(
-                        "SEGMENT_BYTES_MISMATCH: fetched article plaintext length ({}) does not match NZB declared bytes ({})",
-                        decoded.data.len(),
-                        item.bytes
-                    );
-                }
-                Ok(decoded)
-            })
-        } else {
-            decode_part(&body)
-        };
+        let decoded_result = decode_body(&ctx.decryptor, &body).and_then(|decoded| {
+            // Body Std v1.2 §2.1: the NZB `bytes` attribute is the plaintext
+            // segment length, and checking it is optional (a MAY). The check
+            // applies only to encrypted downloads (the plain path keeps
+            // upstream's no-check behavior). When this check fails, the copy
+            // is a corrupt provider copy. The error goes to the leftover
+            // queue as provider failover (not a METADATA_VALIDATION
+            // failure), so the next server is tried. Only the last server's
+            // copy is reported as SegmentCorrupt.
+            if ctx.decryptor.is_some()
+                && item.bytes > 0
+                && decoded.data.len() as u64 != item.bytes
+            {
+                anyhow::bail!(
+                    "SEGMENT_BYTES_MISMATCH: fetched article plaintext length ({}) does not match NZB declared bytes ({})",
+                    decoded.data.len(),
+                    item.bytes
+                );
+            }
+            Ok(decoded)
+        });
 
         match decoded_result {
             Ok(decoded) => {
@@ -628,18 +634,6 @@ async fn worker_loop(
                 fetched.push(item);
             }
             Err(e) => {
-                if ctx.decryptor.is_some() {
-                    // Decryption/decode failures on an encrypted download are
-                    // actionable (tampered copy, wrong password); the plain
-                    // path keeps upstream's silent SegmentCorrupt event (no
-                    // new per-article log on ordinary downloads).
-                    tracing::warn!(
-                        message_id = %item.message_id,
-                        file = %item.file_name,
-                        part = item.part,
-                        "article decode/decryption failed: {e}"
-                    );
-                }
                 if is_last_server {
                     emit(&ctx.progress, || ProgressEvent::SegmentCorrupt {
                         file_name: item.file_name.clone(),

@@ -695,4 +695,5 @@ fn parse_preserves_declared_parts_without_compacting() {
     assert_eq!(parsed.segments[1].part, 3);
 }
 
+mod encryption_metadata;
 mod password;

@@ -25,7 +25,6 @@ fn explicit_multipart_fixture(
             },
             b"test",
             128,
-            None,
             1,
             &mut Vec::new(),
         )
@@ -233,7 +232,6 @@ fn encrypted_multipart_yend_never_carries_whole_file_crc() {
             },
             payload,
             128,
-            Some(0xDEAD_BEEF),
             2,
             &mut body,
         )
@@ -249,7 +247,7 @@ fn encrypted_multipart_yend_never_carries_whole_file_crc() {
     assert!(!yend.contains(" crc32="), "{yend}");
 }
 
-// PU-1: the article-sized `size=` override in `clean_for_decode` replaces the
+// The article-sized `size=` override in `clean_for_decode` replaces the
 // existing header keyword span instead of appending a duplicate token, so the
 // internal decode seam never relies on last-wins keyword tie-breaking.
 #[test]
@@ -268,7 +266,6 @@ fn filename_containing_size_text_round_trips_with_single_size_token() {
             },
             payload,
             128,
-            None,
             1,
             &mut Vec::new(),
         )
@@ -322,7 +319,6 @@ fn seam_replacement_preserves_geometry_for_multipart_and_total_one() {
             },
             payload,
             128,
-            None,
             1,
             &mut Vec::new(),
         )
@@ -375,7 +371,6 @@ fn large_file_tiny_segment_allocates_bounded() {
             },
             payload,
             128,
-            None,
             1,
             &mut Vec::new(),
         )

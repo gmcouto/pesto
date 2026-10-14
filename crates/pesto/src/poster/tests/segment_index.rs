@@ -126,7 +126,7 @@ fn commit_result_records_planned_segment_index() {
         from: "test <t@x>".into(),
         date: (None, None),
         size: 12,
-        release_ordinal: 1,
+        file_index: 1,
     });
 
     let task = PostTask {
@@ -207,7 +207,7 @@ fn encrypted_layout_refuses_oversized_generated_par2_volumes() {
             let name = format!("file{index}.bin");
             let mut meta = meta_with_name(std::path::Path::new(&name), &name);
             meta.size = 3 * (1u64 << 30);
-            meta.release_ordinal = index + 1;
+            meta.file_index = index + 1;
             Arc::new(meta)
         })
         .collect();
@@ -238,7 +238,7 @@ fn encrypted_layout_refuses_oversized_published_par2_index() {
             let name = format!("file{index}.bin");
             let mut meta = meta_with_name(std::path::Path::new(&name), &name);
             meta.size = 3 * (1u64 << 30);
-            meta.release_ordinal = index + 1;
+            meta.file_index = index + 1;
             Arc::new(meta)
         })
         .collect();

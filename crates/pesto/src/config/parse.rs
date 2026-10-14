@@ -295,12 +295,8 @@ impl Config {
             }
         }
 
-        let nzb_password = cli.nzb_password.or(file.output.nzb_password);
         let encrypt_password = cli.encrypt_password.or(file.encryption.password);
-        super::validation::validate_encryption(
-            encrypt_password.as_deref(),
-            nzb_password.as_deref(),
-        )?;
+        super::validation::validate_encryption(encrypt_password.as_deref())?;
 
         Ok(Config {
             host,
@@ -408,7 +404,7 @@ impl Config {
                     })
                 })
             }),
-            nzb_password,
+            nzb_password: cli.nzb_password.or(file.output.nzb_password),
             encrypt_password,
             nzb_category: {
                 let explicit = cli.nzb_category.or(file.output.nzb_category);

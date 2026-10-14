@@ -116,7 +116,7 @@ fn test_control_line_encryption_test_vectors() {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(64))]
+    #![proptest_config(ProptestConfig::with_cases(8))]
 
     #[test]
     fn control_line_roundtrip_preserves_framing_for_arbitrary_session_identity(

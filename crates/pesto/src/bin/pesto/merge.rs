@@ -83,13 +83,6 @@ pub(super) fn run_merge_season(
             let parsed = pesto::nzb::parse(&content)
                 .with_context(|| format!("parsing {}", src.display()))?;
 
-            if parsed.meta.yenc_encrypted {
-                anyhow::bail!(
-                    "cannot merge encrypted NZB `{}`: merging encrypted NZBs is not supported in v1",
-                    src.display()
-                );
-            }
-
             let ep_name = src
                 .file_stem()
                 .map(|s| s.to_string_lossy().into_owned())

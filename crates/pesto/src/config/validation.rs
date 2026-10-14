@@ -47,28 +47,16 @@ pub fn is_xml_representable(s: &str) -> bool {
 /// - Rejects empty password strings.
 /// - Rejects XML-unrepresentable transport password characters before posting.
 /// - Preserves valid whitespace (LF, tab, CR) and non-ASCII UTF-8 bytes verbatim without altering.
-/// - Rejects conflicting passwords if both `encrypt_password` and `nzb_password` are specified and differ.
-pub fn validate_encryption(
-    encrypt_password: Option<&str>,
-    nzb_password: Option<&str>,
-) -> Result<()> {
+/// - If both `encrypt_password` and `nzb_password` are set, one silently wins
+///   at the use site (`encrypt_password.or(nzb_password)`); there is no
+///   archive-vs-encryption conflict rule.
+pub fn validate_encryption(encrypt_password: Option<&str>) -> Result<()> {
     if let Some(pw) = encrypt_password {
         if pw.is_empty() {
             bail!("encryption password cannot be empty");
         }
         if !is_xml_representable(pw) {
             bail!("encryption password contains characters that cannot be represented in XML");
-        }
-        if let Some(nzb_pw) = nzb_password {
-            if nzb_pw.is_empty() {
-                bail!("nzb password cannot be empty");
-            }
-            if !is_xml_representable(nzb_pw) {
-                bail!("nzb password contains characters that cannot be represented in XML");
-            }
-            if nzb_pw != pw {
-                bail!("conflicting passwords: --encrypt-password and --nzb-password cannot differ");
-            }
         }
     }
     Ok(())
@@ -80,7 +68,7 @@ mod tests {
 
     #[test]
     fn encryption_validation_empty_password_rejected() {
-        assert!(validate_encryption(Some(""), None).is_err());
+        assert!(validate_encryption(Some("")).is_err());
     }
 
     #[test]
@@ -89,29 +77,18 @@ mod tests {
         // (if unusual) secret — it round-trips through XML verbatim, so it
         // is accepted as-is. Only the empty string and XML-unrepresentable
         // bytes are rejected.
-        assert!(validate_encryption(Some("   "), None).is_ok());
-        assert!(validate_encryption(Some("\t\n"), None).is_ok());
-        // Empty nzb override is still rejected; a whitespace-only one that
-        // MATCHES the encryption password is the same secret.
-        assert!(validate_encryption(Some("secret"), Some("")).is_err());
-        assert!(validate_encryption(Some("secret"), Some("other")).is_err());
+        assert!(validate_encryption(Some("   ")).is_ok());
+        assert!(validate_encryption(Some("\t\n")).is_ok());
     }
 
     #[test]
     fn encryption_validation_valid_password_accepted() {
-        assert!(validate_encryption(Some("secret"), None).is_ok());
-        assert!(validate_encryption(Some("secret"), Some("secret")).is_ok());
-    }
-
-    #[test]
-    fn encryption_validation_conflicting_passwords_rejected() {
-        assert!(validate_encryption(Some("secret"), Some("other")).is_err());
+        assert!(validate_encryption(Some("secret")).is_ok());
     }
 
     #[test]
     fn encryption_validation_none_accepted() {
-        assert!(validate_encryption(None, None).is_ok());
-        assert!(validate_encryption(None, Some("nzbpass")).is_ok());
+        assert!(validate_encryption(None).is_ok());
     }
 
     #[test]

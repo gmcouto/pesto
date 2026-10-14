@@ -187,13 +187,6 @@ pub(super) async fn run_batch(
         anyhow::bail!("no entries found to post");
     }
 
-    if season_nzb.is_some() && params.config.encrypt_password.is_some() {
-        anyhow::bail!(
-            "encrypted season consolidation is not supported in v1; \
-             use --each without --season for encrypted uploads"
-        );
-    }
-
     // A season batch merges every entry's NZB into one at the end, so they
     // all need the *same* archive password — resolved once, up front, and
     // handed to every entry below. A plain --each batch has no such merge,

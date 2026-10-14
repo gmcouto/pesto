@@ -132,16 +132,18 @@ mod tests {
 
     #[test]
     fn test_download_decryptor_mode_selection() {
-        // 1. Unencrypted metadata yields None even if password is set (archive password only)
+        // Unencrypted metadata yields None even if password is set (archive
+        // password only); encrypted metadata without a password errors
+        // fail-closed; encrypted metadata with a password creates one. A
+        // whitespace-only password is a valid (if unusual) secret; only the
+        // empty string is rejected.
         let meta_unencrypted = pesto::nzb::NzbMeta {
             yenc_encrypted: false,
             password: Some("archive-secret".into()),
             ..Default::default()
         };
-        let decryptor = download_decryptor(&meta_unencrypted).unwrap();
-        assert!(decryptor.is_none());
+        assert!(download_decryptor(&meta_unencrypted).unwrap().is_none());
 
-        // 2. Encrypted metadata without password errors fail-closed
         let meta_missing_pwd = pesto::nzb::NzbMeta {
             yenc_encrypted: true,
             password: None,
@@ -153,19 +155,13 @@ mod tests {
         };
         assert!(err.to_string().contains("missing password metadata"));
 
-        // 3. Encrypted metadata with password creates decryptor
         let meta_encrypted = pesto::nzb::NzbMeta {
             yenc_encrypted: true,
             password: Some("transport-secret".into()),
             ..Default::default()
         };
-        let decryptor = download_decryptor(&meta_encrypted).unwrap();
-        assert!(decryptor.is_some());
+        assert!(download_decryptor(&meta_encrypted).unwrap().is_some());
 
-        // 4. Encrypted metadata with empty password errors fail-closed.
-        // no silent alteration — a whitespace-only password is a
-        // valid (if unusual) secret and creates a decryptor; only the
-        // empty string is rejected.
         let meta_empty_pwd = pesto::nzb::NzbMeta {
             yenc_encrypted: true,
             password: Some(String::new()),

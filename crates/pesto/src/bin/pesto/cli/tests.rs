@@ -18,9 +18,11 @@ fn test_explicit_encrypt_with_equals_preserves_positional_files() {
 }
 
 #[test]
-fn test_encrypt_password_preserves_positional_files() {
-    let args = vec!["pesto", "--encrypt-password", "my_secret", "file.mkv"];
+fn test_encrypt_password_alias_preserves_positional_files() {
+    // `--encrypt-password` is a long alias of `--encrypt` (one flag, two
+    // names); like `--encrypt`, the explicit value uses the `=` form.
+    let args = vec!["pesto", "--encrypt-password=my_secret", "file.mkv"];
     let cli = Cli::try_parse_from(args).expect("parsing should succeed");
-    assert_eq!(cli.encrypt_password, Some("my_secret".to_string()));
+    assert_eq!(cli.encrypt, Some("my_secret".to_string()));
     assert_eq!(cli.files, vec![PathBuf::from("file.mkv")]);
 }

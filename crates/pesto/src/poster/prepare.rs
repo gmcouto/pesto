@@ -325,7 +325,7 @@ pub(super) async fn prepare_inputs(
             size: md.len(),
             // Assigned below, once `metas`' final posting order is settled —
             // see the natural order pass after the File-ID sort.
-            release_ordinal: 0,
+            file_index: 0,
         }));
     }
 
@@ -347,17 +347,14 @@ pub(super) async fn prepare_inputs(
         metas = keyed.into_iter().map(|(_, meta)| meta).collect();
     }
 
-    // Assign `release_ordinal` based on the release's natural filename order
-    // (`part1.rar` is ordinal 1, `part2.rar` is ordinal 2). This order is
-    // independent of `metas`' processing order (File-ID sort for PAR2) and
-    // serves as the immutable release ordinal for segment identity.
+    // Assign `file_index` based on the release's natural filename order
+    // (`part1.rar` is index 1, `part2.rar` is index 2). This order is
+    // independent of `metas`' processing order (File-ID sort for PAR2).
     //
-    // The rank pass only runs for encrypted uploads (where the layout planner
-    // consumes `release_ordinal`) or when `--file-counter` needs it for the
-    // `[filenum/total]` prefix: upstream's rank pass was `file_counter`-gated,
-    // and unconditionally renumbering every ordinary upload is churn with no
-    // effect on the plain path — same computed value, kept upstream's shape
-    // of a single gated pass.
+    // The rank pass is gated exactly like upstream: `--file-counter` needs
+    // the `[filenum/total]` prefix, and encrypted uploads need the ordinal
+    // for `ReleaseLayout::segment_identity`. Unencrypted uploads without the
+    // flag keep the upstream zeroed index.
     if config.file_counter || config.encrypt_password.is_some() {
         let mut order: Vec<usize> = (0..metas.len()).collect();
         order.sort_by(|&a, &b| natural_cmp(&metas[a].real_name, &metas[b].real_name));
@@ -368,9 +365,9 @@ pub(super) async fn prepare_inputs(
         metas = metas
             .into_iter()
             .zip(rank)
-            .map(|(m, release_ordinal)| {
+            .map(|(m, file_index)| {
                 Arc::new(FileMeta {
-                    release_ordinal,
+                    file_index,
                     ..(*m).clone()
                 })
             })
@@ -395,7 +392,7 @@ pub struct LayoutEntry {
 
 /// An immutable, complete release layout computed before concurrent task dispatch.
 ///
-/// Maps every 1-based release ordinal `1..=total_files` to its part count and
+/// Maps every 1-based `file_index` `1..=total_files` to its part count and
 /// preceding segment prefix sum.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReleaseLayout {
@@ -404,7 +401,7 @@ pub struct ReleaseLayout {
 }
 
 impl ReleaseLayout {
-    /// Construct a ReleaseLayout from a slice of `(release_ordinal, part_count)`.
+    /// Construct a ReleaseLayout from a slice of `(file_index, part_count)`.
     ///
     /// Validates that:
     /// - `total_files > 0`
@@ -465,12 +462,12 @@ impl ReleaseLayout {
         })
     }
 
-    /// Get the layout entry for a given 1-based release ordinal.
-    pub fn entry(&self, release_ordinal: u32) -> Option<&LayoutEntry> {
-        if release_ordinal == 0 || release_ordinal > self.total_files {
+    /// Get the layout entry for a given 1-based `file_index`.
+    pub fn entry(&self, file_index: u32) -> Option<&LayoutEntry> {
+        if file_index == 0 || file_index > self.total_files {
             None
         } else {
-            self.entries.get((release_ordinal - 1) as usize)
+            self.entries.get((file_index - 1) as usize)
         }
     }
 
@@ -486,8 +483,8 @@ impl ReleaseLayout {
     /// path) goes through this method, so all consumers receive safe,
     /// monotonic, injective indices. Identity is finalized here BEFORE any
     /// salt/KDF derivation happens downstream.
-    pub fn segment_identity(&self, release_ordinal: u32, part_number: u32) -> Option<u32> {
-        let entry = self.entry(release_ordinal)?;
+    pub fn segment_identity(&self, file_index: u32, part_number: u32) -> Option<u32> {
+        let entry = self.entry(file_index)?;
         if part_number == 0 || part_number > entry.part_count {
             return None;
         }
@@ -529,7 +526,7 @@ impl ReleaseLayout {
             let segs = yenc::segments(meta.size, article_size);
             let part_count =
                 u32::try_from(segs.len()).context("data file part count exceeds u32")?;
-            parts_list.push((meta.release_ordinal, part_count));
+            parts_list.push((meta.file_index, part_count));
         }
 
         let par2_file_count = if recovery_count > 0 {
@@ -687,7 +684,7 @@ pub(super) async fn prepare_resources(
     // no index, so running the planner there only adds a hand-written PAR2
     // packet-size prediction that can fail ("exceed safe segment-index
     // capacity") or panic on an upload that never needed it.
-    // `FileMeta::release_ordinal` is still assigned by `prepare_inputs` for
+    // `FileMeta::file_index` is still assigned by `prepare_inputs` for
     // every run; the plain upload path simply never reads it back.
     let release_layout = Arc::new(if config.encrypt_password.is_some() {
         ReleaseLayout::build(metas, config, recovery_count, par2_slice_size)?

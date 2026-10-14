@@ -83,7 +83,7 @@ fn xml_unrepresentable_password_rejected_by_validation() {
     assert!(!is_xml_representable("bad\u{000b}pass")); // vertical tab is forbidden in XML 1.0
     assert!(is_xml_representable("valid\t\n\rpass 🔑"));
 
-    let err = validate_encryption(Some("forbidden\u{0001}"), None)
+    let err = validate_encryption(Some("forbidden\u{0001}"))
         .expect_err("XML-forbidden transport password must be rejected");
     assert!(err.to_string().contains("cannot be represented in XML"));
 }

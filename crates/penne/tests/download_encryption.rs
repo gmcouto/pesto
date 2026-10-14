@@ -1,7 +1,9 @@
 //! Consolidated Penne encrypted-download integration tests:
 //! multipart decrypt round trip, tamper failover, zero output/no cache on
 //! authentication failure, spoof rejection, cache resume, boundary segment
-//! indices, and the real-PAR2 verify/repair assertions.
+//! indices, real-PAR2 verify/repair assertions, and the negative-case
+//! failures with true causes (wrong password, truncation, malformed
+//! `=yencryption`, true Poly1305 tag failure).
 
 mod support;
 
@@ -173,7 +175,6 @@ fn encode_article(
             spec,
             payload,
             128,
-            None,
             segment_index,
             &mut body,
         )
@@ -326,11 +327,7 @@ async fn tampered_primary_fails_over_to_backup_tier() {
         &session,
         "failover.bin",
         payload.len() as u64,
-        PartSpec {
-            number: 1,
-            total: 1,
-            offset: 0,
-        },
+        single_part(),
         payload,
         1,
     );
@@ -345,16 +342,14 @@ async fn tampered_primary_fails_over_to_backup_tier() {
     s2_known.insert("failover-msg-01".to_string(), encoded.clone());
     let s2_addr = spawn_fake_server(s2_known);
 
-    let queue = penne::queue::DownloadQueue {
-        files: vec![penne::queue::QueuedFile {
-            name: "failover.bin".to_string(),
-            segments: vec![penne::queue::QueuedSegment {
-                message_id: "failover-msg-01".to_string(),
-                part: 1,
-                bytes: payload.len() as u64,
-            }],
+    let queue = queue_with_segments(
+        "failover.bin",
+        vec![penne::queue::QueuedSegment {
+            message_id: "failover-msg-01".to_string(),
+            part: 1,
+            bytes: payload.len() as u64,
         }],
-    };
+    );
 
     let dest_dir = tempfile::tempdir().unwrap();
     let decryptor = Arc::new(DownloadDecryptionAdapter::with_password(password));
@@ -384,15 +379,33 @@ async fn tampered_primary_fails_over_to_backup_tier() {
 }
 
 fn single_segment_queue(name: &str, message_id: &str, bytes: u64) -> penne::queue::DownloadQueue {
+    queue_with_segments(
+        name,
+        vec![penne::queue::QueuedSegment {
+            message_id: message_id.to_string(),
+            part: 1,
+            bytes,
+        }],
+    )
+}
+
+fn queue_with_segments(
+    name: &str,
+    segments: Vec<penne::queue::QueuedSegment>,
+) -> penne::queue::DownloadQueue {
     penne::queue::DownloadQueue {
         files: vec![penne::queue::QueuedFile {
             name: name.to_string(),
-            segments: vec![penne::queue::QueuedSegment {
-                message_id: message_id.to_string(),
-                part: 1,
-                bytes,
-            }],
+            segments,
         }],
+    }
+}
+
+fn single_part() -> PartSpec {
+    PartSpec {
+        number: 1,
+        total: 1,
+        offset: 0,
     }
 }
 
@@ -408,11 +421,7 @@ async fn segment_bytes_mismatch_tries_every_tier_then_reports_corrupt() {
         &session,
         "mismatch.bin",
         payload.len() as u64,
-        PartSpec {
-            number: 1,
-            total: 1,
-            offset: 0,
-        },
+        single_part(),
         payload,
         1,
     );
@@ -462,11 +471,7 @@ async fn segment_bytes_zero_skips_the_length_check() {
         &session,
         "nolen.bin",
         payload.len() as u64,
-        PartSpec {
-            number: 1,
-            total: 1,
-            offset: 0,
-        },
+        single_part(),
         payload,
         1,
     );
@@ -534,23 +539,21 @@ async fn auth_failure_commits_zero_output_and_no_cache() {
     known.insert("zero-msg-02".to_string(), tampered2);
     let addr = spawn_fake_server(known);
 
-    let queue = penne::queue::DownloadQueue {
-        files: vec![penne::queue::QueuedFile {
-            name: "sensitive.bin".to_string(),
-            segments: vec![
-                penne::queue::QueuedSegment {
-                    message_id: "zero-msg-01".to_string(),
-                    part: 1,
-                    bytes: 500,
-                },
-                penne::queue::QueuedSegment {
-                    message_id: "zero-msg-02".to_string(),
-                    part: 2,
-                    bytes: 500,
-                },
-            ],
-        }],
-    };
+    let queue = queue_with_segments(
+        "sensitive.bin",
+        vec![
+            penne::queue::QueuedSegment {
+                message_id: "zero-msg-01".to_string(),
+                part: 1,
+                bytes: 500,
+            },
+            penne::queue::QueuedSegment {
+                message_id: "zero-msg-02".to_string(),
+                part: 2,
+                bytes: 500,
+            },
+        ],
+    );
 
     let dest_dir = tempfile::tempdir().unwrap();
     let decryptor = Arc::new(DownloadDecryptionAdapter::with_password(password));
@@ -608,11 +611,7 @@ async fn unencrypted_spoof_rejected_for_encrypted_download() {
     let spoofed_body = encode_part(
         "spoofed.bin",
         plain_payload.len() as u64,
-        PartSpec {
-            number: 1,
-            total: 1,
-            offset: 0,
-        },
+        single_part(),
         plain_payload,
         128,
         None,
@@ -624,16 +623,14 @@ async fn unencrypted_spoof_rejected_for_encrypted_download() {
     known.insert("spoof-msg-01".to_string(), spoofed_body);
     let addr = spawn_fake_server(known);
 
-    let queue = penne::queue::DownloadQueue {
-        files: vec![penne::queue::QueuedFile {
-            name: "spoofed.bin".to_string(),
-            segments: vec![penne::queue::QueuedSegment {
-                message_id: "spoof-msg-01".to_string(),
-                part: 1,
-                bytes: plain_payload.len() as u64,
-            }],
+    let queue = queue_with_segments(
+        "spoofed.bin",
+        vec![penne::queue::QueuedSegment {
+            message_id: "spoof-msg-01".to_string(),
+            part: 1,
+            bytes: plain_payload.len() as u64,
         }],
-    };
+    );
 
     let dest_dir = tempfile::tempdir().unwrap();
     let decryptor = Arc::new(DownloadDecryptionAdapter::with_password(password));
@@ -676,7 +673,7 @@ async fn unencrypted_spoof_rejected_for_encrypted_download() {
     );
 }
 
-/// PE-2: A bad ciphertext pcrc32 on a part=1 total=1 article (single-part
+/// A bad ciphertext pcrc32 on a part=1 total=1 article (single-part
 /// with explicit multipart framing) must fail with provider failover
 /// (CorruptSegment) and zero output — the pcrc32 check must not be skipped
 /// just because `total == 1`.
@@ -691,11 +688,7 @@ async fn single_part_with_pcrc32_mismatch_fails_over_with_zero_output() {
         &session,
         "single.bin",
         payload.len() as u64,
-        PartSpec {
-            number: 1,
-            total: 1,
-            offset: 0,
-        },
+        single_part(),
         payload,
         1,
     );
@@ -740,16 +733,14 @@ async fn single_part_with_pcrc32_mismatch_fails_over_with_zero_output() {
     known.insert("pcrc-msg-01".to_string(), tampered);
     let addr = spawn_fake_server(known);
 
-    let queue = penne::queue::DownloadQueue {
-        files: vec![penne::queue::QueuedFile {
-            name: "single.bin".to_string(),
-            segments: vec![penne::queue::QueuedSegment {
-                message_id: "pcrc-msg-01".to_string(),
-                part: 1,
-                bytes: payload.len() as u64,
-            }],
+    let queue = queue_with_segments(
+        "single.bin",
+        vec![penne::queue::QueuedSegment {
+            message_id: "pcrc-msg-01".to_string(),
+            part: 1,
+            bytes: payload.len() as u64,
         }],
-    };
+    );
 
     let dest_dir = tempfile::tempdir().unwrap();
     let decryptor = Arc::new(DownloadDecryptionAdapter::with_password(password));
@@ -1117,11 +1108,7 @@ async fn unencrypted_download_round_trips_without_decryptor() {
     let plain_body = encode_part(
         "plain.bin",
         plain_payload.len() as u64,
-        PartSpec {
-            number: 1,
-            total: 1,
-            offset: 0,
-        },
+        single_part(),
         plain_payload,
         128,
         None,
@@ -1132,16 +1119,14 @@ async fn unencrypted_download_round_trips_without_decryptor() {
     plain_known.insert("plain-msg-01".to_string(), plain_body);
     let plain_addr = spawn_fake_server(plain_known);
 
-    let plain_queue = penne::queue::DownloadQueue {
-        files: vec![penne::queue::QueuedFile {
-            name: "plain.bin".to_string(),
-            segments: vec![penne::queue::QueuedSegment {
-                message_id: "plain-msg-01".to_string(),
-                part: 1,
-                bytes: plain_payload.len() as u64,
-            }],
+    let plain_queue = queue_with_segments(
+        "plain.bin",
+        vec![penne::queue::QueuedSegment {
+            message_id: "plain-msg-01".to_string(),
+            part: 1,
+            bytes: plain_payload.len() as u64,
         }],
-    };
+    );
 
     let plain_dest = tempfile::tempdir().unwrap();
     let plain_outcome = download_queue(
@@ -1158,5 +1143,464 @@ async fn unencrypted_download_round_trips_without_decryptor() {
     assert_eq!(
         std::fs::read(plain_dest.path().join("plain.bin")).unwrap(),
         plain_payload
+    );
+}
+
+// --- Negative cases with TRUE failure causes (pesto-download-6) -----------
+//
+// The existing "auth failure" tests above flip a data byte and therefore
+// trip the wire-CRC check (`ciphertext CRC mismatch`) before AEAD ever
+// runs. The tests in this section build copies whose data lines and wire
+// CRCs remain intact, so the failure cause is the intended one:
+// - wrong password        -> CONTROL_LINE_DECRYPT_FAILURE (FF1 garbage Line 1)
+// - truncation            -> LINE_TRUNCATED / LINE_TOO_SHORT
+// - malformed =yencryption-> INVALID_TOKEN_COUNT / UNSUPPORTED_CIPHER / ...
+// - flipped tag, valid CRC-> AUTHENTICATION_FAILURE (true Poly1305 failure)
+//
+// Each case asserts the three binding behaviors: the error carries its
+// specific cause, the copy is retried on another server (failover), and no
+// plaintext or ciphertext is committed as final output (no final file, no
+// `.penne-part` temp sibling, no resume-cache entry).
+
+/// Shared assertion block for a single bad copy served by every tier: the
+/// failure must surface as `corrupt` with the given cause after all tiers
+/// have been tried, and nothing may be committed anywhere.
+async fn assert_bad_copy_fails_over_with_zero_output(
+    password: &str,
+    bad: Vec<u8>,
+    file_name: &str,
+    message_id: &str,
+    expected_error: &str,
+) {
+    // Two tiers both serve the same bad copy: the failure must be retried
+    // across servers (retriable provider corruption) before terminal corrupt.
+    let counters = [Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0))];
+    let tiers: Vec<ServerTier> = counters
+        .iter()
+        .map(|counter| {
+            let mut known = HashMap::new();
+            known.insert(message_id.to_string(), bad.clone());
+            ServerTier::solo(server_entry(spawn_fake_server_counting(
+                known,
+                Some(counter.clone()),
+            )))
+        })
+        .collect();
+
+    let queue = single_segment_queue(file_name, message_id, bad.len() as u64);
+    let dest_dir = tempfile::tempdir().unwrap();
+    let decryptor = Arc::new(DownloadDecryptionAdapter::with_password(password));
+    let outcome =
+        download_queue_with_decryptor(&queue, &tiers, dest_dir.path(), 0, None, Some(decryptor))
+            .await
+            .expect("download must finish with a corrupt segment, not a hard error");
+
+    // FAILOVER: every tier was tried (retriable provider corruption).
+    assert_eq!(
+        counters[0].load(Ordering::SeqCst),
+        1,
+        "primary tier must be tried before failing over"
+    );
+    assert_eq!(
+        counters[1].load(Ordering::SeqCst),
+        1,
+        "failure must move on to the next server"
+    );
+
+    // The true cause, not an incidental wire-CRC failure.
+    assert_eq!(
+        outcome.corrupt.len(),
+        1,
+        "bad copy must be reported corrupt"
+    );
+    assert!(
+        outcome.corrupt[0].error.contains(expected_error),
+        "error must contain {expected_error:?}, got: {}",
+        outcome.corrupt[0].error
+    );
+
+    // ZERO-OUTPUT: no final file, no temp sibling, no resume-cache entry.
+    assert!(
+        !dest_dir.path().join(file_name).exists(),
+        "final file must not exist"
+    );
+    assert!(
+        !dest_dir
+            .path()
+            .join(format!("{file_name}.penne-part"))
+            .exists(),
+        "temp file must not exist"
+    );
+    assert!(
+        penne::cache::load(dest_dir.path(), message_id).is_none(),
+        "cache must not store the failed body"
+    );
+}
+
+/// Single-part article whose data lines and wire CRC are intact but whose
+/// `=yencryption` tag was flipped: wire CRC verifies, Poly1305 fails.
+/// TRUE authentication failure (Body Std v1.2 §5, Zero-Output Guarantee).
+#[tokio::test]
+async fn flipped_tag_with_intact_wire_crc_fails_poly1305_then_fails_over() {
+    let password = "tag-flip-password";
+    let salt = [0x71u8; 16];
+    let session = Arc::new(EncryptionSession::new(password, salt).unwrap());
+    let payload = b"Payload whose authentication tag is tampered with valid CRC.";
+    let encoded = encode_article(
+        &session,
+        "tagflip.bin",
+        payload.len() as u64,
+        single_part(),
+        payload,
+        1,
+    );
+
+    // Flip one hex digit INSIDE the encrypted `=yencryption` tag, then
+    // restore the FF1 control-line ciphertext so only the tag bit changes.
+    // The tag is stored encrypted on the wire, so: decrypt control lines,
+    // locate the restored `tag=` hex on the control line, flip a hex digit,
+    // re-encrypt. Data lines are arbitrary binary bytes and untouched
+    // throughout, so the wire CRC still verifies.
+    let restored = pesto::crypto::decrypt_yenc_control_lines(&session, 1, &encoded).unwrap();
+    let lines = pesto::crypto::split_lines_preserving_endings(&restored);
+    let mut modified = Vec::new();
+    for line in lines {
+        if line.content.starts_with(b"=yencryption") {
+            let text = std::str::from_utf8(line.content).unwrap();
+            let idx = text.find("tag=").expect("restored article carries tag=");
+            let mut tampered_line = text.to_string();
+            let digit_pos = idx + 4; // first hex char of the 32-hex-digit tag
+            let replacement = if &tampered_line[digit_pos..digit_pos + 1] == "f" {
+                "0"
+            } else {
+                "f"
+            };
+            tampered_line.replace_range(digit_pos..digit_pos + 1, replacement);
+            modified.extend_from_slice(tampered_line.as_bytes());
+            modified.extend_from_slice(line.ending);
+        } else {
+            modified.extend_from_slice(line.content);
+            modified.extend_from_slice(line.ending);
+        }
+    }
+    let tampered = pesto::crypto::encrypt_yenc_control_lines(&session, 1, &modified).unwrap();
+
+    // The data line is byte-identical between the two copies.
+    let data_line = |a: &[u8]| a.split(|&b| b == b'\n').nth(2).unwrap().to_vec();
+    assert_eq!(
+        data_line(&encoded),
+        data_line(&tampered),
+        "tag flip must leave data lines intact"
+    );
+
+    assert_bad_copy_fails_over_with_zero_output(
+        password,
+        tampered,
+        "tagflip.bin",
+        "tagflip-msg-01",
+        "AUTHENTICATION_FAILURE",
+    )
+    .await;
+}
+
+/// Wrong password on a fully valid article: the FF1 control-line decrypt
+/// yields pseudorandom garbage that cannot be `=ybegin` (Control Std v1.2
+/// §5 wrong-password signature), so the failure is CONTROL_LINE_DECRYPT_
+/// FAILURE — not a wire-CRC failure and not Poly1305.
+#[tokio::test]
+async fn wrong_password_on_valid_article_fails_control_decrypt_then_fails_over() {
+    let password = "right-password-for-control-lines";
+    let salt = [0x72u8; 16];
+    let session = Arc::new(EncryptionSession::new(password, salt).unwrap());
+    let payload = b"Valid article downloaded under the wrong password.";
+    let encoded = encode_article(
+        &session,
+        "wrongpw.bin",
+        payload.len() as u64,
+        single_part(),
+        payload,
+        1,
+    );
+
+    assert_bad_copy_fails_over_with_zero_output(
+        "totally-wrong-password",
+        encoded,
+        "wrongpw.bin",
+        "wrongpw-msg-01",
+        "CONTROL_LINE_DECRYPT_FAILURE",
+    )
+    .await;
+}
+
+/// A truncated encrypted body (article cut after Line 1, missing subsequent
+/// header lines and footer) must fail structurally and be retried on the
+/// next server, committing nothing.
+#[tokio::test]
+async fn truncated_encrypted_body_is_reported_corrupt_with_failover() {
+    let password = "truncation-password";
+    let salt = [0x73u8; 16];
+    let session = Arc::new(EncryptionSession::new(password, salt).unwrap());
+    let payload = b"Payload that the provider truncated in transit, deliberately.";
+    let encoded = encode_article(
+        &session,
+        "truncated.bin",
+        payload.len() as u64,
+        single_part(),
+        payload,
+        1,
+    );
+    // Cut after Line 1 while keeping its CRLF line ending intact so NNTP
+    // wire framing succeeds: the article is truncated to 1 line (< 3 lines
+    // required for single-part encrypted articles).
+    let lines = pesto::crypto::split_lines_preserving_endings(&encoded);
+    assert!(lines.len() >= 3, "valid article must have at least 3 lines");
+    let truncated = [lines[0].content, lines[0].ending].concat();
+
+    assert_bad_copy_fails_over_with_zero_output(
+        password,
+        truncated,
+        "truncated.bin",
+        "truncated-msg-01",
+        "LINE_TRUNCATED",
+    )
+    .await;
+}
+
+/// A malformed `=yencryption` line (missing fields / bad grammar, built by
+/// rewriting the restored line and re-encrypting control lines) must be
+/// rejected with its grammar error and retried on the next server.
+#[tokio::test]
+async fn malformed_yencryption_line_is_rejected_with_failover() {
+    let password = "malformed-yencryption-password";
+    let salt = [0x74u8; 16];
+    let session = Arc::new(EncryptionSession::new(password, salt).unwrap());
+    let payload = b"Payload carried by an article with a malformed =yencryption line.";
+    let encoded = encode_article(
+        &session,
+        "malformed.bin",
+        payload.len() as u64,
+        single_part(),
+        payload,
+        1,
+    );
+
+    // Rebuild the restored article with a `=yencryption` line missing the
+    // `tag=` field (bad grammar), then re-encrypt the control lines. Data
+    // lines stay intact, so this is not a wire-CRC failure.
+    let restored = pesto::crypto::decrypt_yenc_control_lines(&session, 1, &encoded).unwrap();
+    let lines = pesto::crypto::split_lines_preserving_endings(&restored);
+    let mut modified = Vec::new();
+    for line in lines {
+        if line.content.starts_with(b"=yencryption") {
+            let text = std::str::from_utf8(line.content).unwrap();
+            let salt_str = text
+                .split(" salt=")
+                .nth(1)
+                .unwrap()
+                .split(" index=")
+                .next()
+                .unwrap();
+            let malformed_line =
+                format!("=yencryption cipher=XChaCha20-Poly1305 salt={salt_str} index=00000001");
+            modified.extend_from_slice(malformed_line.as_bytes());
+            modified.extend_from_slice(line.ending);
+        } else {
+            modified.extend_from_slice(line.content);
+            modified.extend_from_slice(line.ending);
+        }
+    }
+    let malformed = pesto::crypto::encrypt_yenc_control_lines(&session, 1, &modified).unwrap();
+
+    assert_bad_copy_fails_over_with_zero_output(
+        password,
+        malformed,
+        "malformed.bin",
+        "malformed-msg-01",
+        "INVALID_TOKEN_COUNT",
+    )
+    .await;
+}
+
+/// Body Std v1.2 §5 step 5 / Q-8 / X-2: the wire pcrc32 value is a hexadecimal
+/// string of any width that parses as a CRC-32 value; it need not be
+/// zero-padded to eight digits, and non-eight-digit widths (e.g. 10 digits
+/// with leading zeros, or fewer than 8 digits) must be accepted.
+#[tokio::test]
+async fn multipart_pcrc32_accepts_non_eight_hex_width() {
+    let password = "pcrc32-width-password";
+    let salt = [0x55u8; 16];
+    let session = Arc::new(EncryptionSession::new(password, salt).unwrap());
+    let payload_p1 = b"First part of payload with non-8-digit hex pcrc32.";
+    let payload_p2 = b"Second part of payload with non-8-digit hex pcrc32.";
+    let mut original = Vec::new();
+    original.extend_from_slice(payload_p1);
+    original.extend_from_slice(payload_p2);
+    let total_len = original.len() as u64;
+
+    let art1 = encode_article(
+        &session,
+        "width.bin",
+        total_len,
+        PartSpec {
+            number: 1,
+            total: 2,
+            offset: 0,
+        },
+        payload_p1,
+        1,
+    );
+    let art2 = encode_article(
+        &session,
+        "width.bin",
+        total_len,
+        PartSpec {
+            number: 2,
+            total: 2,
+            offset: payload_p1.len() as u64,
+        },
+        payload_p2,
+        2,
+    );
+
+    // Re-format art1's footer pcrc32 to have 10 hex digits (leading zeroes "00"),
+    // which has width 10 != 8 but parses to the exact same u32 CRC.
+    let restored1 = pesto::crypto::decrypt_yenc_control_lines(&session, 1, &art1).unwrap();
+    let lines1 = pesto::crypto::split_lines_preserving_endings(&restored1);
+    let mut modified1 = Vec::new();
+    for line in lines1 {
+        if line.content.starts_with(b"=yend") {
+            let text = std::str::from_utf8(line.content).unwrap();
+            let idx = text.find("pcrc32=").expect("footer carries pcrc32=");
+            let crc_hex = &text[idx + 7..idx + 15];
+            let new_footer = format!("{}00{}{}", &text[..idx + 7], crc_hex, &text[idx + 15..]);
+            modified1.extend_from_slice(new_footer.as_bytes());
+            modified1.extend_from_slice(line.ending);
+        } else {
+            modified1.extend_from_slice(line.content);
+            modified1.extend_from_slice(line.ending);
+        }
+    }
+    let art1_custom = pesto::crypto::encrypt_yenc_control_lines(&session, 1, &modified1).unwrap();
+
+    let mut known = HashMap::new();
+    known.insert("width-msg-01".to_string(), art1_custom);
+    known.insert("width-msg-02".to_string(), art2);
+    let addr = spawn_fake_server(known);
+
+    let queue = queue_with_segments(
+        "width.bin",
+        vec![
+            penne::queue::QueuedSegment {
+                message_id: "width-msg-01".to_string(),
+                part: 1,
+                bytes: payload_p1.len() as u64,
+            },
+            penne::queue::QueuedSegment {
+                message_id: "width-msg-02".to_string(),
+                part: 2,
+                bytes: payload_p2.len() as u64,
+            },
+        ],
+    );
+
+    let dest_dir = tempfile::tempdir().unwrap();
+    let decryptor = Arc::new(DownloadDecryptionAdapter::with_password(password));
+    let tiers = vec![ServerTier::solo(server_entry(addr))];
+
+    let outcome =
+        download_queue_with_decryptor(&queue, &tiers, dest_dir.path(), 0, None, Some(decryptor))
+            .await
+            .expect("download must succeed when pcrc32 width != 8 is valid hex");
+
+    assert!(outcome.corrupt.is_empty(), "corrupt: {:?}", outcome.corrupt);
+    assert!(outcome.missing.is_empty(), "missing: {:?}", outcome.missing);
+    assert_eq!(
+        std::fs::read(dest_dir.path().join("width.bin")).unwrap(),
+        original
+    );
+}
+
+/// PROOF TEST for pesto-upload-7: an NZB merging files from distinct upload
+/// sessions (different salts), sharing one password, decrypts end-to-end.
+/// Articles are self-describing (Line 1 carries salt and segmentIndex), and
+/// Penne caches sessions per salt, so merged releases decrypt without issue.
+#[tokio::test]
+async fn merged_encrypted_release_with_multiple_salts_decrypts() {
+    let password = "season-merge-shared-password";
+    let salt1 = [0x11u8; 16];
+    let salt2 = [0x22u8; 16];
+    let session1 = Arc::new(EncryptionSession::new(password, salt1).unwrap());
+    let session2 = Arc::new(EncryptionSession::new(password, salt2).unwrap());
+
+    let payload1 = b"Episode 01 payload from session 1";
+    let payload2 = b"Episode 02 payload from session 2";
+
+    let art1 = encode_article(
+        &session1,
+        "Show.S01E01.mkv",
+        payload1.len() as u64,
+        single_part(),
+        payload1,
+        1,
+    );
+    let art2 = encode_article(
+        &session2,
+        "Show.S01E02.mkv",
+        payload2.len() as u64,
+        single_part(),
+        payload2,
+        1,
+    );
+
+    let mut known = HashMap::new();
+    known.insert("ep1-msg-01".to_string(), art1);
+    known.insert("ep2-msg-01".to_string(), art2);
+    let addr = spawn_fake_server(known);
+
+    let segments_ep1 = format!(
+        "<segment bytes=\"{}\" number=\"1\">ep1-msg-01</segment>",
+        payload1.len()
+    );
+    let segments_ep2 = format!(
+        "<segment bytes=\"{}\" number=\"1\">ep2-msg-01</segment>",
+        payload2.len()
+    );
+
+    let xml = format!(
+        r#"<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE nzb PUBLIC "-//newzBin//DTD NZB 1.1//EN" "http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd">
+<nzb xmlns="http://www.newzbin.com/DTD/2003/nzb">
+  <head>
+    <meta type="password">{password}</meta>
+    <meta type="yenc_encrypted">true</meta>
+  </head>
+  <file poster="poster@test" date="1700000000" subject="&quot;Show.S01E01.mkv&quot; yEnc (1/1)">
+    <groups><group>alt.binaries.test</group></groups>
+    <segments>
+      {segments_ep1}
+    </segments>
+  </file>
+  <file poster="poster@test" date="1700000000" subject="&quot;Show.S01E02.mkv&quot; yEnc (1/1)">
+    <groups><group>alt.binaries.test</group></groups>
+    <segments>
+      {segments_ep2}
+    </segments>
+  </file>
+</nzb>"#
+    );
+
+    let dest = tempfile::tempdir().unwrap();
+    let outcome =
+        run_download_nzb(&xml, &[ServerTier::solo(server_entry(addr))], dest.path()).await;
+
+    assert!(outcome.missing.is_empty(), "missing: {:?}", outcome.missing);
+    assert!(outcome.corrupt.is_empty(), "corrupt: {:?}", outcome.corrupt);
+    assert_eq!(
+        std::fs::read(dest.path().join("Show.S01E01.mkv")).unwrap(),
+        payload1
+    );
+    assert_eq!(
+        std::fs::read(dest.path().join("Show.S01E02.mkv")).unwrap(),
+        payload2
     );
 }

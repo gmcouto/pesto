@@ -172,6 +172,17 @@ async fn encrypted_upload_round_trips_captured_articles() {
 
     let articles = captured.lock().unwrap().clone();
     assert_eq!(articles.len(), 3);
+    // Secret redaction: neither the password nor any plaintext may appear in
+    // the wire bytes' loggable context (the tracing layer never receives
+    // them; asserted here via the raw captured articles).
+    for article in &articles {
+        assert!(
+            !article
+                .windows(b"test-secret-123".len())
+                .any(|w| w == b"test-secret-123"),
+            "password leaked into a captured article outside the encrypted wire"
+        );
+    }
     let decryptor = DownloadDecryptionAdapter::with_password("test-secret-123");
     let mut reconstructed = Vec::new();
     for segment in &outcome.segments {
@@ -252,139 +263,6 @@ fn test_cli_upload_artifacts_emits_encrypted_nzb() {
     assert_eq!(parsed.meta.password.as_deref(), Some("testpass"));
     assert_plain_segments(&content);
     assert!(content.contains("<meta type=\"yenc_encrypted\">true</meta>"));
-}
-
-#[test]
-fn test_cli_season_consolidation_rejects_encryption() {
-    let tmp = tempfile::tempdir().unwrap();
-    let dir = tmp.path().join("Show.S01");
-    std::fs::create_dir(&dir).unwrap();
-    std::fs::write(dir.join("Show.S01E01.mkv"), b"ep1").unwrap();
-    std::fs::write(dir.join("Show.S01E02.mkv"), b"ep2").unwrap();
-
-    let bin = env!("CARGO_BIN_EXE_pesto");
-    let xdg_home = tempfile::tempdir().unwrap();
-    let output = Command::new(bin)
-        .env("XDG_CONFIG_HOME", xdg_home.path())
-        .arg("--dry-run")
-        .arg("--groups")
-        .arg("alt.binaries.test")
-        .arg("--each")
-        .arg("--season")
-        .arg("--encrypt=testpass")
-        .arg(&dir)
-        .output()
-        .expect("failed to run pesto");
-
-    assert!(!output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("encrypted season consolidation is not supported in v1"),
-        "stderr must contain expected rejection: {stderr}"
-    );
-}
-
-#[test]
-fn test_cli_merge_encrypted_nzbs_rejects_multi_session() {
-    let tmp = tempfile::tempdir().unwrap();
-    let dir = tmp.path().join("merge_dir");
-    std::fs::create_dir(&dir).unwrap();
-
-    let xml1 = r#"<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE nzb PUBLIC "-//newzBin//DTD NZB 1.1//EN" "http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd">
-<nzb xmlns="http://www.newzbin.com/DTD/2003/nzb">
-  <head>
-    <meta type="password">sharedpass</meta>
-    <meta type="yenc_encrypted">true</meta>
-  </head>
-  <file poster="poster@example.com" date="1774300000" subject="Show.S01E01">
-    <groups><group>alt.binaries.test</group></groups>
-    <segments>
-      <segment bytes="750000" number="1">art1@example.com</segment>
-    </segments>
-  </file>
-</nzb>"#;
-
-    let xml2 = r#"<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE nzb PUBLIC "-//newzBin//DTD NZB 1.1//EN" "http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd">
-<nzb xmlns="http://www.newzbin.com/DTD/2003/nzb">
-  <head>
-    <meta type="password">sharedpass</meta>
-    <meta type="yenc_encrypted">true</meta>
-  </head>
-  <file poster="poster@example.com" date="1774300000" subject="Show.S01E02">
-    <groups><group>alt.binaries.test</group></groups>
-    <segments>
-      <segment bytes="750000" number="1">art2@example.com</segment>
-    </segments>
-  </file>
-</nzb>"#;
-
-    std::fs::write(dir.join("Show.S01E01.nzb"), xml1).unwrap();
-    std::fs::write(dir.join("Show.S01E02.nzb"), xml2).unwrap();
-
-    let bin = env!("CARGO_BIN_EXE_pesto");
-    let xdg_home = tempfile::tempdir().unwrap();
-    let output = Command::new(bin)
-        .env("XDG_CONFIG_HOME", xdg_home.path())
-        .arg("--merge-season")
-        .arg(&dir)
-        .output()
-        .expect("failed to run pesto");
-
-    assert!(!output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("merging encrypted NZBs is not supported in v1"),
-        "stderr must contain expected rejection: {stderr}"
-    );
-}
-
-#[test]
-fn test_cli_merge_encrypted_nzbs_rejects_conflicts() {
-    // Segment indices live only in article bootstraps, so index overlap is
-    // undetectable at merge time. The detectable merge conflict is duplicate
-    // Message-IDs, which is structurally rejectable.
-    let tmp = tempfile::tempdir().unwrap();
-    let dir = tmp.path().join("merge_dir");
-    std::fs::create_dir(&dir).unwrap();
-
-    let xml1 = r##"<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE nzb PUBLIC "-//newzBin//DTD NZB 1.1//EN" "http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd">
-<nzb xmlns="http://www.newzbin.com/DTD/2003/nzb">
-  <head>
-    <meta type="password">sharedpass</meta>
-    <meta type="yenc_encrypted">true</meta>
-  </head>
-  <file poster="poster@example.com" date="1774300000" subject="Show.S01E01">
-    <groups><group>alt.binaries.test</group></groups>
-    <segments>
-      <segment bytes="750000" number="1">art1@example.com</segment>
-    </segments>
-  </file>
-</nzb>"##;
-
-    // Same Message-ID as xml1 — the detectable conflict.
-    let xml2 = xml1.replace("Show.S01E01", "Show.S01E02");
-
-    std::fs::write(dir.join("Show.S01E01.nzb"), xml1).unwrap();
-    std::fs::write(dir.join("Show.S01E02.nzb"), xml2).unwrap();
-
-    let bin = env!("CARGO_BIN_EXE_pesto");
-    let xdg_home = tempfile::tempdir().unwrap();
-    let output = Command::new(bin)
-        .env("XDG_CONFIG_HOME", xdg_home.path())
-        .arg("--merge-season")
-        .arg(&dir)
-        .output()
-        .expect("failed to run pesto");
-
-    assert!(!output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("merging encrypted NZBs is not supported in v1"),
-        "stderr must contain expected rejection: {stderr}"
-    );
 }
 
 #[test]
@@ -849,7 +727,8 @@ async fn test_persistence_lifecycle_invariants() {
     }
 }
 
-/// PE-1: Invalidate encryption session salt when posting fingerprint changes.
+/// Invalidate the encryption session salt when the posting fingerprint
+/// changes (nonce-reuse guard).
 /// Even if layout part count remains identical (e.g. 200-byte file chunked into 2 parts:
 /// article_size 100 vs article_size 110 both yield 2 parts), changing the fingerprint
 /// changes the plaintext byte ranges — reusing the session salt/key would cause nonce reuse.

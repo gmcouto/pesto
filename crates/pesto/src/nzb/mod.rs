@@ -17,8 +17,6 @@ use model::*;
 use reader::*;
 
 #[cfg(test)]
-mod explicit_tests;
-#[cfg(test)]
 mod tests;
 
 pub use model::{

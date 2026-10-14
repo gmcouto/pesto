@@ -13,7 +13,7 @@ use crate::app::{self, App};
 use crate::events::{AppEvent, ProgressUpdate};
 
 use super::progress::{extract_progress_update, format_progress_event, write_session_summary};
-use super::season::{check_season_encryption_preflight, season_pack_skip_message};
+use super::season::season_pack_skip_message;
 
 /// Called when the user presses 'u' on the Dashboard.
 /// Delegates the full upload pipeline to `pesto::upload::run_upload`, which
@@ -52,30 +52,6 @@ pub(crate) fn handle_upload_trigger(app: &mut App, tx: mpsc::UnboundedSender<App
         .map(|d| app::expand_tilde(d).join("uploaded"));
     if let Some(ref d) = nzb_out_dir {
         let _ = std::fs::create_dir_all(d);
-    }
-
-    // Preflight check: reject encrypted season consolidation immediately before
-    // spawning any upload task or consuming NNTP connections.
-    if let Err(err_msg) =
-        check_season_encryption_preflight(folder_mode, config.encrypt_password.is_some())
-    {
-        let _ = tx.send(AppEvent::UploadError(err_msg.to_string()));
-        for path in &entry_paths {
-            let key = path.to_string_lossy().into_owned();
-            let _ = tx.send(AppEvent::ItemUploadDone {
-                path: key,
-                success: false,
-                size_bytes: 0,
-                nzb_path: None,
-                duration_s: 0.0,
-                record_catalog: false,
-            });
-        }
-        let _ = tx.send(AppEvent::UploadFinished {
-            success: false,
-            cancelled: false,
-        });
-        return;
     }
 
     // Each queue item is uploaded in sequence. A directory becomes one release

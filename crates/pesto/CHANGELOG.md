@@ -14,7 +14,7 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
 
 ### Added
 
-- **Opt-in yEnc body and control-line encryption (`--encrypt`, `--encrypt-password`).**
+- **Opt-in yEnc body and control-line encryption (`--encrypt`, alias `--encrypt-password`).**
   Per-segment AEAD encryption using XChaCha20-Poly1305 before yEnc encoding, and NIST SP 800-38G FF1 Radix 253 format-preserving encryption of yEnc control lines (`=ybegin`, `=ypart`, `=yend`, `=yencryption`) per the experimental yEnc Encryption Standards v1.2.
 - **NZB encryption metadata.**
   Encrypted uploads emit `<meta type="yenc_encrypted">true</meta>`, `<meta type="yenc_version">1.2</meta>`, and `<meta type="yenc_cipher">XChaCha20-Poly1305</meta>` in the NZB `<head>`; segment elements stay plain NZB 1.1. `NzbMeta` gains `yenc_encrypted`, `yenc_version`, and `yenc_cipher` fields, and `Config`/`FileConfig` gain the `[encryption]` section.

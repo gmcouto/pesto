@@ -481,7 +481,7 @@ pub(super) async fn producer(
                             let identity = if shared.encryption_adapter.is_some() {
                                 shared
                                     .release_layout
-                                    .segment_identity(meta.release_ordinal, i)
+                                    .segment_identity(meta.file_index, i)
                                     .context("valid segment identity for planned data file")?
                             } else {
                                 0
@@ -682,12 +682,12 @@ pub(super) async fn producer(
                         // the recovery set.
                         let wire_override =
                             shared.release_prefix.as_deref().map(layout::index_name);
-                        let release_ordinal = metas.len() as u32 + 1;
+                        let file_index = metas.len() as u32 + 1;
                         push_par2_file(
                             &index_path,
                             index_name,
                             wire_override,
-                            release_ordinal,
+                            file_index,
                             &shared,
                             tx,
                         )
@@ -745,20 +745,11 @@ pub(super) async fn producer(
                             .release_prefix
                             .as_deref()
                             .map(|prefix| layout::volume_name(prefix, *vol));
-                        let release_ordinal = super::par2_volume_ordinal(
-                            metas.len(),
-                            shared.config.obfuscate.policy().publish_par2_index,
-                            vol_idx,
-                        );
-                        push_par2_file(
-                            &vol_path,
-                            vol_name,
-                            wire_override,
-                            release_ordinal,
-                            &shared,
-                            tx,
-                        )
-                        .await?;
+                        let index_offset =
+                            u32::from(shared.config.obfuscate.policy().publish_par2_index);
+                        let file_index = metas.len() as u32 + 1 + index_offset + vol_idx as u32;
+                        push_par2_file(&vol_path, vol_name, wire_override, file_index, &shared, tx)
+                            .await?;
                     }
                 }
             }

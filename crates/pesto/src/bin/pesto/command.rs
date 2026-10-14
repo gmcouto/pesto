@@ -405,14 +405,14 @@ fn prepare_encrypt_password(
     stdout: &mut impl std::io::Write,
     stderr: &mut impl std::io::Write,
 ) -> Result<()> {
-    if cli.encrypt_password.is_none() && cli.encrypt.as_deref() == Some("") {
+    if cli.encrypt.as_deref() == Some("") {
         let pass = pesto::compress::random_password();
         if cli.output_format.trim().eq_ignore_ascii_case("json") {
             writeln!(stderr, "encryption password: {pass}")?;
         } else {
             writeln!(stdout, "encryption password: {pass}")?;
         }
-        cli.encrypt_password = Some(pass);
+        cli.encrypt = Some(pass);
     }
     Ok(())
 }
@@ -424,27 +424,30 @@ mod tests {
     #[test]
     fn bare_encrypt_prints_generated_password_once() {
         for format in ["text", "json"] {
-            let mut cli =
-                Cli::try_parse_from(["pesto", "--encrypt", "--output-format", format, "file.bin"])
-                    .unwrap();
-            let mut stdout = Vec::new();
-            let mut stderr = Vec::new();
-            prepare_encrypt_password(&mut cli, &mut stdout, &mut stderr).unwrap();
-            let password = cli.overrides().encrypt_password.unwrap();
-            assert!(!password.is_empty());
-            prepare_encrypt_password(&mut cli, &mut stdout, &mut stderr).unwrap();
-            assert_eq!(
-                cli.overrides().encrypt_password.as_deref(),
-                Some(password.as_str())
-            );
-            let expected = format!("encryption password: {password}\n");
-            let (output, unused) = if format == "json" {
-                (&stderr, &stdout)
-            } else {
-                (&stdout, &stderr)
-            };
-            assert_eq!(output, expected.as_bytes());
-            assert!(unused.is_empty());
+            // Cover the alias name too: both spellings reach the same flag.
+            for flag in ["--encrypt", "--encrypt-password="] {
+                let mut cli =
+                    Cli::try_parse_from(["pesto", flag, "--output-format", format, "file.bin"])
+                        .unwrap();
+                let mut stdout = Vec::new();
+                let mut stderr = Vec::new();
+                prepare_encrypt_password(&mut cli, &mut stdout, &mut stderr).unwrap();
+                let password = cli.overrides().encrypt_password.unwrap();
+                assert!(!password.is_empty());
+                prepare_encrypt_password(&mut cli, &mut stdout, &mut stderr).unwrap();
+                assert_eq!(
+                    cli.overrides().encrypt_password.as_deref(),
+                    Some(password.as_str())
+                );
+                let expected = format!("encryption password: {password}\n");
+                let (output, unused) = if format == "json" {
+                    (&stderr, &stdout)
+                } else {
+                    (&stdout, &stderr)
+                };
+                assert_eq!(output, expected.as_bytes());
+                assert!(unused.is_empty());
+            }
         }
     }
 }

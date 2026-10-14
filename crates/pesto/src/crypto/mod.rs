@@ -12,8 +12,7 @@
 //! **Operational constraint (v1.2):** per-segment identity (salt +
 //! globally unique `segmentIndex`) is carried exclusively in the 20-byte
 //! bootstrap prefix of encrypted control Line 1 and the `=yencryption`
-//! line — never in NZB XML attributes. Merging NZBs from multiple upload
-//! sessions under one password is not supported for encrypted uploads.
+//! line — never in NZB XML attributes.
 
 pub(crate) mod adapter;
 pub(crate) mod body;
@@ -26,7 +25,7 @@ mod tests;
 pub use adapter::{DownloadDecryptionAdapter, UploadEncryptionAdapter};
 pub use control::{
     decrypt_yenc_control_lines, encrypt_yenc_control_lines, extract_bootstrap_from_line1,
-    generate_alphabet_salt,
+    generate_alphabet_salt, split_lines_preserving_endings, LineSlice,
 };
 pub use kdf::EncryptionSession;
 

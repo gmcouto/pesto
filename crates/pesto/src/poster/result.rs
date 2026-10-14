@@ -102,7 +102,7 @@ pub(super) fn commit_result(
             date,
             full_crc32: task.file_crc32.unwrap_or(0),
             server_idx,
-            file_index: task.meta.file_index(shared.total_files),
+            file_index: task.meta.file_index,
             total_files: shared.total_files,
             segment_index: task.segment_index,
         };
@@ -206,7 +206,7 @@ pub(super) fn record_failure(
         from: task.from.clone(),
         date: task.date.clone(),
         full_crc32: task.file_crc32.unwrap_or(0),
-        file_index: meta.file_index(shared.total_files),
+        file_index: meta.file_index,
         total_files: shared.total_files,
         segment_index: task.segment_index,
     });
@@ -300,7 +300,6 @@ pub async fn repost_failed_tasks(
                         spec,
                         &buf,
                         config.line_length,
-                        file_crc32,
                         task.segment_index,
                         &mut encode_buf,
                     )

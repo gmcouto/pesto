@@ -127,34 +127,10 @@ pub fn parse(content: &str) -> Result<ParsedNzb> {
             });
         } else if t.starts_with("<meta ") {
             let kind = xml_attr(t, "type").unwrap_or_default();
-            if t.ends_with("/>") {
-                match kind.as_str() {
-                    "title" => meta.name = Some(String::new()),
-                    "password" => meta.password = Some(String::new()),
-                    "category" => meta.category = Some(String::new()),
-                    "tag" => meta.tags.push(String::new()),
-                    "yenc_version" => explicit_yenc_versions.push(String::new()),
-                    "yenc_cipher" => explicit_yenc_ciphers.push(String::new()),
-                    _ => {}
-                }
-            } else if let Some(value) = xml_text(t, "meta") {
-                match kind.as_str() {
-                    "title" => meta.name = Some(value),
-                    "password" => meta.password = Some(value),
-                    "category" => meta.category = Some(value),
-                    "tag" => meta.tags.push(value),
-                    "yenc_encrypted" if value.trim().eq_ignore_ascii_case("true") => {
-                        explicit_yenc_encrypted = true;
-                    }
-                    "yenc_version" => {
-                        explicit_yenc_versions.push(value.trim().to_string());
-                    }
-                    "yenc_cipher" => {
-                        explicit_yenc_ciphers.push(value.trim().to_string());
-                    }
-                    _ => {}
-                }
-            } else if kind == "password" {
+            // Multi-line `<meta type="password">` values (a transport
+            // password containing LF) span several lines; ordinary metas are
+            // always single-line. Handle it before the single-line match.
+            if kind == "password" && xml_text(t, "meta").is_none() && !t.ends_with("/>") {
                 if let Some(open_tag_end) = line.find('>') {
                     let mut full_val = String::from(&line[open_tag_end + 1..]);
                     full_val.push_str(ending);
@@ -176,10 +152,23 @@ pub fn parse(content: &str) -> Result<ParsedNzb> {
                     }
                 }
             } else {
+                let value = xml_text(t, "meta").unwrap_or_default();
                 match kind.as_str() {
-                    "title" => meta.name = Some(String::new()),
-                    "category" => meta.category = Some(String::new()),
-                    "tag" => meta.tags.push(String::new()),
+                    "title" => meta.name = Some(value),
+                    "password" => meta.password = Some(value),
+                    "category" => meta.category = Some(value),
+                    "tag" => meta.tags.push(value),
+                    // A self-closing or empty version/cipher value stays `""`
+                    // (via `unwrap_or_default` + trim) and fails closed below.
+                    "yenc_encrypted" if value.trim().eq_ignore_ascii_case("true") => {
+                        explicit_yenc_encrypted = true;
+                    }
+                    "yenc_version" => {
+                        explicit_yenc_versions.push(value.trim().to_string());
+                    }
+                    "yenc_cipher" => {
+                        explicit_yenc_ciphers.push(value.trim().to_string());
+                    }
                     _ => {}
                 }
             }

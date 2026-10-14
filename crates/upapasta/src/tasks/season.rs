@@ -28,36 +28,9 @@ pub(crate) fn season_pack_skip_message(
     }
 }
 
-/// Returns an error when encrypted season consolidation is requested: not
-/// supported in v1 (no code path merges already-uploaded encrypted articles
-/// from separate sessions into one NZB).
-pub(crate) fn check_season_encryption_preflight(
-    folder_mode: crate::app::FolderMode,
-    is_encrypted: bool,
-) -> Result<(), &'static str> {
-    if folder_mode == crate::app::FolderMode::Season && is_encrypted {
-        Err("encrypted season consolidation is not supported in v1; use per-file mode instead")
-    } else {
-        Ok(())
-    }
-}
-
 #[cfg(test)]
 mod season_nzb_gate_tests {
-    use super::{
-        check_season_encryption_preflight, season_pack_skip_message, should_write_season_pack,
-    };
-    use crate::app::FolderMode;
-
-    #[test]
-    fn test_check_season_encryption_preflight() {
-        assert!(check_season_encryption_preflight(FolderMode::Single, false).is_ok());
-        assert!(check_season_encryption_preflight(FolderMode::Single, true).is_ok());
-        assert!(check_season_encryption_preflight(FolderMode::PerFile, false).is_ok());
-        assert!(check_season_encryption_preflight(FolderMode::PerFile, true).is_ok());
-        assert!(check_season_encryption_preflight(FolderMode::Season, false).is_ok());
-        assert!(check_season_encryption_preflight(FolderMode::Season, true).is_err());
-    }
+    use super::{season_pack_skip_message, should_write_season_pack};
 
     /// T16b: production `should_write_season_pack` is what the Season
     /// `fs::write` calls. `folder_ok == false` (had_failures, including

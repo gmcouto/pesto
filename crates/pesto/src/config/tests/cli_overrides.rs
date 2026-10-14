@@ -231,19 +231,6 @@ fn cli_rejects_empty_encrypt_password() {
 }
 
 #[test]
-fn cli_rejects_conflicting_encrypt_and_nzb_password() {
-    let result = Config::resolve(
-        minimal_file(),
-        Overrides {
-            encrypt_password: Some("secret1".into()),
-            nzb_password: Some("secret2".into()),
-            ..Default::default()
-        },
-    );
-    assert!(result.is_err());
-}
-
-#[test]
 fn cli_accepts_independent_archive_and_encrypt_passwords() {
     let cfg = Config::resolve(
         minimal_file(),
@@ -292,15 +279,17 @@ fn cli_accepts_archive_password_without_encryption() {
 
 #[test]
 fn cli_accepts_matching_encrypt_and_nzb_password() {
+    // Both passwords set: no conflict rule — the transport password wins at
+    // the use site (`encrypt_password.or(nzb_password)`), as in the other apps.
     let cfg = Config::resolve(
         minimal_file(),
         Overrides {
             encrypt_password: Some("secret".into()),
-            nzb_password: Some("secret".into()),
+            nzb_password: Some("other-secret".into()),
             ..Default::default()
         },
     )
     .unwrap();
     assert_eq!(cfg.encrypt_password.as_deref(), Some("secret"));
-    assert_eq!(cfg.nzb_password.as_deref(), Some("secret"));
+    assert_eq!(cfg.nzb_password.as_deref(), Some("other-secret"));
 }

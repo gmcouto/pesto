@@ -105,7 +105,6 @@ fn encrypted_control_lines_round_trip_with_lf_endings() {
             },
             payload,
             128,
-            None,
             1u32,
             &mut body,
         )
@@ -170,7 +169,6 @@ fn zero_length_encrypted_body_round_trips() {
             },
             b"",
             128,
-            None,
             1u32,
             &mut body,
         )
@@ -187,79 +185,67 @@ fn zero_length_encrypted_body_round_trips() {
 }
 
 #[test]
-fn test_single_part_filename_containing_part_equals() {
-    let password = "test-part-equals-password";
-    let salt = control::generate_alphabet_salt();
-    let session = Arc::new(EncryptionSession::new(password, salt).unwrap());
-    let upload_adapter = UploadEncryptionAdapter::new(session);
+fn filenames_containing_control_keywords_round_trip() {
+    // Filenames embedding yEnc control keywords (`part=`, `=ypart`) must
+    // survive the full encode/decode round trip in both framings.
+    struct KeywordCase<'a> {
+        name: &'a str,
+        payload_len: u64,
+        number: u32,
+        total: u32,
+        offset: u64,
+    }
+    let cases = [
+        KeywordCase {
+            name: "ep_part=pilot.mkv",
+            payload_len: 41,
+            number: 1,
+            total: 1,
+            offset: 0,
+        },
+        KeywordCase {
+            name: "movie=ypart1.mkv",
+            payload_len: 1024,
+            number: 1,
+            total: 2,
+            offset: 0,
+        },
+    ];
+    for case in cases {
+        let KeywordCase {
+            name,
+            payload_len,
+            number,
+            total,
+            offset,
+        } = case;
+        let password = format!("keyword-{name}-password");
+        let salt = control::generate_alphabet_salt();
+        let session = Arc::new(EncryptionSession::new(&password, salt).unwrap());
+        let upload_adapter = UploadEncryptionAdapter::new(session);
 
-    let payload = b"Content for file named ep_part=pilot.mkv";
-    let spec = PartSpec {
-        number: 1,
-        total: 1,
-        offset: 0,
-    };
-    let _segment_index = 1u32;
-    let mut body = Vec::new();
-    let encoded = upload_adapter
-        .encode_article(
-            "ep_part=pilot.mkv",
-            payload.len() as u64,
-            spec,
-            payload,
-            128,
-            None,
-            1u32,
-            &mut body,
-        )
-        .expect("encode single-part file with part= in filename");
+        let payload = vec![0x33u8; payload_len as usize];
+        let spec = PartSpec {
+            number,
+            total,
+            offset,
+        };
+        let mut body = Vec::new();
+        let encoded = upload_adapter
+            .encode_article(name, payload_len, spec, &payload, 128, 1u32, &mut body)
+            .expect("encode file with control keyword in filename");
 
-    let download_adapter = DownloadDecryptionAdapter::with_password(password);
-    let decoded = download_adapter
-        .decode_article(&encoded.body)
-        .expect("decode single-part file with part= in filename must succeed");
+        let decoded = DownloadDecryptionAdapter::with_password(&password)
+            .decode_article(&encoded.body)
+            .expect("decode file with control keyword in filename must succeed");
 
-    assert_eq!(decoded.data, payload);
-    assert_eq!(decoded.name, "ep_part=pilot.mkv");
-}
-
-#[test]
-fn test_multipart_filename_containing_ypart() {
-    let password = "test-multipart-ypart-password";
-    let salt = control::generate_alphabet_salt();
-    let session = Arc::new(EncryptionSession::new(password, salt).unwrap());
-    let upload_adapter = UploadEncryptionAdapter::new(session);
-
-    let payload = vec![0x33u8; 1024];
-    let spec = PartSpec {
-        number: 1,
-        total: 2,
-        offset: 0,
-    };
-    let _segment_index = 1u32;
-    let mut body = Vec::new();
-    let encoded = upload_adapter
-        .encode_article(
-            "movie=ypart1.mkv",
-            2048,
-            spec,
-            &payload,
-            128,
-            None,
-            1u32,
-            &mut body,
-        )
-        .expect("encode multipart file with =ypart in filename");
-
-    let download_adapter = DownloadDecryptionAdapter::with_password(password);
-    let decoded = download_adapter
-        .decode_article(&encoded.body)
-        .expect("decode multipart file with =ypart in filename must succeed");
-
-    assert_eq!(decoded.data, payload);
-    assert_eq!(decoded.name, "movie=ypart1.mkv");
-    assert_eq!(decoded.part, 1);
-    assert_eq!(decoded.total, 2);
+        assert_eq!(decoded.data, payload);
+        assert_eq!(decoded.name, name);
+        if total > 1 {
+            assert_eq!(decoded.part, number);
+            assert_eq!(decoded.total, total);
+        }
+    }
 }
 
 #[test]
@@ -299,7 +285,6 @@ fn insert_yencryption_line_placement_and_canonical_length() {
                 spec,
                 payload,
                 128,
-                None,
                 1,
                 &mut body,
             )
@@ -453,7 +438,6 @@ fn single_part_article_named_part_equals_round_trips_through_decode_article() {
             },
             payload,
             128,
-            None,
             1u32,
             &mut scratch,
         )
@@ -483,7 +467,6 @@ fn encrypted_missing_name_or_crc_fails_closed() {
             },
             b"hello",
             128,
-            None,
             1,
             &mut Vec::new(),
         )

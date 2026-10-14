@@ -32,7 +32,7 @@ async fn a_staged_job_downloads_and_lands_in_history() {
     let article_len = encoded.body.len() as u64;
 
     let mut known = HashMap::new();
-    known.insert("art1@test", encoded.body);
+    known.insert("art1@test".to_string(), encoded.body);
     let addr = support::spawn_fake_server(known);
 
     let dir = tempfile::tempdir().unwrap();
@@ -115,12 +115,18 @@ async fn a_staged_job_downloads_and_lands_in_history() {
     assert_eq!(written, data);
 }
 
-#[tokio::test]
-async fn encrypted_nzb_sugo_job_round_trip() {
-    let password = "sugo-secret-password-12345";
+/// Shared encrypted-job driver: builds an encrypted single-segment NZB,
+/// stages it as a sugo job, and waits for history. `tamper` flips one byte
+/// of the ciphertext data line to exercise the failure path.
+async fn run_encrypted_job(
+    file_name: &str,
+    message_id: &str,
+    tamper: bool,
+) -> (sugo::job::JobStatus, Option<String>) {
+    let password = format!("{file_name}-password");
     let salt = pesto::crypto::generate_alphabet_salt();
     let session =
-        std::sync::Arc::new(pesto::crypto::EncryptionSession::new(password, salt).unwrap());
+        std::sync::Arc::new(pesto::crypto::EncryptionSession::new(&password, salt).unwrap());
     let adapter = pesto::crypto::UploadEncryptionAdapter::new(session);
 
     let original = b"Plaintext content payload for encrypted Sugo job test!";
@@ -132,19 +138,30 @@ async fn encrypted_nzb_sugo_job_round_trip() {
     let mut body = Vec::new();
     let encoded = adapter
         .encode_article(
-            "sugo_secret.bin",
+            file_name,
             original.len() as u64,
             spec,
             original,
             128,
-            None,
             1,
             &mut body,
         )
         .unwrap();
 
-    let mut known = HashMap::new();
-    known.insert("sugo_enc1@test", encoded.body);
+    let wire_body = if tamper {
+        let mut lines: Vec<Vec<u8>> = encoded
+            .body
+            .split_inclusive(|&b| b == b'\n')
+            .map(|l| l.to_vec())
+            .collect();
+        lines[2][0] ^= 0x01;
+        lines.into_iter().flatten().collect()
+    } else {
+        encoded.body
+    };
+
+    let mut known: HashMap<String, Vec<u8>> = HashMap::new();
+    known.insert(message_id.to_string(), wire_body);
     let addr = support::spawn_fake_server(known);
 
     let dir = tempfile::tempdir().unwrap();
@@ -155,15 +172,15 @@ async fn encrypted_nzb_sugo_job_round_trip() {
 
     let groups = vec!["alt.binaries.test".to_string()];
     let segments = vec![PostedSegment {
-        file_name: "sugo_secret.bin".into(),
-        file_path: std::path::Path::new("sugo_secret.bin").into(),
-        subject_name: "sugo_secret.bin".into(),
-        wire_name: "sugo_secret.bin".into(),
-        wire_yenc_name: "sugo_secret.bin".into(),
+        file_name: file_name.into(),
+        file_path: std::path::Path::new(file_name).into(),
+        subject_name: file_name.into(),
+        wire_name: file_name.into(),
+        wire_yenc_name: file_name.into(),
         file_size: original.len() as u64,
         part: 1,
         total: 1,
-        message_id: "<sugo_enc1@test>".into(),
+        message_id: format!("<{message_id}>"),
         bytes: original.len() as u64,
         from: "poster <p@x>".into(),
         date: (None, None),
@@ -186,7 +203,7 @@ async fn encrypted_nzb_sugo_job_round_trip() {
     )
     .into_bytes();
 
-    let job = sugo::job::stage_and_create(&state, "sugo_secret.nzb", None, nzb_bytes)
+    let job = sugo::job::stage_and_create(&state, &format!("{file_name}.nzb"), None, nzb_bytes)
         .await
         .unwrap();
     state.jobs.write().await.enqueue(job);
@@ -196,13 +213,7 @@ async fn encrypted_nzb_sugo_job_round_trip() {
         {
             let store = state.jobs.read().await;
             if let Some(finished) = store.history.first() {
-                assert_eq!(
-                    finished.status,
-                    sugo::job::JobStatus::Completed,
-                    "job finished with unexpected status: {:?}",
-                    finished.status
-                );
-                break;
+                return (finished.status, finished.message.clone());
             }
         }
         assert!(
@@ -211,130 +222,31 @@ async fn encrypted_nzb_sugo_job_round_trip() {
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+}
 
-    let written = std::fs::read(download_dir.join("sugo_secret").join("sugo_secret.bin")).unwrap();
-    assert_eq!(written, original);
+#[tokio::test]
+async fn encrypted_nzb_sugo_job_round_trip() {
+    let (status, _) = run_encrypted_job("sugo_secret.bin", "sugo_enc1@test", false).await;
+    assert_eq!(
+        status,
+        sugo::job::JobStatus::Completed,
+        "job finished with unexpected status: {status:?}"
+    );
 }
 
 #[tokio::test]
 async fn encrypted_nzb_sugo_tampered_job_fails_cleanly() {
     let password = "sugo-tamper-canary-pass-999";
-    let salt = pesto::crypto::generate_alphabet_salt();
-    let session =
-        std::sync::Arc::new(pesto::crypto::EncryptionSession::new(password, salt).unwrap());
-    let adapter = pesto::crypto::UploadEncryptionAdapter::new(session);
-
-    let original = b"Plaintext content that must never be committed when tampered!";
-    let spec = PartSpec {
-        number: 1,
-        total: 1,
-        offset: 0,
-    };
-    let mut body = Vec::new();
-    let encoded = adapter
-        .encode_article(
-            "tampered.bin",
-            original.len() as u64,
-            spec,
-            original,
-            128,
-            None,
-            1,
-            &mut body,
-        )
-        .unwrap();
-
-    // Mutate data line in ciphertext
-    let mut lines: Vec<Vec<u8>> = encoded
-        .body
-        .split_inclusive(|&b| b == b'\n')
-        .map(|l| l.to_vec())
-        .collect();
-    lines[2][0] ^= 0x01;
-    let tampered_body: Vec<u8> = lines.into_iter().flatten().collect();
-
-    let mut known = HashMap::new();
-    known.insert("sugo_tamper@test", tampered_body);
-    let addr = support::spawn_fake_server(known);
-
-    let dir = tempfile::tempdir().unwrap();
-    let download_dir = dir.path().join("downloads");
-    let config = support::test_web_config(&download_dir, addr.port(), "secret");
-    let state = support::build_state(dir.path().join("data"), config);
-    sugo::job::worker::spawn(state.clone());
-
-    let groups = vec!["alt.binaries.test".to_string()];
-    let segments = vec![PostedSegment {
-        file_name: "tampered.bin".into(),
-        file_path: std::path::Path::new("tampered.bin").into(),
-        subject_name: "tampered.bin".into(),
-        wire_name: "tampered.bin".into(),
-        wire_yenc_name: "tampered.bin".into(),
-        file_size: original.len() as u64,
-        part: 1,
-        total: 1,
-        message_id: "<sugo_tamper@test>".into(),
-        bytes: original.len() as u64,
-        from: "poster <p@x>".into(),
-        date: (None, None),
-        full_crc32: 0,
-        server_idx: 0,
-        file_index: 1,
-        total_files: 1,
-        segment_index: 0,
-    }];
-    let meta = NzbMeta {
-        password: Some(password.to_string()),
-        yenc_encrypted: true,
-        ..Default::default()
-    };
-    let nzb_bytes = pesto::nzb::generate(
-        &groups,
-        &segments,
-        &meta,
-        pesto::config::ObfuscateMode::None,
-    )
-    .into_bytes();
-
-    let job = sugo::job::stage_and_create(&state, "tampered.nzb", None, nzb_bytes)
-        .await
-        .unwrap();
-    state.jobs.write().await.enqueue(job);
-
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    loop {
-        {
-            let store = state.jobs.read().await;
-            if let Some(finished) = store.history.first() {
-                assert_eq!(
-                    finished.status,
-                    sugo::job::JobStatus::Failed,
-                    "expected JobStatus::Failed for tampered job, got: {:?}",
-                    finished.status
-                );
-                // Canary must not be in error message
-                if let Some(ref msg) = finished.message {
-                    assert!(
-                        !msg.contains(password),
-                        "error message leaked password canary"
-                    );
-                }
-                break;
-            }
-        }
+    let (status, message) = run_encrypted_job("tampered.bin", "sugo_tamper@test", true).await;
+    assert_eq!(
+        status,
+        sugo::job::JobStatus::Failed,
+        "expected JobStatus::Failed for tampered job, got: {status:?}"
+    );
+    if let Some(ref msg) = message {
         assert!(
-            tokio::time::Instant::now() < deadline,
-            "job did not reach history within the timeout"
+            !msg.contains(password),
+            "error message leaked password canary"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
     }
-
-    // Zero-output guarantee: final file and temp sibling must not exist
-    // (penne's temp suffix is `.penne-part`, not `.tmp`).
-    let output_file = download_dir.join("tampered").join("tampered.bin");
-    assert!(!output_file.exists(), "unauthenticated file must not exist");
-    let tmp_file = download_dir
-        .join("tampered")
-        .join("tampered.bin.penne-part");
-    assert!(!tmp_file.exists(), "temp file must not exist");
 }

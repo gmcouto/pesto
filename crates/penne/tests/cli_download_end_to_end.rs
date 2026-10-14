@@ -894,7 +894,6 @@ fn encrypted_nzb_metadata_round_trip() {
             spec,
             original,
             128,
-            None,
             1u32,
             &mut body,
         )
