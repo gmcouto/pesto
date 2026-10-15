@@ -84,7 +84,11 @@ fn total_one_physical_multipart_bad_geometry_releases_no_output() {
         assert!(
             err.to_string().contains("GEOMETRY")
                 || err.to_string().contains("SIZE_OVERFLOW")
-                || err.to_string().contains("=ypart"),
+                || err.to_string().contains("=ypart")
+                // T05: malformed range values now fail as INVALID_AAD_FIELD
+                // at the AAD validation seam (Body Std v1.2 §2.1) — still a
+                // no-output provider-corruption failure.
+                || err.to_string().contains("INVALID_AAD_FIELD"),
             "{range}: {err}"
         );
     }

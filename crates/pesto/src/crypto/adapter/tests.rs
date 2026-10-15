@@ -6,6 +6,7 @@ use super::*;
 use crate::yenc::{self, PartSpec};
 use std::sync::Arc;
 
+mod aad_fields;
 mod geometry;
 mod public_api;
 
@@ -129,6 +130,13 @@ fn adapter_rejects_unencrypted_article_fail_closed() {
     // A caller that configured transport decryption must never accept a
     // plain `=ybegin` article: that would release unauthenticated plaintext
     // (Zero-Output Guarantee, Body Std v1.2 §7).
+    //
+    // There is deliberately NO plaintext-prefix shortcut here: a valid
+    // per-upload salt may itself begin with the bytes `=ybegin` (the 253-byte
+    // Alphabet permits every byte except 0x00/0x0A/0x0D), so the wire prefix
+    // is not proof of ordinary encoding. The plain article must instead fail
+    // closed through the ordinary bootstrap/restoration/authentication path,
+    // releasing no data.
     let payload = b"plain unencrypted payload";
     let encoded = yenc::encode_part(
         "plain.bin",
@@ -145,10 +153,106 @@ fn adapter_rejects_unencrypted_article_fail_closed() {
     let err = DownloadDecryptionAdapter::with_password("unused-password")
         .decode_article(&encoded.body)
         .expect_err("unencrypted article must fail closed under a decryptor");
+    let msg = err.to_string();
+    // Zero-Output Guarantee: the failure must not leak the plaintext.
     assert!(
-        err.to_string().contains("UNAUTHENTICATED_ARTICLE"),
-        "got: {err}"
+        !msg.contains("plain unencrypted payload"),
+        "error leaked plaintext: {msg}"
     );
+}
+
+#[test]
+fn forced_ybegin_prefix_salts_round_trip_through_decode_article() {
+    // A per-upload salt may legitimately begin with `=ybegin` (with or
+    // without a space — both are valid 16-byte Alphabet sequences). The
+    // decoder must rely on bootstrap extraction, control-line restoration
+    // and AEAD authentication, never on a wire-prefix shortcut
+    // (Body Std v1.2 §5; Control Std v1.2 §5).
+    for salt in [*b"=ybeginABCDEFGHI", *b"=ybegin ABCDEFGH"] {
+        let password = "forced-prefix-salt-password";
+        let session = Arc::new(EncryptionSession::new(password, salt).unwrap());
+        let uploader = UploadEncryptionAdapter::new(session);
+        let payload = b"forced-salt payload";
+        let mut body = Vec::new();
+        let encoded = uploader
+            .encode_article(
+                "forced.bin",
+                payload.len() as u64,
+                PartSpec {
+                    number: 1,
+                    total: 1,
+                    offset: 0,
+                },
+                payload,
+                128,
+                1u32,
+                &mut body,
+            )
+            .unwrap();
+        let decoded = DownloadDecryptionAdapter::with_password(password)
+            .decode_article(&encoded.body)
+            .unwrap_or_else(|e| {
+                panic!(
+                    "salt {:?} must round-trip: {e}",
+                    std::str::from_utf8(&salt).unwrap()
+                )
+            });
+        assert_eq!(decoded.data, payload, "salt {:?} payload mismatch", salt);
+    }
+}
+
+#[test]
+fn forced_ybegin_prefix_salt_round_trips_with_bare_lf_endings() {
+    // Same forced-salt contract under bare-LF line endings (Control Std
+    // v1.2 §5 restoration must preserve the article's own line endings).
+    for salt in [*b"=ybeginABCDEFGHI", *b"=ybegin ABCDEFGH"] {
+        let password = "forced-prefix-lf-password";
+        let session = Arc::new(EncryptionSession::new(password, salt).unwrap());
+        let uploader = UploadEncryptionAdapter::new(session);
+        let payload = b"forced-salt LF payload";
+        let mut body = Vec::new();
+        let encoded = uploader
+            .encode_article(
+                "forced-lf.bin",
+                payload.len() as u64,
+                PartSpec {
+                    number: 1,
+                    total: 1,
+                    offset: 0,
+                },
+                payload,
+                128,
+                1u32,
+                &mut body,
+            )
+            .unwrap();
+        // Strip every CR, converting CRLF endings to bare LF.
+        let mut lf_wire = encoded.body;
+        let mut index = 0;
+        while index < lf_wire.len() {
+            if lf_wire[index] == b'\r' && lf_wire.get(index + 1) == Some(&b'\n') {
+                lf_wire.remove(index);
+                continue;
+            }
+            index += 1;
+        }
+        let decoded = DownloadDecryptionAdapter::with_password(password)
+            .decode_article(&lf_wire)
+            .unwrap_or_else(|e| panic!("salt {:?} LF round-trip failed: {e}", salt));
+        assert_eq!(decoded.data, payload);
+    }
+}
+
+#[test]
+fn adapter_rejects_uu_encoded_substitute_fail_closed() {
+    // A uu-encoded article substituted by a malicious/corrupt provider must
+    // fail closed under the decryptor, releasing no data.
+    let uu = b"begin 644 substitute.bin\r\n$<&QA:6X\r\n`\r\nend\r\n";
+    let err = DownloadDecryptionAdapter::with_password("unused-password")
+        .decode_article(uu)
+        .expect_err("uu-encoded substitute must fail closed");
+    let msg = err.to_string();
+    assert!(!msg.contains("plain"), "error leaked content hint: {msg}");
 }
 
 #[test]

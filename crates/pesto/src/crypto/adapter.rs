@@ -344,6 +344,51 @@ fn ybegin_raw_name(restored: &[u8]) -> Result<Vec<u8>> {
     Ok(line[pos + 5..].to_vec())
 }
 
+/// All values carried by the `key` token prefix (e.g. `size=`) among
+/// whitespace-split control-line tokens.
+fn numeric_field_values<'a>(tokens: &[&'a str], key: &str) -> Vec<&'a str> {
+    tokens
+        .iter()
+        .filter_map(|token| token.strip_prefix(key))
+        .collect()
+}
+
+/// Resolve a required numeric AAD field (Body Encryption Standard v1.2 §2.1:
+/// missing or ambiguous AAD inputs must fail).
+///
+/// `key` is the full token prefix including `=` (e.g. `size=`).
+///
+/// - Zero occurrences of `key` fails with `missing_msg`.
+/// - Every occurrence must parse into `T` — a malformed or overflowing
+///   occurrence fails with `INVALID_AAD_FIELD` even beside a valid
+///   duplicate (the ordinary parser would silently skip or last-wins it).
+/// - Conflicting parsed values fail with `AMBIGUOUS_AAD_FIELD`.
+/// - Same-value duplicates are unambiguous and remain allowed.
+fn resolve_required_numeric_field<T: std::str::FromStr + PartialEq + std::fmt::Display>(
+    key: &str,
+    tokens: &[&str],
+    missing_msg: &str,
+) -> Result<T> {
+    let values = numeric_field_values(tokens, key);
+    if values.is_empty() {
+        bail!("{missing_msg}");
+    };
+    let mut resolved: Option<T> = None;
+    for value in values {
+        let parsed = value.parse::<T>().map_err(|_| {
+            anyhow::anyhow!("INVALID_AAD_FIELD: {key}{value} is malformed or overflows")
+        })?;
+        match &resolved {
+            None => resolved = Some(parsed),
+            Some(previous) if *previous == parsed => {}
+            Some(previous) => {
+                bail!("AMBIGUOUS_AAD_FIELD: conflicting {key} values {previous} and {parsed}")
+            }
+        }
+    }
+    Ok(resolved.expect("at least one occurrence was required"))
+}
+
 const MAX_CACHED_SESSIONS: usize = 16;
 
 /// One slot per salt so concurrent workers that miss the cache for the same
@@ -372,16 +417,16 @@ impl DownloadDecryptionAdapter {
 
     /// Decode an article wire body, restoring encrypted control lines and decrypting body ciphertext.
     ///
-    /// The `segmentIndex` and salt are taken from the article bootstrap.
-    /// The caller configured transport decryption for this download, so any
-    /// unencrypted article starting with `=ybegin` is rejected as
-    /// `UNAUTHENTICATED_ARTICLE` (fail closed): accepting it would release
-    /// unauthenticated plaintext and violate the Zero-Output Guarantee.
+    /// The `segmentIndex` and salt are taken from the article bootstrap
+    /// (Control Std v1.2 §5). There is deliberately NO plaintext-prefix
+    /// shortcut here: a valid per-upload salt may itself begin with the
+    /// bytes `=ybegin` (the 253-byte Alphabet permits every byte except
+    /// 0x00/0x0A/0x0D), so the wire prefix proves nothing. Whether an
+    /// article is ordinary yEnc is decided exclusively by the required
+    /// bootstrap extraction, control-line restoration, CRC and AEAD
+    /// authentication — any failure releases no plaintext
+    /// (Zero-Output Guarantee, Body Std v1.2 §7).
     pub fn decode_article(&self, body: &[u8]) -> Result<DecodedPart> {
-        if body.starts_with(b"=ybegin") {
-            bail!("UNAUTHENTICATED_ARTICLE: unencrypted article received for encrypted segment");
-        }
-
         // Line 1 terminator search must skip the 20-byte bootstrap prefix
         // (which may itself contain 0x0A/0x0D) — exactly what
         // `split_lines_preserving_endings` implements, so reuse it instead
@@ -424,15 +469,20 @@ impl DownloadDecryptionAdapter {
         let multipart_metadata = if multipart {
             let range = std::str::from_utf8(lines[1].content)
                 .context("INVALID_GEOMETRY: =ypart has non-ASCII fields")?;
-            let field = |key: &str| -> Result<u64> {
-                range
-                    .split_whitespace()
-                    .find_map(|token| token.strip_prefix(key))
-                    .and_then(|value| value.parse().ok())
-                    .with_context(|| format!("INVALID_GEOMETRY: =ypart missing or invalid {key}"))
-            };
-            let begin = field("begin=")?;
-            let end = field("end=")?;
+            // Validate the range fields here (Body Std v1.2 §2.1: required
+            // numeric AAD inputs must be unambiguous) instead of letting the
+            // ordinary parser's last-wins selection define the geometry.
+            let ypart_tokens: Vec<&str> = range.split_whitespace().collect();
+            let begin: u64 = resolve_required_numeric_field(
+                "begin=",
+                &ypart_tokens,
+                "INVALID_GEOMETRY: =ypart missing begin=",
+            )?;
+            let end: u64 = resolve_required_numeric_field(
+                "end=",
+                &ypart_tokens,
+                "INVALID_GEOMETRY: =ypart missing end=",
+            )?;
             let pcrc = lines
                 .iter()
                 .find(|line| line.content.starts_with(b"=yend"))
@@ -454,14 +504,17 @@ impl DownloadDecryptionAdapter {
             .windows(5)
             .position(|w| w == b"name=")
             .context("MISSING_AAD_INPUT: =ybegin line has no name= parameter")?;
+        // Only the text before `name=` carries key=value fields; the filename
+        // bytes after `name=` may themselves contain `size=`/`part=`-like
+        // text and are never interpreted as fields (Body Std v1.2 §2.1).
         let fields = std::str::from_utf8(&lines[0].content[..name_idx])
             .context("INVALID_GEOMETRY: =ybegin has non-ASCII fields")?;
-        let file_size = fields
-            .split_whitespace()
-            .filter_map(|token| token.strip_prefix("size="))
-            .next_back()
-            .and_then(|value| value.parse::<u64>().ok())
-            .context("INVALID_GEOMETRY: =ybegin missing or invalid size=")?;
+        let ybegin_tokens: Vec<&str> = fields.split_whitespace().collect();
+        let file_size: u64 = resolve_required_numeric_field(
+            "size=",
+            &ybegin_tokens,
+            "INVALID_GEOMETRY: =ybegin missing size=",
+        )?;
         let (begin, end) = multipart_metadata
             .map(|(begin, end, _)| (begin, end))
             .unwrap_or((1, file_size));
@@ -488,24 +541,43 @@ impl DownloadDecryptionAdapter {
             segment_bytes <= clean_yenc.len() as u64,
             "PROVIDER_FAILOVER: INVALID_GEOMETRY: segment range exceeds article length"
         );
-        let is_multi = fields
-            .split_whitespace()
-            .filter_map(|token| token.strip_prefix("total="))
-            .next_back()
-            .and_then(|value| value.parse::<u32>().ok())
-            .is_some_and(|total| total > 1);
+        // `total=` is optional (ordinary single-part =ybegin omits it), but
+        // when present every occurrence must parse and agree (§2.1).
+        let total: u32 = match numeric_field_values(&ybegin_tokens, "total=").first() {
+            Some(_) => resolve_required_numeric_field(
+                "total=",
+                &ybegin_tokens,
+                "INVALID_GEOMETRY: =ybegin missing total=",
+            )?,
+            None => 1,
+        };
+        let is_multi = total > 1;
+        // `part=` on the restored =ybegin is a required AAD input whenever
+        // multipart framing applies (Body Std v1.2 §2.1): reject missing,
+        // malformed, or conflicting occurrences before ordinary parsing can
+        // silently default the part number to 1.
+        let part_number: u32 = if multipart || is_multi {
+            resolve_required_numeric_field(
+                "part=",
+                &ybegin_tokens,
+                "INVALID_GEOMETRY: multipart =ybegin missing part=",
+            )?
+        } else {
+            1
+        };
 
         // Keep ordinary decoding upstream. Supply article-sized geometry at
         // its seam, then restore the original authenticated metadata. In
         // particular, total=1 must not reserve the whole file's capacity.
         //
-        // The article-sized override replaces the value of the existing
+        // The article-sized override replaces the value of the validated
         // `size=` token among the header keywords (before `name=`) instead
         // of appending a duplicate token: the ordinary decoder happens to
         // resolve a repeated keyword last-wins today, but this seam must
         // not depend on that tie-break. The filename text after `name=` is
-        // never touched. The `size=` token is guaranteed present because
-        // `file_size` was parsed from the same fields above.
+        // never touched. Validation above guarantees exactly one parsed
+        // size value; keep the raw byte span rather than re-tokenizing so
+        // the seam replacement is unambiguous.
         let header = &lines[0].content[..name_idx];
         let mut size_span = None;
         let mut i = 0;
@@ -582,8 +654,9 @@ impl DownloadDecryptionAdapter {
             segment_bytes as usize == decoded.data.len(),
             "INVALID_GEOMETRY: segment bytes does not match ciphertext length"
         );
-        let part_number = decoded.part;
         let part_begin = decoded.begin as u32;
+        // part_number comes from the validated =ybegin `part=` field, not
+        // from the ordinary decoder's permissive parse (Body Std v1.2 §2.1).
         let aad = body::format_body_aad(part_number, part_begin, segment_bytes, &aad_name);
 
         // Authenticate and decrypt body ciphertext with Zero-Output Guarantee.

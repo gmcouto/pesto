@@ -255,19 +255,15 @@ impl Connection {
     ///
     /// The body is ordinarily *not* dot-stuffed because standard yEnc escapes
     /// a '.' that would start a line (yEnc draft v1.3 §4 / `=ybegin` line
-    /// wrap). However, any encrypted control line (the random Line 1
-    /// bootstrap salt or an FF1 ciphertext line) can start with '.', in which
-    /// case RFC 3977 §3.1.1 requires dot-stuffing (Body Std v1.2 §9 transport boundary).
+    /// wrap), so an ordinary body never contains a line starting with '.'.
+    /// However encrypted control lines (the random Line 1 bootstrap salt or
+    /// an FF1 ciphertext line) CAN start with '.', and a valid salt may even
+    /// begin with the bytes `=ybegin`, so stuffing is decided purely from
+    /// the actual leading-dot bytes (RFC 3977 §3.1.1; Body Std v1.2 §9
+    /// transport boundary) — never from a wire-prefix shortcut.
     /// A body not ending in CRLF gets one appended before the terminator.
     async fn write_body(&mut self, body: &[u8]) -> Result<()> {
-        if body.starts_with(b"=ybegin") {
-            debug_assert!(
-                !yenc_body_has_leading_dot(body),
-                "yEnc body must not contain a line starting with '.'; \
-                 NNTP would treat it as end-of-article"
-            );
-            self.write_all_timeout(body).await?;
-        } else if yenc_body_has_leading_dot(body) {
+        if yenc_body_has_leading_dot(body) {
             let mut stuffed_body = Vec::with_capacity(body.len() + 16);
             dot_stuff(body, &mut stuffed_body);
             self.write_all_timeout(&stuffed_body).await?;

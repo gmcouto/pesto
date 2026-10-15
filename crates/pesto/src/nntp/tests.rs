@@ -212,6 +212,41 @@ async fn post_parts_dot_stuffs_an_encrypted_control_line_starting_with_dot() {
         .any(|window| window == b"\r\n..encrypted-control\r\n"));
 }
 
+#[tokio::test]
+async fn write_body_dot_stuffs_a_later_leading_dot_line_even_when_body_starts_with_ybegin() {
+    // Body Std v1.2 §9 / RFC 3977 §3.1.1: dot-stuffing is decided by the
+    // actual bytes on the wire, never by a wire-prefix shortcut. A body
+    // whose first line begins with `=ybegin` (e.g. a valid forced salt
+    // `=ybegin...` restored as ordinary-looking framing) that ALSO carries
+    // a later line starting with '.' must have that line stuffed; skipping
+    // the stuffing because of the prefix would terminate the article early
+    // server-side (and trip the removed debug assertion in debug builds).
+    let (mut conn, mut server) = mock_conn(b"340 Send article\r\n240 Article received\r\n").await;
+    let body = b"=ybegin line=128 size=8 name=t.bin\r\n.leading\r\npayload!\r\n=yend size=8\r\n";
+
+    conn.post_parts(b"Subject: t\r\n\r\n", body).await.unwrap();
+
+    let mut sent = vec![0u8; 512];
+    let count = tokio::io::AsyncReadExt::read(&mut server, &mut sent)
+        .await
+        .unwrap();
+    sent.truncate(count);
+    let wire = &sent[..count];
+    // The later leading-dot line must be stuffed on the wire...
+    assert!(
+        wire.windows(b"\r\n..leading\r\n".len())
+            .any(|window| window == b"\r\n..leading\r\n"),
+        "later leading-dot line must be dot-stuffed, got: {}",
+        String::from_utf8_lossy(wire)
+    );
+    // ...while the first line (not starting with '.') stays unstuffed.
+    assert!(
+        wire.windows(b"\r\n\r\n=ybegin".len())
+            .any(|window| window == b"\r\n\r\n=ybegin"),
+        "first line must not be stuffed"
+    );
+}
+
 #[test]
 fn dot_stuff_leaves_other_lines_untouched() {
     let mut out = Vec::new();

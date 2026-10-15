@@ -652,9 +652,14 @@ async fn unencrypted_spoof_rejected_for_encrypted_download() {
         "spoofed unencrypted article must not be recorded as fetched"
     );
     assert_eq!(outcome.corrupt.len(), 1, "spoof must be reported corrupt");
+    // There is no plaintext-prefix shortcut in the adapter (a valid salt may
+    // itself begin with `=ybegin`), so the plain article fails closed through
+    // control-line restoration instead — still with zero output.
     assert!(
-        outcome.corrupt[0].error.contains("UNAUTHENTICATED_ARTICLE"),
-        "error must name the authentication bypass, got: {}",
+        outcome.corrupt[0]
+            .error
+            .contains("CONTROL_LINE_DECRYPT_FAILURE"),
+        "error must reflect the fail-closed authentication gate, got: {}",
         outcome.corrupt[0].error
     );
 
