@@ -41,6 +41,26 @@ pub(super) async fn repost_one(
     buf.resize(read_len, 0);
     file.read_exact(&mut buf).await?;
 
+    // PESTO-FINAL-1 (Body Encryption Standard v1.2 §8): the original copy
+    // was encrypted under this segment's salt + `seg.segment_index`, which
+    // already authenticated its plaintext. If the source changed since that
+    // post, re-encrypting the re-read bytes under the same identity would
+    // publish a second, different plaintext under one authenticated
+    // identity — refuse (Err), so the caller's existing repost-failure
+    // handling exhausts attempts and leaves the segment missing. Describe
+    // the condition only: no digests, keys or plaintext bytes are logged.
+    if let Some(expected) = seg.plaintext_digest {
+        use sha2::{Digest, Sha256};
+        if Sha256::digest(&buf).as_slice() != expected.as_slice() {
+            return Err(anyhow::anyhow!(
+                "repost: source file changed since the original encrypted post; \
+                 refusing to re-post segment {}/{} under the same segment identity",
+                seg.part,
+                seg.total
+            ));
+        }
+    }
+
     let spec = yenc::PartSpec {
         number: seg.part,
         total: seg.total,
@@ -56,7 +76,20 @@ pub(super) async fn repost_one(
         ),
         ObfuscateMode::Article => (
             obfuscated_name(),
-            obfuscated_name(),
+            if adapter.is_some() {
+                // Encrypted upload (Body Encryption Standard v1.2 §8): the
+                // yEnc `name=` is an AAD input (§2.1), so the repost must
+                // reuse the original copy's name — with the same salt and
+                // `seg.segment_index` below, the re-encrypted wire form stays
+                // byte-identical to the first attempt. A fresh name here
+                // would change the ciphertext of an article the NZB's
+                // bootstrap already authenticates under the old name.
+                seg.wire_yenc_name.to_string()
+            } else {
+                // Ordinary upload: the name is not authenticated, keep the
+                // upstream per-repost rotation.
+                obfuscated_name()
+            },
             random_from(),
             super::super::resolve_date(config.date.as_deref()),
         ),
@@ -155,6 +188,7 @@ pub(super) async fn repost_one(
                         file_index: seg.file_index,
                         total_files: seg.total_files,
                         segment_index: seg.segment_index,
+                        plaintext_digest: seg.plaintext_digest,
                     });
                 }
                 Err(e) => {

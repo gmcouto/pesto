@@ -78,6 +78,13 @@ pub(super) struct PostTask {
     /// same read the article body comes from), so no separate whole-file
     /// pre-pass is needed before posting can start.
     pub(super) file_crc32: Option<u32>,
+    /// SHA-256 of `data` (the plaintext segment), computed only when this
+    /// segment is encrypted (`None` otherwise). Carried into
+    /// `PostedSegment`/`FailedTask` next to `segment_index` so every
+    /// reread-based re-encryption can verify the source still matches what
+    /// the original salt/index authenticated (PESTO-FINAL-1; Body Encryption
+    /// Standard v1.2 §8).
+    pub(super) plaintext_digest: Option<[u8; 32]>,
 }
 
 /// Encoded article ready for NNTP (nyuu `Post` after `generate`).

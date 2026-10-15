@@ -136,6 +136,12 @@ async fn prepare_ready(shared: &Arc<Shared>, mut task: PostTask) -> Option<Ready
                     // later `--check` repost of it must reuse the same
                     // segment index, so it survives the resume re-injection.
                     segment_index: task.segment_index,
+                    // Skipped/ReStatStoredId segments are never re-encoded
+                    // in this run, so no fresh digest exists here; a later
+                    // reread-based repost of a *pre-schema* resume record
+                    // has no digest either, which only ever weakens to the
+                    // pre-T04 behavior (no gate), never to plaintext.
+                    plaintext_digest: None,
                 };
                 shared.results.lock().unwrap().push(seg.clone());
                 if action == ResumeAction::ReStatStoredId {
@@ -433,6 +439,7 @@ pub(super) async fn worker(
                     file_index: p.task.meta.file_index,
                     total_files: shared.total_files,
                     segment_index: p.task.segment_index,
+                    plaintext_digest: p.task.plaintext_digest,
                 });
                 let bytes = p.task.data.len() as u64;
                 shared.release_buffer(p.task.data);

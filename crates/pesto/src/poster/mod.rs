@@ -639,6 +639,14 @@ fn make_task(
             )
         }
     };
+    // Digest only for encrypted segments: a nonzero index exists only when
+    // the encryption adapter planned the release (0 is never a permitted
+    // index — Body Encryption Standard v1.2 §8), so this mirrors
+    // `shared.encryption_adapter.is_some()` at every call site.
+    let plaintext_digest = (segment_index != 0).then(|| {
+        use sha2::{Digest, Sha256};
+        Sha256::digest(&data).into()
+    });
     PostTask {
         meta,
         part,
@@ -646,6 +654,7 @@ fn make_task(
         offset,
         data,
         segment_index,
+        plaintext_digest,
         subject_name,
         yenc_name,
         from,

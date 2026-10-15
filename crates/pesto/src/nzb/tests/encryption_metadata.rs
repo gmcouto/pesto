@@ -42,6 +42,7 @@ fn make_segment(file_name: &str, part: u32, total: u32, msg_id: &str, bytes: u64
         file_index: 0,
         total_files: 0,
         segment_index: 0,
+        plaintext_digest: None,
     }
 }
 

@@ -124,6 +124,8 @@ pub fn parse(content: &str) -> Result<ParsedNzb> {
                 file_index: 0,
                 total_files: 0,
                 segment_index: 0,
+                // Never re-encoded once parsed back — see above.
+                plaintext_digest: None,
             });
         } else if t.starts_with("<meta ") {
             let kind = xml_attr(t, "type").unwrap_or_default();

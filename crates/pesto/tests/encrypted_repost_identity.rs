@@ -29,6 +29,245 @@ use pesto::walk::expand_inputs;
 
 type CapturedArticles = Arc<Mutex<Vec<Vec<u8>>>>;
 
+/// Withholds one NNTP reply until the test releases it, after the gate
+/// command's raw bytes have been fully captured. Lets a test mutate the
+/// on-disk source at a deterministic point: after the original POST was
+/// observed on the wire, before any later reread-based retry can re-read the
+/// file (PESTO-FINAL-1).
+struct PostGate {
+    /// Fired once the gated command's bytes are fully captured.
+    notify: std::sync::mpsc::Sender<()>,
+    /// `false` = closed: the captured command's reply is withheld.
+    open: Mutex<bool>,
+    cv: std::sync::Condvar,
+}
+
+impl PostGate {
+    /// Called on the mock-server thread: signal the test, then block until
+    /// the test calls [`PostGate::release`].
+    fn reply_until_released(&self) {
+        let _ = self.notify.send(());
+        let mut open = self.open.lock().unwrap();
+        while !*open {
+            open = self.cv.wait(open).unwrap();
+        }
+    }
+
+    /// Called on the test thread: let the withheld reply through.
+    fn release(&self) {
+        *self.open.lock().unwrap() = true;
+        self.cv.notify_all();
+    }
+}
+
+/// Wait (bounded) for the mock server to signal that the gated command's
+/// bytes were captured.
+fn wait_captured(gate_signal: &std::sync::mpsc::Receiver<()>) {
+    gate_signal
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .expect("mock server never captured the gated command");
+}
+
+/// Flip the first byte of the file in place, preserving its length — a
+/// same-length source mutation, exactly the reread-identity hazard.
+fn flip_first_byte(path: &std::path::Path) {
+    let mut bytes = std::fs::read(path).unwrap();
+    bytes[0] ^= 0xFF;
+    std::fs::write(path, &bytes).unwrap();
+}
+
+/// Whether an article's decoded yEnc body decrypts (via the production
+/// adapter) to `plaintext`. Test helper for the changed-source proofs.
+fn decrypts_to(body: &[u8], password: &str, plaintext: &[u8]) -> bool {
+    let decryptor = DownloadDecryptionAdapter::with_password(password);
+    decryptor
+        .decode_article(body)
+        .map(|d| d.data == plaintext)
+        .unwrap_or(false)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn encrypted_blind_retry_refuses_changed_source_under_same_identity() {
+    // PESTO-FINAL-1: a source that changes AFTER the first attempted POST
+    // must never be blind-retried under the original salt/segment index —
+    // that would put two distinct plaintexts under one authenticated
+    // identity (Body Encryption Standard v1.2 §8). The gate holds the
+    // server's 441 reply until the source has been mutated: the original
+    // POST is fully captured (and refused), the blind retry has not run yet.
+    let (addr, articles, refused, _refused_articles, gate, signal) =
+        spawn_mock_server_with_post_gate(1, 1);
+
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("changed-source.bin");
+    let plaintext: Vec<u8> = (0..64u32).map(|i| i as u8).collect();
+    std::fs::write(&input, &plaintext).unwrap();
+
+    let cfg = config(addr, Some("changed-pass-123".into()));
+    let inputs = expand_inputs(std::slice::from_ref(&input)).unwrap();
+    let run =
+        tokio::spawn(
+            async move { post_files_with_progress(&cfg, &inputs, None, None, None).await },
+        );
+
+    wait_captured(&signal);
+    flip_first_byte(&input);
+    let mutated = std::fs::read(&input).unwrap();
+    gate.release();
+
+    let outcome = run.await.unwrap().unwrap();
+
+    let captured = articles.lock().unwrap().clone();
+    if !captured.is_empty() {
+        let body = article_body(&captured[0]);
+        panic!(
+            "PESTO-FINAL-1 RED: the changed source was re-read, re-encrypted under the \
+             same salt/segment index and posted — the server accepted {} article(s); \
+             decoded retry plaintext equals mutated source: {}",
+            captured.len(),
+            decrypts_to(body, "changed-pass-123", &mutated)
+        );
+    }
+    assert_eq!(
+        refused.load(Ordering::SeqCst),
+        1,
+        "the blind retry must not issue a second POST for a changed source"
+    );
+    assert!(
+        !outcome.failures.is_empty(),
+        "the segment must stay failed when the retry is refused: {:?}",
+        outcome.failures
+    );
+    assert!(
+        !outcome.failed_tasks.is_empty(),
+        "the refused segment must remain a failed task"
+    );
+    assert!(
+        outcome.segments.is_empty(),
+        "no successful segment may be recorded for a changed source"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn encrypted_check_repost_refuses_changed_source_under_same_identity() {
+    // PESTO-FINAL-1 through the STAT path: all POSTs succeed, but the first
+    // STAT's 430 reply is held until the source has been mutated — the
+    // `repost_one` reread (used by both the streaming check repost
+    // (`check.rs` `handle_confirmed_miss`) and the final recovery pass
+    // (`recovery.rs`)) has not run yet. The repost must be refused, leaving
+    // the segment missing rather than posting the mutated bytes.
+    let (addr, articles, stat_count, gate, signal) = spawn_mock_server_with_stat_gate();
+
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("changed-check.bin");
+    let plaintext: Vec<u8> = (0..96u32).map(|i| (i * 5) as u8).collect();
+    std::fs::write(&input, &plaintext).unwrap();
+
+    let cfg = config(addr, Some("changed-check-pass".into()));
+    let inputs = expand_inputs(std::slice::from_ref(&input)).unwrap();
+    let run =
+        tokio::spawn(
+            async move { post_files_with_progress(&cfg, &inputs, None, None, None).await },
+        );
+
+    wait_captured(&signal);
+    flip_first_byte(&input);
+    let mutated = std::fs::read(&input).unwrap();
+    gate.release();
+
+    let outcome = run.await.unwrap().unwrap();
+
+    let captured = articles.lock().unwrap().clone();
+    if captured.len() > 1 {
+        let body = article_body(&captured[1]);
+        panic!(
+            "PESTO-FINAL-1 RED: the changed source was re-read by the STAT repost and \
+             posted under the same salt/segment index — the server holds {} article(s); \
+             decoded repost plaintext equals mutated source: {}",
+            captured.len(),
+            decrypts_to(body, "changed-check-pass", &mutated)
+        );
+    }
+    assert_eq!(
+        captured.len(),
+        1,
+        "only the original POST may be stored; the changed-source repost must be refused"
+    );
+    assert_eq!(
+        stat_count.load(Ordering::SeqCst),
+        1,
+        "no confirmation STAT may run for a refused repost"
+    );
+    let body = article_body(&captured[0]);
+    let decryptor = DownloadDecryptionAdapter::with_password("changed-check-pass");
+    let decoded = decryptor
+        .decode_article(body)
+        .expect("the original stored article must decrypt");
+    assert_eq!(
+        decoded.data, plaintext,
+        "the only stored article must be the original post of the unmutated source"
+    );
+    assert!(
+        !outcome.inconclusive.is_empty() || !outcome.still_missing.is_empty(),
+        "the refused repost must end the segment not-posted (missing/inconclusive), \
+         never silently successful: still_missing={:?} inconclusive={:?}",
+        outcome.still_missing,
+        outcome.inconclusive
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ordinary_blind_retry_still_rereads_current_source_bytes() {
+    // Control (PESTO-FINAL-1 2d): WITHOUT an encryption adapter there is no
+    // salt/segment identity to protect, and the reread-based retry's
+    // established upstream behavior is to post whatever is currently on disk
+    // (the retry has always re-read at retry time — issue #23/#145 lineage).
+    // No digest is computed and no gate applies: ordinary retries keep
+    // posting the current bytes.
+    let (addr, articles, refused, _refused_articles, gate, signal) =
+        spawn_mock_server_with_post_gate(1, 1);
+
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("plain-changed.bin");
+    std::fs::write(&input, vec![0xABu8; 64]).unwrap();
+
+    let cfg = config(addr, None);
+    let inputs = expand_inputs(std::slice::from_ref(&input)).unwrap();
+    let run =
+        tokio::spawn(
+            async move { post_files_with_progress(&cfg, &inputs, None, None, None).await },
+        );
+
+    wait_captured(&signal);
+    flip_first_byte(&input);
+    let mutated = std::fs::read(&input).unwrap();
+    gate.release();
+
+    let outcome = run.await.unwrap().unwrap();
+
+    assert!(
+        outcome.failures.is_empty(),
+        "the ordinary blind retry must still recover the failure: {:?}",
+        outcome.failures
+    );
+    let captured = articles.lock().unwrap().clone();
+    assert_eq!(
+        captured.len(),
+        1,
+        "the ordinary blind retry must still POST (upstream behavior unchanged)"
+    );
+    assert_eq!(
+        refused.load(Ordering::SeqCst),
+        2,
+        "the ordinary retry issues its own POST (refused original + accepted retry)"
+    );
+    let decoded = pesto::yenc::decode_part(article_body(&captured[0])).unwrap();
+    assert_eq!(
+        decoded.data, mutated,
+        "ordinary uploads must keep their existing reread-based retry behavior \
+         (no hashing, no identity gate)"
+    );
+}
+
 /// Mock NNTP server. `post_failures` controls how many POST commands (across
 /// all connections, globally) are answered with a 441 refusal before any
 /// later POST succeeds. All STATs succeed, so no check-path repost
@@ -104,6 +343,79 @@ fn handle_connection(
     refused: Arc<AtomicUsize>,
     post_failures: usize,
 ) {
+    handle_connection_gated(
+        stream,
+        articles,
+        refused_articles,
+        refused,
+        post_failures,
+        None,
+    );
+}
+
+/// Like [`spawn_mock_server`], but the `gate_at`-th POST command (1-based,
+/// counting refused+accepted alike) has its `441`/`240` reply withheld until
+/// [`PostGate::release`] — the test mutates the source in that window,
+/// between the gated POST's capture and any later reread-based retry.
+fn spawn_mock_server_with_post_gate(
+    post_failures: usize,
+    gate_at: usize,
+) -> (
+    SocketAddr,
+    CapturedArticles,
+    Arc<AtomicUsize>,
+    CapturedArticles,
+    Arc<PostGate>,
+    std::sync::mpsc::Receiver<()>,
+) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let articles = Arc::new(Mutex::new(Vec::new()));
+    let refused_articles: CapturedArticles = Arc::new(Mutex::new(Vec::new()));
+    let refused = Arc::new(AtomicUsize::new(0));
+    let (notify, rx) = std::sync::mpsc::channel();
+    let gate = Arc::new(PostGate {
+        notify,
+        open: Mutex::new(false),
+        cv: std::sync::Condvar::new(),
+    });
+
+    let articles_clone = Arc::clone(&articles);
+    let refused_articles_clone = Arc::clone(&refused_articles);
+    let refused_clone = Arc::clone(&refused);
+    let gate_clone = Arc::clone(&gate);
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(stream) = stream else { continue };
+            let articles = Arc::clone(&articles_clone);
+            let refused_articles = Arc::clone(&refused_articles_clone);
+            let refused = Arc::clone(&refused_clone);
+            let gate = Arc::clone(&gate_clone);
+            std::thread::spawn(move || {
+                handle_connection_gated(
+                    stream,
+                    articles,
+                    refused_articles,
+                    refused,
+                    post_failures,
+                    Some((gate, gate_at)),
+                );
+            });
+        }
+    });
+
+    (addr, articles, refused, refused_articles, gate, rx)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn handle_connection_gated(
+    stream: TcpStream,
+    articles: CapturedArticles,
+    refused_articles: CapturedArticles,
+    refused: Arc<AtomicUsize>,
+    post_failures: usize,
+    gate: Option<(Arc<PostGate>, usize)>,
+) {
     let mut writer = match stream.try_clone() {
         Ok(w) => w,
         Err(_) => return,
@@ -143,6 +455,12 @@ fn handle_connection(
                 }
                 article.extend_from_slice(&raw);
             }
+            let gated = matches!(&gate, Some((_, at)) if this_post + 1 == *at);
+            if gated {
+                if let Some((g, _)) = &gate {
+                    g.reply_until_released();
+                }
+            }
             if accept {
                 articles.lock().unwrap().push(article);
                 if writer.write_all(b"240 article received\r\n").is_err() {
@@ -159,6 +477,118 @@ fn handle_connection(
             }
         } else if command.starts_with("STAT ") {
             if writer.write_all(b"223 0 <id> article exists\r\n").is_err() {
+                return;
+            }
+        } else if command.starts_with("MODE READER") {
+            if writer.write_all(b"200 reader mode\r\n").is_err() {
+                return;
+            }
+        } else if command == "QUIT" {
+            let _ = writer.write_all(b"205 bye\r\n");
+            return;
+        } else if writer.write_all(b"500 unknown command\r\n").is_err() {
+            return;
+        }
+    }
+}
+
+/// Like [`spawn_mock_server_with_stat_misses`], but the first STAT's `430`
+/// reply is withheld until [`PostGate::release`] — the test mutates the
+/// source in that window, before the check repost's reread has run.
+fn spawn_mock_server_with_stat_gate() -> (
+    SocketAddr,
+    CapturedArticles,
+    Arc<AtomicUsize>,
+    Arc<PostGate>,
+    std::sync::mpsc::Receiver<()>,
+) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let articles = Arc::new(Mutex::new(Vec::new()));
+    let stat_count = Arc::new(AtomicUsize::new(0));
+    let (notify, rx) = std::sync::mpsc::channel();
+    let gate = Arc::new(PostGate {
+        notify,
+        open: Mutex::new(false),
+        cv: std::sync::Condvar::new(),
+    });
+
+    let articles_clone = Arc::clone(&articles);
+    let stat_count_clone = Arc::clone(&stat_count);
+    let gate_clone = Arc::clone(&gate);
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(stream) = stream else { continue };
+            let articles = Arc::clone(&articles_clone);
+            let stat_count = Arc::clone(&stat_count_clone);
+            let gate = Arc::clone(&gate_clone);
+            std::thread::spawn(move || {
+                handle_connection_with_stat_gate(stream, articles, stat_count, gate);
+            });
+        }
+    });
+
+    (addr, articles, stat_count, gate, rx)
+}
+
+fn handle_connection_with_stat_gate(
+    stream: TcpStream,
+    articles: CapturedArticles,
+    stat_count: Arc<AtomicUsize>,
+    gate: Arc<PostGate>,
+) {
+    let mut writer = match stream.try_clone() {
+        Ok(w) => w,
+        Err(_) => return,
+    };
+    let mut reader = BufReader::new(stream);
+    if writer.write_all(b"200 pesto mock ready\r\n").is_err() {
+        return;
+    }
+
+    let mut line = String::new();
+    loop {
+        line.clear();
+        match reader.read_line(&mut line) {
+            Ok(0) | Err(_) => return,
+            Ok(_) => {}
+        }
+        let command = line.trim_end().to_string();
+
+        if command == "POST" {
+            if writer.write_all(b"340 send article\r\n").is_err() {
+                return;
+            }
+            let mut article = Vec::new();
+            loop {
+                let mut raw = Vec::new();
+                match reader.read_until(b'\n', &mut raw) {
+                    Ok(0) | Err(_) => return,
+                    Ok(_) => {}
+                }
+                if raw == b".\r\n" {
+                    break;
+                }
+                if raw.starts_with(b"..") {
+                    raw.remove(0);
+                }
+                article.extend_from_slice(&raw);
+            }
+            articles.lock().unwrap().push(article);
+            if writer.write_all(b"240 article received\r\n").is_err() {
+                return;
+            }
+        } else if command.starts_with("STAT ") {
+            let seen = stat_count.fetch_add(1, Ordering::SeqCst);
+            if seen == 0 {
+                gate.reply_until_released();
+            }
+            let resp: &[u8] = if seen == 0 {
+                b"430 no such article found\r\n"
+            } else {
+                b"223 0 <id> article exists\r\n"
+            };
+            if writer.write_all(resp).is_err() {
                 return;
             }
         } else if command.starts_with("MODE READER") {
@@ -245,6 +675,14 @@ fn handle_connection_with_stat_misses(
 }
 
 fn config(addr: SocketAddr, encrypt_password: Option<String>) -> Config {
+    config_with_obfuscation(addr, encrypt_password, ObfuscateMode::None)
+}
+
+fn config_with_obfuscation(
+    addr: SocketAddr,
+    encrypt_password: Option<String>,
+    obfuscate: ObfuscateMode,
+) -> Config {
     Config {
         host: addr.ip().to_string(),
         port: addr.port(),
@@ -261,7 +699,7 @@ fn config(addr: SocketAddr, encrypt_password: Option<String>) -> Config {
         timeout: pesto::config::DEFAULT_TIMEOUT_SECS,
         proxy: None,
         proxy_check_ip: false,
-        obfuscate: ObfuscateMode::None,
+        obfuscate,
         dry_run: false,
         par2: 0,
         par2_slice_size: None,
@@ -555,5 +993,134 @@ async fn encrypted_check_repost_and_recovery_stay_encrypted_with_same_identity()
     assert_eq!(
         outcome.segments[0].segment_index, indices[0],
         "outcome must record the preserved segment identity"
+    );
+}
+
+/// Extract the restored (decrypted) yEnc `=ybegin name=` value from a
+/// captured raw article, via the production decryption path. The `name=` is
+/// an AAD input (Body Std v1.2 §2.1), so this is the authenticated name.
+fn restored_yenc_name(article: &[u8], password: &str) -> String {
+    let body = article_body(article);
+    let decryptor = DownloadDecryptionAdapter::with_password(password);
+    let decoded = decryptor
+        .decode_article(body)
+        .unwrap_or_else(|e| panic!("article failed to decrypt: {e}"));
+    decoded.name
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn encrypted_article_mode_repost_keeps_restored_yenc_name_stable() {
+    // PESTO-FINAL-2: under `--obfuscate article`, `repost_one` used to
+    // generate a FRESH obfuscated yEnc name for each repost while re-encrypting
+    // with the same salt/index. The yEnc `name=` is an AAD input (Body Std
+    // v1.2 §2.1), so the reposted article's ciphertext differed from the
+    // original — and an original/repost pair restored different names
+    // despite identical salt/index bootstrap. Body Std v1.2 §8 requires
+    // control-line/AAD values to stay stable across retry/repost.
+    //
+    // The mock misses the first two STATs (one check repost + one
+    // recovery-pass repost, same recipe as
+    // `encrypted_check_repost_and_recovery_stay_encrypted_with_same_identity`).
+    let (addr, articles, _stat_count) = spawn_mock_server_with_stat_misses(2);
+
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("article-mode.bin");
+    let plaintext: Vec<u8> = (0..64u32).map(|i| (i * 7) as u8).collect();
+    std::fs::write(&input, &plaintext).unwrap();
+
+    let password = "article-mode-pass-123";
+    let cfg = config_with_obfuscation(addr, Some(password.into()), ObfuscateMode::Article);
+    let inputs = expand_inputs(std::slice::from_ref(&input)).unwrap();
+    let outcome = post_files_with_progress(&cfg, &inputs, None, None, None)
+        .await
+        .unwrap();
+    assert!(outcome.still_missing.is_empty());
+
+    let captured = articles.lock().unwrap().clone();
+    assert_eq!(
+        captured.len(),
+        3,
+        "expected the original POST plus 2 reposts"
+    );
+
+    // Same salt/index bootstrap on every copy (stable segment identity).
+    let indices = assert_all_articles_decrypt_to(&captured, password, &plaintext);
+    assert_eq!(indices, vec![1u32; 3]);
+
+    // The restored, AEAD-authenticated yEnc name must be IDENTICAL across
+    // the original post, the STAT repost, and the recovery repost. A fresh
+    // `obfuscated_name()` per repost breaks this.
+    let names: Vec<String> = captured
+        .iter()
+        .map(|article| restored_yenc_name(article, password))
+        .collect();
+    let expected = names[0].clone();
+    assert!(
+        !expected.is_empty(),
+        "restored yEnc name must be present in every article"
+    );
+    assert_eq!(
+        names,
+        vec![expected.clone(); 3],
+        "restored yEnc name must be identical across original post, \
+         STAT repost and recovery repost (Body Std v1.2 §8): {names:?}"
+    );
+
+    // The encrypted wire bodies must stay byte-identical for unchanged
+    // input: same salt/index + same AAD name ⇒ deterministic re-encryption.
+    let bodies: Vec<&[u8]> = captured.iter().map(|a| article_body(a)).collect();
+    assert!(
+        bodies.windows(2).all(|pair| pair[0] == pair[1]),
+        "encrypted article bodies must be byte-identical across \
+         original post and reposts: the yEnc name is an AAD input and \
+         must not change between attempts"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ordinary_article_mode_repost_still_regenerates_yenc_name() {
+    // Control for the fix above: WITHOUT an encryption adapter, the
+    // Article-mode repost arm keeps its upstream behavior of generating a
+    // fresh obfuscated yEnc name per attempt (it is not authenticated
+    // there, and rotating it is intentional upstream behavior guarded by
+    // `check_repost_preserves_obfuscation.rs`).
+    let (addr, articles, _stat_count) = spawn_mock_server_with_stat_misses(2);
+
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("plain-article-mode.bin");
+    std::fs::write(&input, vec![7u8; 50_000]).unwrap();
+
+    let cfg = config_with_obfuscation(addr, None, ObfuscateMode::Article);
+    let inputs = expand_inputs(std::slice::from_ref(&input)).unwrap();
+    let outcome = post_files_with_progress(&cfg, &inputs, None, None, None)
+        .await
+        .unwrap();
+    assert!(outcome.still_missing.is_empty());
+
+    let captured = articles.lock().unwrap().clone();
+    assert_eq!(
+        captured.len(),
+        3,
+        "expected the original POST plus 2 reposts"
+    );
+
+    let names: Vec<String> = captured
+        .iter()
+        .map(|article| {
+            let body = article_body(article);
+            let text = String::from_utf8_lossy(body);
+            text.lines()
+                .find(|line| line.starts_with("=ybegin "))
+                .and_then(|line| line.rsplit_once(" name="))
+                .map(|(_, name)| name.trim_end_matches('\r').to_string())
+                .expect("plain yEnc article must have an =ybegin name=")
+        })
+        .collect();
+    let unique: std::collections::HashSet<_> = names.iter().collect();
+    assert_eq!(
+        unique.len(),
+        names.len(),
+        "ordinary Article-mode reposts must keep rotating the yEnc name \
+         (upstream behavior unchanged): {names:?}"
     );
 }

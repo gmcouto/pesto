@@ -140,6 +140,14 @@ pub struct PostedSegment {
     pub total_files: u32,
     /// Segment index across the release for encrypted uploads.
     pub segment_index: u32,
+    /// SHA-256 of the segment's plaintext bytes, recorded when this segment
+    /// was encrypted for upload (`None` for ordinary uploads and segments
+    /// reconstructed from a parsed `.nzb`). A reread-based repost
+    /// (`check::repost_one`) refuses to re-encrypt when the re-read bytes no
+    /// longer match this digest: two distinct plaintexts must never be
+    /// published under one (salt, `segment_index`) identity — Body
+    /// Encryption Standard v1.2 §8.
+    pub plaintext_digest: Option<[u8; 32]>,
 }
 
 /// A segment that failed to post during the upload run. Carries enough
@@ -185,6 +193,12 @@ pub struct FailedTask {
     pub total_files: u32,
     /// Segment index across the release for encrypted uploads.
     pub segment_index: u32,
+    /// SHA-256 of the segment's plaintext bytes at original-encode time
+    /// (`None` for ordinary uploads) — see `PostedSegment::plaintext_digest`.
+    /// The end-of-run blind retry refuses to re-encrypt a re-read that no
+    /// longer matches: the original salt/segment index already authenticated
+    /// the old bytes (Body Encryption Standard v1.2 §8).
+    pub plaintext_digest: Option<[u8; 32]>,
 }
 
 /// The result of a posting run.

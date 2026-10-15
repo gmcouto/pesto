@@ -82,6 +82,7 @@ fn record_failure_appends_description() {
         offset: 0,
         data: vec![],
         segment_index: 2,
+        plaintext_digest: None,
         subject_name: "ep.mkv".into(),
         yenc_name: "ep.mkv".into(),
         from: String::new(),

@@ -105,6 +105,7 @@ pub(super) fn commit_result(
             file_index: task.meta.file_index,
             total_files: shared.total_files,
             segment_index: task.segment_index,
+            plaintext_digest: task.plaintext_digest,
         };
         shared.results.lock().unwrap().push(seg.clone());
         if let Some(tx) = shared.check_tx.lock().unwrap().as_ref() {
@@ -209,6 +210,7 @@ pub(super) fn record_failure(
         file_index: meta.file_index,
         total_files: shared.total_files,
         segment_index: task.segment_index,
+        plaintext_digest: task.plaintext_digest,
     });
 }
 
@@ -276,6 +278,28 @@ pub async fn repost_failed_tasks(
         if let Err(e) = file.read_exact(&mut buf).await {
             warn!(file = %task.file_name, "retry: read failed: {e}");
             continue;
+        }
+
+        // PESTO-FINAL-1 (Body Encryption Standard v1.2 §8): the original
+        // salt + segment index already authenticated the plaintext this task
+        // encrypted. If the source changed since then, re-encrypting the
+        // re-read bytes under that same identity would publish a second,
+        // different plaintext under one authenticated identity — refuse the
+        // retry and leave the segment failed, exactly like the read-failure
+        // branches above. Describe the condition only: no digests, keys or
+        // plaintext bytes are logged.
+        if let Some(expected) = task.plaintext_digest {
+            use sha2::{Digest, Sha256};
+            if Sha256::digest(&buf).as_slice() != expected.as_slice() {
+                warn!(
+                    file = %task.file_name,
+                    part = task.part,
+                    "retry: source file changed since the original encrypted \
+                     attempt; refusing to re-post it under the same segment \
+                     identity"
+                );
+                continue;
+            }
         }
 
         let spec = yenc::PartSpec {
@@ -411,6 +435,7 @@ pub async fn repost_failed_tasks(
                 file_index: task.file_index,
                 total_files: task.total_files,
                 segment_index: task.segment_index,
+                plaintext_digest: task.plaintext_digest,
             });
             if let Some(tx) = events {
                 let _ = tx.send(ProgressEvent::PostRetryRecovered {

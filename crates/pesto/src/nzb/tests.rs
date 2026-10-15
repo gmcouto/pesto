@@ -25,6 +25,7 @@ fn seg(name: &str, part: u32, total: u32, id: &str) -> PostedSegment {
         file_index: 0,
         total_files: 0,
         segment_index: 0,
+        plaintext_digest: None,
     }
 }
 
@@ -214,6 +215,7 @@ fn file_element_never_carries_a_name_attribute() {
         file_index: 0,
         total_files: 0,
         segment_index: 0,
+        plaintext_digest: None,
     };
     let xml = generate(
         &["alt.test".into()],

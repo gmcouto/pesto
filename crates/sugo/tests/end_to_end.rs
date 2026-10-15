@@ -60,6 +60,7 @@ async fn a_staged_job_downloads_and_lands_in_history() {
         file_index: 0,
         total_files: 0,
         segment_index: 0,
+        plaintext_digest: None,
     }];
     let nzb_bytes = pesto::nzb::generate(
         &groups,
@@ -189,6 +190,7 @@ async fn run_encrypted_job(
         file_index: 1,
         total_files: 1,
         segment_index: 0,
+        plaintext_digest: None,
     }];
     let meta = NzbMeta {
         password: Some(password.to_string()),
