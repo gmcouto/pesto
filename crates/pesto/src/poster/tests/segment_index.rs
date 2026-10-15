@@ -127,6 +127,10 @@ fn commit_result_records_planned_segment_index() {
         date: (None, None),
         size: 12,
         file_index: 1,
+        fingerprint: crate::resume::FileFingerprint {
+            size: 12,
+            mtime: None,
+        },
     });
 
     let task = PostTask {

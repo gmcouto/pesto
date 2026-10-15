@@ -10,6 +10,10 @@ fn fp(article_size: u64) -> RunFingerprint {
     fp
 }
 
+fn names(file_names: &[&str]) -> Vec<String> {
+    file_names.iter().map(|s| s.to_string()).collect()
+}
+
 #[test]
 fn encrypt_password_fingerprint_invalidation() {
     let mut s = ResumeState::default();
@@ -110,7 +114,7 @@ fn session_identity_round_trip() {
 
     // The unchanged layout still validates on the loaded state, and a
     // pre-schema record (no session identity) loads with identity unset.
-    assert!(loaded2.validate_session(&layout));
+    assert!(loaded2.validate_session(&layout, &[]));
     let json = r#"{"files":{},"segments":{"a.bin\u00001":{"message_id":"id1@x","bytes":100}}}"#;
     let loaded: ResumeState = serde_json::from_str(json).unwrap();
     assert!(loaded.session_salt().is_none());
@@ -150,7 +154,7 @@ fn session_validation_invalidates_all_state_on_layout_mismatches() {
     // Added file (total_files: 3 instead of 2)
     let mut s = make_state();
     let added_layout = ReleaseLayout::from_parts(3, &[(1, 2), (2, 3), (3, 1)]).unwrap();
-    assert!(!s.validate_session(&added_layout));
+    assert!(!s.validate_session(&added_layout, &names(&["a.bin", "b.bin", "c.bin"])));
     assert!(s.session_salt().is_none());
     assert!(s.archive_stem().is_none());
     assert!(s.release_identity().is_none());
@@ -166,14 +170,82 @@ fn session_validation_invalidates_all_state_on_layout_mismatches() {
     // Removed file (total_files: 1 instead of 2)
     let mut s = make_state();
     let removed_layout = ReleaseLayout::from_parts(1, &[(1, 2)]).unwrap();
-    assert!(!s.validate_session(&removed_layout));
+    assert!(!s.validate_session(&removed_layout, &names(&["a.bin"])));
     assert!(s.session_salt().is_none());
     assert_eq!(s.len(), 0);
 
     // Resized file (parts for file 1: 5 instead of 2)
     let mut s = make_state();
     let resized_layout = ReleaseLayout::from_parts(2, &[(1, 5), (2, 3)]).unwrap();
-    assert!(!s.validate_session(&resized_layout));
+    assert!(!s.validate_session(&resized_layout, &names(&["a.bin", "b.bin"])));
     assert!(s.session_salt().is_none());
+    assert_eq!(s.len(), 0);
+}
+
+/// T13 / PE-NEXT-1: a same-layout source replacement (same ordinals, same
+/// part counts, different ordered file names) must invalidate the session
+/// even though the count-only layout is equal.
+#[test]
+fn same_layout_source_replacement_invalidates_session() {
+    use crate::poster::ReleaseLayout;
+
+    let base_layout = ReleaseLayout::from_parts(2, &[(1, 2), (2, 3)]).unwrap();
+    let salt = [0x77u8; 16];
+    let mut s = ResumeState::default();
+    s.set_session_identity(UploadSessionIdentity {
+        salt,
+        layout: base_layout.clone(),
+        source_names: names(&["a.bin", "b.bin"]),
+    });
+    s.record("b.bin", 1, "id1@x", 100);
+    assert!(s.validate_session(&base_layout, &names(&["a.bin", "b.bin"])));
+    assert_eq!(s.session_salt(), Some(&salt), "unchanged identity is kept");
+
+    // Replaced source: same layout, different ordered name list.
+    assert!(!s.validate_session(&base_layout, &names(&["a.bin", "c.bin"])));
+    assert!(s.session_salt().is_none(), "salt must rotate");
+    assert_eq!(s.len(), 0, "stale segment records must be cleared");
+    assert!(
+        s.take_session_invalidated(),
+        "spool cleanup flag must be set"
+    );
+
+    // Reordered names are also an identity change.
+    let mut s = ResumeState::default();
+    s.set_session_identity(UploadSessionIdentity {
+        salt,
+        layout: base_layout.clone(),
+        source_names: names(&["a.bin", "b.bin"]),
+    });
+    assert!(!s.validate_session(&base_layout, &names(&["b.bin", "a.bin"])));
+    assert!(s.session_salt().is_none());
+}
+
+/// T13 / PE-NEXT-1: an experimental saved session without persisted source
+/// names must rotate the salt rather than trust a count-only layout match.
+#[test]
+fn pre_name_session_identity_rotates_rather_than_count_match() {
+    use crate::poster::ReleaseLayout;
+
+    let layout = ReleaseLayout::from_parts(1, &[(1, 2)]).unwrap();
+    let salt = [0x11u8; 16];
+    // Hand-craft a legacy identity without source names (as an
+    // experimental state file would deserialize).
+    let mut s = ResumeState::default();
+    s.set_session_identity(UploadSessionIdentity {
+        salt,
+        layout: layout.clone(),
+        source_names: Vec::new(),
+    });
+    s.record("a.bin", 1, "id1@x", 100);
+
+    assert!(
+        !s.validate_session(&layout, &names(&["a.bin"])),
+        "a legacy identity without source names must not validate against any source set"
+    );
+    assert!(
+        s.session_salt().is_none(),
+        "legacy identity must rotate salt"
+    );
     assert_eq!(s.len(), 0);
 }

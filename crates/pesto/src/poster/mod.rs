@@ -81,6 +81,9 @@ struct FileMeta {
     /// `Shared::total_files > 0`; encrypted uploads always assign it, while
     /// unencrypted uploads zero it when `--file-counter` is off.
     file_index: u32,
+    /// Preserved size/mtime fingerprint for resume invalidation. None for
+    /// PAR2-generated files (no on-disk source to compare against).
+    fingerprint: crate::resume::FileFingerprint,
 }
 
 fn par2_volume_ordinal(data_files: usize, publish_index: bool, volume_index: usize) -> u32 {
@@ -549,6 +552,7 @@ async fn push_par2_file(
         } else {
             0
         },
+        fingerprint: crate::resume::FileFingerprint { size, mtime: None },
     });
 
     // Whole-file CRC-32 accumulated as this same loop reads the file for

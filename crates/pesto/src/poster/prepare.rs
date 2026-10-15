@@ -200,15 +200,16 @@ pub(super) async fn prepare_inputs(
             bail!("multiple inputs normalize to the same client path `{client_path}`");
         }
         let size = md.len();
+        let mtime = md
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs());
+        let file_fp = crate::resume::FileFingerprint { size, mtime };
 
         if let Some(resume) = &resume_arc {
-            let mtime = md
-                .modified()
-                .ok()
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_secs());
-            let file_fp = crate::resume::FileFingerprint { size, mtime };
             let mut state = resume.lock().unwrap();
+            let known_file = state.has_file(&real_name);
             if !state.file_matches(&real_name, &file_fp) {
                 if state.session_salt().is_some() {
                     eprintln!(
@@ -220,14 +221,11 @@ pub(super) async fn prepare_inputs(
                     state.invalidate_session();
                 } else if config.par2 > 0 {
                     // PAR2 recovery blocks are computed over the whole
-                    // recovery set together, not per file — one file's
+                    // recovery set together, not per file, so one file's
                     // content changing invalidates every volume's segments
-                    // too, not just this file's own (see
-                    // `forget_all_segments`'s doc comment). PAR2 volumes
-                    // never go through this per-file check themselves
-                    // (they're generated later, straight into the posting
-                    // queue — see `push_par2_file`), so this is the only
-                    // place that can catch it.
+                    // too (see `forget_all_segments`'s doc comment). PAR2
+                    // volumes never go through this per-file check
+                    // themselves, so this is the only place that can catch it.
                     eprintln!(
                         "resume: `{real_name}` changed size or modification time since the \
                          saved state was recorded — ignoring all saved segments, including \
@@ -242,6 +240,20 @@ pub(super) async fn prepare_inputs(
                     );
                     state.forget_file(&real_name);
                 }
+            } else if state.session_salt().is_some() && !known_file {
+                // A source name the encrypted session never recorded: the
+                // input set itself changed (e.g. `b.bin` replaced by
+                // `c.bin` at the same ordinal/part count). The count-only
+                // release layout would still match, silently reusing the
+                // old salt/index space over different plaintext, so the
+                // whole encrypted session must rotate (yEnc Body Encryption
+                // Standard v1.2 §8: indices are stable only for the same
+                // session's segments).
+                eprintln!(
+                    "resume: `{real_name}` is not part of the saved encrypted session's \
+                     source set — invalidating entire session"
+                );
+                state.invalidate_session();
             }
             state.record_file(&real_name, file_fp);
         }
@@ -326,6 +338,7 @@ pub(super) async fn prepare_inputs(
             // Assigned below, once `metas`' final posting order is settled —
             // see the natural order pass after the File-ID sort.
             file_index: 0,
+            fingerprint: file_fp,
         }));
     }
 
@@ -678,14 +691,11 @@ pub(super) async fn prepare_resources(
     };
 
     // The release layout (segment-identity planner) only exists for
-    // encrypted uploads: it is what maps release ordinal + part number to
-    // the globally unique, framing-safe segment index the encrypted article
-    // bootstrap carries. Unencrypted uploads have no bootstrap, no nonce and
-    // no index, so running the planner there only adds a hand-written PAR2
-    // packet-size prediction that can fail ("exceed safe segment-index
-    // capacity") or panic on an upload that never needed it.
-    // `FileMeta::file_index` is still assigned by `prepare_inputs` for
-    // every run; the plain upload path simply never reads it back.
+    // encrypted uploads: unencrypted uploads have no bootstrap, no nonce
+    // and no index, so running the planner there only adds a hand-written
+    // PAR2 packet-size prediction that can fail or panic on an upload that
+    // never needed it. `FileMeta::file_index` is still assigned by
+    // `prepare_inputs` for every run; the plain path never reads it back.
     let release_layout = Arc::new(if config.encrypt_password.is_some() {
         ReleaseLayout::build(metas, config, recovery_count, par2_slice_size)?
     } else {
@@ -695,13 +705,16 @@ pub(super) async fn prepare_resources(
     if config.encrypt_password.is_some() {
         if let Some(resume) = resume_arc {
             let mut state = resume.lock().unwrap();
+            let source_names: Vec<String> =
+                metas.iter().map(|meta| meta.real_name.clone()).collect();
             let was_invalidated = state.take_session_invalidated();
-            let valid = state.validate_session(&release_layout);
+            let valid = state.validate_session(&release_layout, &source_names);
             if was_invalidated || !valid {
                 if !valid {
                     eprintln!(
-                        "resume: release layout changed since the saved state was recorded \
-                         — clearing session identity, records, and spool"
+                        "resume: release layout or encrypted source set changed since the \
+                         saved state was recorded — clearing session identity, records, \
+                         and spool"
                     );
                 } else {
                     eprintln!(
@@ -713,6 +726,27 @@ pub(super) async fn prepare_resources(
                 if let Some(dir) = spool_dir {
                     crate::spool::remove_all(dir);
                 }
+                // T14: `invalidate_session` also clears every per-file
+                // fingerprint — including the ones `prepare_inputs` just
+                // recorded for this run's *current* sources. Re-record the
+                // complete current set so the replacement session (fresh
+                // salt) still knows every file's identity; without this a
+                // later resume sees `files: {}` and can skip stale accepted
+                // articles under changed content.
+                for meta in metas {
+                    state.record_file(&meta.real_name, meta.fingerprint);
+                }
+            }
+        }
+    } else if let Some(resume) = resume_arc {
+        // T15: an invalidated session (e.g. encrypted run → ordinary
+        // resume) must still clear the spool even though this run itself
+        // is ordinary: replayed ciphertext would be posted into an
+        // unmarked NZB. The spool reader cannot distinguish those bytes.
+        let mut state = resume.lock().unwrap();
+        if state.take_session_invalidated() {
+            if let Some(dir) = spool_dir {
+                crate::spool::remove_all(dir);
             }
         }
     }
@@ -724,10 +758,14 @@ pub(super) async fn prepare_resources(
                 *existing_salt
             } else {
                 let fresh_salt = crate::crypto::generate_alphabet_salt();
-                state.set_session_identity(crate::resume::UploadSessionIdentity::new(
-                    fresh_salt,
-                    (*release_layout).clone(),
-                ));
+                // Persist the complete ordered source identity with the
+                // salt so a later `--resume` validates names as well as
+                // part counts (T13).
+                state.set_session_identity(crate::resume::UploadSessionIdentity {
+                    salt: fresh_salt,
+                    layout: (*release_layout).clone(),
+                    source_names: metas.iter().map(|meta| meta.real_name.clone()).collect(),
+                });
                 fresh_salt
             }
         } else {

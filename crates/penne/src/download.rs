@@ -256,25 +256,39 @@ pub async fn download_queue_with_decryptor(
         for seg in &file.segments {
             if let Some(cached) = cache::load(dest_dir, &seg.message_id) {
                 if let Ok(decoded) = decode_body(&decryptor, &cached) {
-                    emit(&progress, || ProgressEvent::SegmentDownloaded {
-                        file_name: file.name.clone(),
-                        part: seg.part,
-                        bytes: decoded.data.len() as u64,
-                    });
-                    resolve_segment(
-                        &file.name,
-                        &seg.message_id,
-                        seg.part,
-                        Some(decoded),
-                        &shared,
-                        &progress,
-                    )
-                    .await?;
-                    continue;
+                    // Body Std v1.2 §2.1: a cache hit must pass the same
+                    // optional declared-bytes predicate a fresh fetch
+                    // applies, so a changed nonzero NZB `bytes` value is
+                    // rejected on a warm cache exactly like on a cold one
+                    // (PE-NEXT-5). The predicate is encrypted-only; a
+                    // mismatch falls through to the provider fetch below and
+                    // leaves the cached bytes themselves untouched.
+                    let declared_bytes_ok = decryptor.is_none()
+                        || seg.bytes == 0
+                        || decoded.data.len() as u64 == seg.bytes;
+                    if declared_bytes_ok {
+                        emit(&progress, || ProgressEvent::SegmentDownloaded {
+                            file_name: file.name.clone(),
+                            part: seg.part,
+                            bytes: decoded.data.len() as u64,
+                        });
+                        resolve_segment(
+                            &file.name,
+                            &seg.message_id,
+                            seg.part,
+                            Some(decoded),
+                            &shared,
+                            &progress,
+                        )
+                        .await?;
+                        continue;
+                    }
                 }
                 // A corrupted cache entry (shouldn't happen, but a killed
-                // write mid-flush is possible) falls through to a normal
-                // network fetch rather than failing the segment outright.
+                // write mid-flush is possible) — or an encrypted hit whose
+                // plaintext length contradicts the now-declared bytes —
+                // falls through to a normal network fetch rather than
+                // failing the segment outright.
             }
             pending.push(WorkItem {
                 file_name: file.name.clone(),

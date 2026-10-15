@@ -22,25 +22,75 @@ use penne::nzb::{download_decryptor, load};
 use penne::queue::build;
 use pesto::config::ServerEntry;
 
-/// Locate the `pesto` CLI binary. `CARGO_BIN_EXE_pesto` only exists for the
-/// package under test, so from the penne crate we resolve the workspace
-/// target directory relative to this crate's manifest.
-fn pesto_bin() -> PathBuf {
+/// Build (or reuse a fresh build of) the `pesto` producer CLI and return its
+/// path. `CARGO_BIN_EXE_pesto` only exists for the package owning the binary
+/// (pesto-poster), so from penne's test crate we invoke the active `cargo`
+/// binary — see PE-NEXT-4: the previous implementation trusted whatever
+/// prebuilt binary happened to sit in the workspace `target/{debug,release}`
+/// directory, ignoring `CARGO_TARGET_DIR` and the source revision.
+///
+/// The nested invocation is not "cargo nested in cargo blindly": the outer
+/// `cargo test` releases its build lock before test execution, and the
+/// nested `cargo build` shares the active target directory, so it either
+/// reuses the outer run's fresh artifacts or builds the current source
+/// itself. Cargo reports the produced artifact via `--message-format=json`,
+/// so no target-dir/profile/triple layout is assumed here; a build failure
+/// is a test failure, never a silent skip.
+fn build_pesto_bin() -> PathBuf {
+    let cargo = std::env::var("CARGO").expect("cargo must be running this test binary");
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let workspace = manifest
         .parent()
         .and_then(Path::parent)
         .expect("penne lives two levels under the workspace root");
-    for profile in ["debug", "release"] {
-        let candidate = workspace.join("target").join(profile).join("pesto");
-        if candidate.exists() {
-            return candidate;
+    let output = Command::new(cargo)
+        .current_dir(workspace)
+        .args([
+            "build",
+            "--offline",
+            "--bin",
+            "pesto",
+            "-p",
+            "pesto-poster",
+            "--message-format=json",
+        ])
+        .output()
+        .expect("failed to spawn the active cargo binary");
+    assert!(
+        output.status.success(),
+        "building the pesto producer CLI from current source failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // Pick the `pesto` bin artifact out of cargo's JSON stream; an up-to-date
+    // (fresh) build still reports the artifact path.
+    let mut bin: Option<PathBuf> = None;
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let Ok(msg) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let is_pesto_bin = msg.get("reason").and_then(|r| r.as_str()) == Some("compiler-artifact")
+            && msg
+                .get("target")
+                .and_then(|t| t.get("name"))
+                .and_then(|n| n.as_str())
+                == Some("pesto")
+            && msg
+                .get("target")
+                .and_then(|t| t.get("kind"))
+                .and_then(|k| k.as_array())
+                .is_some_and(|kinds| kinds.iter().any(|k| k.as_str() == Some("bin")));
+        if is_pesto_bin {
+            if let Some(exe) = msg.get("executable").and_then(|e| e.as_str()) {
+                bin = Some(PathBuf::from(exe));
+            }
         }
     }
-    panic!(
-        "pesto binary not found under {} — run `cargo build -p pesto-poster --bin pesto` first",
-        workspace.join("target").display()
-    );
+    bin.unwrap_or_else(|| {
+        panic!(
+            "cargo build succeeded but reported no pesto bin artifact:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        )
+    })
 }
 
 fn article_body(article: &[u8]) -> &[u8] {
@@ -217,7 +267,7 @@ fn server_entry(addr: SocketAddr) -> ServerEntry {
 }
 
 fn run_pesto(xdg_home: &Path, args: &[&std::ffi::OsStr]) -> Output {
-    Command::new(pesto_bin())
+    Command::new(build_pesto_bin())
         .env("XDG_CONFIG_HOME", xdg_home)
         .args(args)
         .output()

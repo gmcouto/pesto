@@ -60,6 +60,10 @@ fn meta_with_name(path: &std::path::Path, name: &str) -> FileMeta {
         date: (None, None),
         size: 0,
         file_index: 1,
+        fingerprint: crate::resume::FileFingerprint {
+            size: 0,
+            mtime: None,
+        },
     }
 }
 
