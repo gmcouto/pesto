@@ -12,8 +12,8 @@
 //! `UploadEncryptionAdapter` and registered on a fake POST server, while
 //! the merge step still drives the real prebuilt `pesto --merge-season`
 //! CLI so the combined NZB remains an actual CLI output. The prebuilt
-//! binary is located without spawning cargo (see `find_pesto_bin`) and
-//! gated on staleness by the local `binary_is_stale` predicate; the
+//! binary is located without spawning cargo (see `penne::bin_lookup::pesto_binary`) and
+//! gated on staleness by `penne::bin_lookup::binary_is_stale` via `pesto_binary()`; the
 //! upload bytes themselves no longer depend on which binary runs.
 //!
 //! Unlike `download_encryption.rs::merged_encrypted_release_with_multiple_salts_decrypts`
@@ -30,7 +30,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::Arc;
 
-use penne::bin_lookup::{binary_is_stale, pesto_binary};
+use penne::bin_lookup::{binary_is_stale, pesto_binary, pesto_manifest};
+use penne::config::ServerTier;
 use penne::download::download_queue_with_decryptor;
 use penne::nzb::{download_decryptor, load};
 use penne::queue::build;
@@ -38,62 +39,6 @@ use pesto::config::ServerEntry;
 use pesto::crypto::{EncryptionSession, UploadEncryptionAdapter};
 use pesto::poster::PostedSegment;
 use pesto::yenc::PartSpec;
-
-/// Locate the prebuilt `pesto` producer CLI without spawning cargo:
-/// prefer `CARGO_BIN_EXE_pesto` when the harness provides it, else look
-/// beside the running test executable and in the workspace target dirs.
-/// Returns `None` only when no binary exists at all; freshness is checked
-/// via [`binary_is_stale`].
-fn find_pesto_bin() -> Option<PathBuf> {
-    if let Some(p) = std::env::var_os("CARGO_BIN_EXE_pesto") {
-        let p = PathBuf::from(p);
-        if p.exists() {
-            return Some(p);
-        }
-    }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(profile_dir) = exe.parent().and_then(Path::parent) {
-            let candidate = profile_dir.join(if cfg!(windows) { "pesto.exe" } else { "pesto" });
-            if candidate.exists() {
-                return Some(candidate);
-            }
-        }
-    }
-    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    if let Some(workspace) = manifest.parent().and_then(Path::parent) {
-        for profile in ["debug", "release"] {
-            let c = workspace
-                .join("target")
-                .join(profile)
-                .join(if cfg!(windows) { "pesto.exe" } else { "pesto" });
-            if c.exists() {
-                return Some(c);
-            }
-        }
-    }
-    None
-}
-
-/// Locate the pesto crate manifest used as the staleness reference.
-fn pesto_manifest() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("penne lives under crates/")
-        .join("pesto")
-        .join("Cargo.toml")
-}
-
-/// PT-03: `binary` is stale iff it is older than `manifest`.
-/// Missing/unreadable mtime on either side counts as stale (`true`).
-fn binary_is_stale(binary: &Path, manifest: &Path) -> bool {
-    let Some(bmtime) = std::fs::metadata(binary).and_then(|m| m.modified()).ok() else {
-        return true;
-    };
-    let Some(mmtime) = std::fs::metadata(manifest).and_then(|m| m.modified()).ok() else {
-        return true;
-    };
-    bmtime < mmtime
-}
 
 fn article_body(article: &[u8]) -> &[u8] {
     let marker = b"\r\n\r\n";
@@ -299,21 +244,17 @@ fn stale_binary_detection_flags_older_binary_without_rebuild() {
 /// 4. The existing fake-server download proof reconstructs both plaintexts.
 #[tokio::test]
 async fn merged_cli_season_output_downloads_and_decrypts_both_episodes() {
-    let Some(bin) = find_pesto_bin() else {
-        eprintln!(
-            "prebuilt pesto binary not found beside test exe or in target/{{debug,release}}; \
-             build workspace first (no nested cargo)"
-        );
+    // PT-03 FINAL single predicate: production decision is
+    // `penne::bin_lookup::pesto_binary()` -> `binary_is_stale()` only.
+    // No local find/stale re-check here (a second decision site).
+    // `pesto_binary` returns a fresh candidate, rebuilds at most once
+    // (no re-check, no stamp), returns the stale candidate with
+    // `stale_detected=true` when rebuild is impossible (e.g. CARGO
+    // unset), and returns None only when no candidate exists at all.
+    let Some(bin) = pesto_binary() else {
+        eprintln!("stale_detected=true: no pesto candidate; skipping CLI-merge leg");
         return;
     };
-    if binary_is_stale(&bin, &pesto_manifest()) {
-        eprintln!(
-            "stale_detected=true: {} is older than {}; skipping CLI-merge leg",
-            bin.display(),
-            pesto_manifest().display()
-        );
-        return;
-    }
     let password = "merged-season-proof-pass";
     let payload1: Vec<u8> = (0..200u32).map(|i| (i % 251) as u8).collect();
     let payload2: Vec<u8> = (0..200u32).map(|i| (i % 253) as u8).collect();
