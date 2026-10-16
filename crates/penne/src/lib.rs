@@ -16,10 +16,6 @@
 pub const DISPLAY_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub mod assemble;
-#[doc(hidden)]
-pub mod bin_lookup;
-#[doc(hidden)]
-pub use bin_lookup::binary_is_stale;
 pub mod cache;
 pub mod check;
 pub mod cleanup;

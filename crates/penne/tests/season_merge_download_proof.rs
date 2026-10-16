@@ -12,9 +12,10 @@
 //! `UploadEncryptionAdapter` and registered on a fake POST server, while
 //! the merge step still drives the real prebuilt `pesto --merge-season`
 //! CLI so the combined NZB remains an actual CLI output. The prebuilt
-//! binary is located without spawning cargo (see `penne::bin_lookup::pesto_binary`) and
-//! gated on staleness by `penne::bin_lookup::binary_is_stale` via `pesto_binary()`; the
-//! upload bytes themselves no longer depend on which binary runs.
+//! binary is located locally in this test file by `find_pesto_bin`
+//! without spawning cargo; the proof hard-fails when the binary is
+//! absent, so build the workspace first (`cargo build --bin pesto`).
+//! The upload bytes themselves do not depend on which binary runs.
 //!
 //! Unlike `download_encryption.rs::merged_encrypted_release_with_multiple_salts_decrypts`
 //! (which hand-builds the merged XML), every `.nzb` involved is produced
@@ -26,11 +27,10 @@
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::net::SocketAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::Arc;
 
-use penne::bin_lookup::{binary_is_stale, pesto_binary, pesto_manifest};
 use penne::config::ServerTier;
 use penne::download::download_queue_with_decryptor;
 use penne::nzb::{download_decryptor, load};
@@ -143,95 +143,30 @@ fn server_entry(addr: SocketAddr) -> ServerEntry {
     }
 }
 
+/// PT-03 (test-local): locate a prebuilt `pesto` binary without spawning
+/// cargo. Search order: `CARGO_BIN_EXE_pesto`, then workspace
+/// `target/{debug,release}`.
+fn find_pesto_bin() -> Option<PathBuf> {
+    let exe_name = if cfg!(windows) { "pesto.exe" } else { "pesto" };
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Some(p) = std::env::var_os("CARGO_BIN_EXE_pesto") {
+        candidates.push(PathBuf::from(p));
+    }
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    if let Some(workspace) = manifest_dir.parent().and_then(Path::parent) {
+        for profile in ["debug", "release"] {
+            candidates.push(workspace.join("target").join(profile).join(exe_name));
+        }
+    }
+    candidates.into_iter().find(|p| p.exists())
+}
+
 fn run_pesto(bin: &Path, xdg_home: &Path, args: &[&std::ffi::OsStr]) -> Output {
     Command::new(bin)
         .env("XDG_CONFIG_HOME", xdg_home)
         .args(args)
         .output()
         .expect("failed to run pesto")
-}
-
-/// PT-03: `binary_is_stale` flags a backdated binary, accepts a fresh one,
-/// and flags a missing binary/manifest. Predicate-only: no real cargo rebuild.
-#[test]
-fn stale_binary_detection_flags_older_binary_without_rebuild() {
-    let dir = tempfile::tempdir().unwrap();
-    let manifest = dir.path().join("Cargo.toml");
-    let bin = dir.path().join("pesto");
-
-    // Pair controlled by the test: write binary first, manifest after
-    // (manifest newer -> binary is stale).
-    std::fs::write(&bin, b"binary").unwrap();
-    std::fs::write(&manifest, b"manifest").unwrap();
-    let manifest_time = std::fs::metadata(&manifest).unwrap().modified().unwrap();
-    std::fs::File::options()
-        .write(true)
-        .open(&bin)
-        .unwrap()
-        .set_modified(manifest_time - std::time::Duration::from_secs(3600))
-        .unwrap();
-    assert!(
-        binary_is_stale(&bin, &manifest),
-        "binary older than manifest must be flagged stale"
-    );
-
-    // Fresh copy: binary newer than manifest -> false.
-    std::fs::File::options()
-        .write(true)
-        .open(&bin)
-        .unwrap()
-        .set_modified(manifest_time + std::time::Duration::from_secs(3600))
-        .unwrap();
-    assert!(
-        !binary_is_stale(&bin, &manifest),
-        "binary newer than manifest must not be flagged stale"
-    );
-
-    // Tested against actual crates/pesto/Cargo.toml:
-    let real_manifest = pesto_manifest();
-    if real_manifest.exists() {
-        let real_mtime = std::fs::metadata(&real_manifest)
-            .unwrap()
-            .modified()
-            .unwrap();
-        let temp_bin = dir.path().join("pesto-test-bin");
-        std::fs::write(&temp_bin, b"bin").unwrap();
-
-        // Older than crates/pesto/Cargo.toml -> predicate true.
-        std::fs::File::options()
-            .write(true)
-            .open(&temp_bin)
-            .unwrap()
-            .set_modified(real_mtime - std::time::Duration::from_secs(3600))
-            .unwrap();
-        assert!(
-            binary_is_stale(&temp_bin, &real_manifest),
-            "temp binary older than crates/pesto/Cargo.toml must be stale"
-        );
-
-        // Fresh copy -> predicate false.
-        std::fs::File::options()
-            .write(true)
-            .open(&temp_bin)
-            .unwrap()
-            .set_modified(real_mtime + std::time::Duration::from_secs(3600))
-            .unwrap();
-        assert!(
-            !binary_is_stale(&temp_bin, &real_manifest),
-            "temp binary newer than crates/pesto/Cargo.toml must be fresh"
-        );
-    }
-
-    // Missing binary / missing manifest: cannot prove freshness, so counted as stale.
-    assert!(binary_is_stale(&dir.path().join("absent"), &manifest));
-    assert!(binary_is_stale(&bin, &dir.path().join("absent.toml")));
-
-    // The skip branch used by the CLI-merge leg agrees: a missing real
-    // binary is reported as stale-detected, so it is never exercised.
-    assert!(binary_is_stale(
-        &dir.path().join("absent-binary"),
-        &pesto_manifest()
-    ));
 }
 
 /// The full producer→aggregate→consumer proof (Body Std v1.2 §8):
@@ -244,17 +179,10 @@ fn stale_binary_detection_flags_older_binary_without_rebuild() {
 /// 4. The existing fake-server download proof reconstructs both plaintexts.
 #[tokio::test]
 async fn merged_cli_season_output_downloads_and_decrypts_both_episodes() {
-    // PT-03 FINAL single predicate: production decision is
-    // `penne::bin_lookup::pesto_binary()` -> `binary_is_stale()` only.
-    // No local find/stale re-check here (a second decision site).
-    // `pesto_binary` returns a fresh candidate, rebuilds at most once
-    // (accepted as current), returns the stale candidate with
-    // `stale_detected=true` when rebuild is impossible (e.g. CARGO
-    // unset), and returns None only when no candidate exists at all.
-    let Some(bin) = pesto_binary() else {
-        eprintln!("stale_detected=true: no pesto candidate; skipping CLI-merge leg");
-        return;
-    };
+    // PT-03: hard fail when the prebuilt binary is absent -- no skip, no
+    // rebuild attempt, no staleness decision anywhere.
+    let bin = find_pesto_bin()
+        .expect("prebuilt pesto binary not found; build workspace first (cargo build --bin pesto)");
     let password = "merged-season-proof-pass";
     let payload1: Vec<u8> = (0..200u32).map(|i| (i % 251) as u8).collect();
     let payload2: Vec<u8> = (0..200u32).map(|i| (i % 253) as u8).collect();
@@ -441,9 +369,9 @@ async fn merged_cli_season_output_downloads_and_decrypts_both_episodes() {
     );
 }
 
-/// PT-03 CARGO-unset/skip pattern: pure mtime predicate works without
+/// PT-03 CARGO-unset pattern: pure mtime predicate works without
 /// spawning cargo; stale (backdated) -> true, fresh -> false, missing -> true.
-/// Predicate-only: no real cargo rebuild is triggered.
+/// Predicate-only: no cargo is spawned.
 #[test]
 fn stale_binary_detection_without_cargo() {
     let dir = tempfile::tempdir().unwrap();
