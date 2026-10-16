@@ -30,7 +30,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::Arc;
 
-use penne::config::ServerTier;
+use penne::bin_lookup::{binary_is_stale, pesto_binary};
 use penne::download::download_queue_with_decryptor;
 use penne::nzb::{download_decryptor, load};
 use penne::queue::build;
