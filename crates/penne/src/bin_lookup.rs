@@ -173,15 +173,41 @@ mod tests {
     fn binary_is_stale_flags_older_binary_and_accepts_fresher_one() {
         let dir = tempfile::tempdir().unwrap();
         let manifest = dir.path().join("Cargo.toml");
-        std::fs::write(&manifest, b"[package]\nname = \"pesto\"\n").unwrap();
-        let fresh = dir.path().join("pesto-fresh");
-        std::fs::write(&fresh, b"fresh").unwrap();
-        assert!(!binary_is_stale(&fresh, &manifest));
-        let stale = dir.path().join("pesto-stale");
-        std::fs::write(&stale, b"stale").unwrap();
-        std::fs::write(&manifest, b"[package]\nname = \"pesto\"\n# touched\n").unwrap();
-        assert!(binary_is_stale(&stale, &manifest));
+        let bin = dir.path().join("pesto");
+
+        // Controlled mtimes (explicit, no write-ordering reliance):
+        // manifest pinned to a fixed instant, binary placed around it.
+        let manifest_time =
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        std::fs::write(&manifest, b"manifest").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&manifest)
+            .unwrap()
+            .set_modified(manifest_time)
+            .unwrap();
+        std::fs::write(&bin, b"bin").unwrap();
+
+        // Fresh: binary newer than manifest -> false.
+        std::fs::File::options()
+            .write(true)
+            .open(&bin)
+            .unwrap()
+            .set_modified(manifest_time + std::time::Duration::from_secs(3600))
+            .unwrap();
+        assert!(!binary_is_stale(&bin, &manifest));
+
+        // Stale: binary older than manifest -> true.
+        std::fs::File::options()
+            .write(true)
+            .open(&bin)
+            .unwrap()
+            .set_modified(manifest_time - std::time::Duration::from_secs(3600))
+            .unwrap();
+        assert!(binary_is_stale(&bin, &manifest));
+
+        // Missing binary / missing manifest: cannot prove freshness, stale.
         assert!(binary_is_stale(&dir.path().join("absent"), &manifest));
-        assert!(binary_is_stale(&fresh, &dir.path().join("absent.toml")));
+        assert!(binary_is_stale(&bin, &dir.path().join("absent.toml")));
     }
 }
