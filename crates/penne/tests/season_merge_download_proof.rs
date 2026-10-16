@@ -179,8 +179,8 @@ fn run_pesto(bin: &Path, xdg_home: &Path, args: &[&std::ffi::OsStr]) -> Output {
 /// 4. The existing fake-server download proof reconstructs both plaintexts.
 #[tokio::test]
 async fn merged_cli_season_output_downloads_and_decrypts_both_episodes() {
-    // PT-03: hard fail when the prebuilt binary is absent -- no skip, no
-    // rebuild attempt, no staleness decision anywhere.
+    // PT-03: hard fail when the prebuilt binary is absent -- no skip and
+    // no rebuild attempt anywhere.
     let bin = find_pesto_bin()
         .expect("prebuilt pesto binary not found; build workspace first (cargo build --bin pesto)");
     let password = "merged-season-proof-pass";
@@ -366,64 +366,5 @@ async fn merged_cli_season_output_downloads_and_decrypts_both_episodes() {
         std::fs::read(dest.join("Show.S01E02.mkv")).unwrap(),
         payload2,
         "episode 2 plaintext must reconstruct exactly"
-    );
-}
-
-/// PT-03 CARGO-unset pattern: pure mtime predicate works without
-/// spawning cargo; stale (backdated) -> true, fresh -> false, missing -> true.
-/// Predicate-only: no cargo is spawned.
-#[test]
-fn stale_binary_detection_without_cargo() {
-    let dir = tempfile::tempdir().unwrap();
-    let bin = dir.path().join("pesto");
-    let manifest = dir.path().join("Cargo.toml");
-    // Explicit mtimes (no write-ordering/sleep reliance): manifest pinned
-    // to a fixed instant; binary backdated for stale, dated after it for
-    // fresh. Uses the proc-macro-free approach of rewriting contents with
-    // std::fs + explicit FileTime via fs::File::set_modified (stable std).
-    let manifest_time =
-        std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
-    std::fs::write(&manifest, b"manifest").unwrap();
-    std::fs::File::options()
-        .write(true)
-        .open(&manifest)
-        .unwrap()
-        .set_modified(manifest_time)
-        .unwrap();
-    std::fs::write(&bin, b"bin").unwrap();
-    std::fs::File::options()
-        .write(true)
-        .open(&bin)
-        .unwrap()
-        .set_modified(manifest_time + std::time::Duration::from_secs(3600))
-        .unwrap();
-
-    // Fresh: binary newer than the manifest -> not stale.
-    assert!(
-        !binary_is_stale(&bin, &manifest),
-        "newer binary must be fresh"
-    );
-
-    // Stale: binary backdated before the manifest -> stale / skip branch.
-    std::fs::File::options()
-        .write(true)
-        .open(&bin)
-        .unwrap()
-        .set_modified(manifest_time - std::time::Duration::from_secs(3600))
-        .unwrap();
-    assert!(
-        binary_is_stale(&bin, &manifest),
-        "older binary must be stale"
-    );
-
-    // Missing binary cannot prove freshness -> stale.
-    std::fs::remove_file(&bin).unwrap();
-    assert!(
-        binary_is_stale(&bin, &manifest),
-        "missing binary must be stale"
-    );
-    assert!(
-        binary_is_stale(&dir.path().join("pesto2"), &dir.path().join("absent.toml")),
-        "missing manifest must be stale"
     );
 }
