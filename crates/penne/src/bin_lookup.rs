@@ -18,14 +18,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::SystemTime;
-
-/// Modification-time key for `path`: `None` when the file is missing or
-/// its metadata/mtime cannot be read.
-#[inline]
-fn mtime_key(path: &Path) -> Option<SystemTime> {
-    fs::metadata(path).and_then(|m| m.modified()).ok()
-}
 
 /// PT-03 stale-binary check: `binary` is stale iff it is older than
 /// `manifest` (the pesto crate manifest, `crates/pesto/Cargo.toml`).
@@ -34,7 +26,10 @@ fn mtime_key(path: &Path) -> Option<SystemTime> {
 /// exercising a possibly-outdated binary.
 #[doc(hidden)]
 pub fn binary_is_stale(binary: &Path, manifest: &Path) -> bool {
-    let (Some(bmtime), Some(mmtime)) = (mtime_key(binary), mtime_key(manifest)) else {
+    let Some(bmtime) = fs::metadata(binary).and_then(|m| m.modified()).ok() else {
+        return true;
+    };
+    let Some(mmtime) = fs::metadata(manifest).and_then(|m| m.modified()).ok() else {
         return true;
     };
     bmtime < mmtime

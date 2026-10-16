@@ -248,7 +248,7 @@ async fn merged_cli_season_output_downloads_and_decrypts_both_episodes() {
     // `penne::bin_lookup::pesto_binary()` -> `binary_is_stale()` only.
     // No local find/stale re-check here (a second decision site).
     // `pesto_binary` returns a fresh candidate, rebuilds at most once
-    // (no re-check, no stamp), returns the stale candidate with
+    // (accepted as current), returns the stale candidate with
     // `stale_detected=true` when rebuild is impossible (e.g. CARGO
     // unset), and returns None only when no candidate exists at all.
     let Some(bin) = pesto_binary() else {
