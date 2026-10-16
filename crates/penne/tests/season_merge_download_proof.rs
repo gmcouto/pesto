@@ -32,6 +32,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::Arc;
 
+use penne::binary_is_stale;
 use penne::config::ServerTier;
 use penne::download::download_queue_with_decryptor;
 use penne::nzb::{download_decryptor, load};
@@ -162,18 +163,6 @@ fn find_pesto_bin() -> Option<PathBuf> {
     candidates.into_iter().find(|p| p.exists())
 }
 
-/// PT-03 freshness: binary older than the pesto manifest counts as stale;
-/// missing/unreadable mtime on either side counts as stale. Guards against
-/// silently exercising an outdated prebuilt producer binary.
-fn binary_is_stale(binary: &Path, manifest: &Path) -> bool {
-    let Some(bmtime) = std::fs::metadata(binary).and_then(|m| m.modified()).ok() else {
-        return true;
-    };
-    let Some(mmtime) = std::fs::metadata(manifest).and_then(|m| m.modified()).ok() else {
-        return true;
-    };
-    bmtime < mmtime
-}
 fn pesto_manifest() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
