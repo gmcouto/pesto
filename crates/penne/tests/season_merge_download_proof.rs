@@ -14,7 +14,8 @@
 //! CLI so the combined NZB remains an actual CLI output. The prebuilt
 //! binary is located locally in this test file by `find_pesto_bin`
 //! without spawning cargo; the proof hard-fails when the binary is
-//! absent, so build the workspace first (`cargo build --bin pesto`).
+//! absent, and hard-fails when the binary is stale versus the pesto
+//! manifest, so build the workspace first (`cargo build --bin pesto`).
 //! The upload bytes themselves do not depend on which binary runs.
 //!
 //! Unlike `download_encryption.rs::merged_encrypted_release_with_multiple_salts_decrypts`
@@ -161,6 +162,26 @@ fn find_pesto_bin() -> Option<PathBuf> {
     candidates.into_iter().find(|p| p.exists())
 }
 
+/// PT-03 freshness: binary older than the pesto manifest counts as stale;
+/// missing/unreadable mtime on either side counts as stale. Guards against
+/// silently exercising an outdated prebuilt producer binary.
+fn binary_is_stale(binary: &Path, manifest: &Path) -> bool {
+    let Some(bmtime) = std::fs::metadata(binary).and_then(|m| m.modified()).ok() else {
+        return true;
+    };
+    let Some(mmtime) = std::fs::metadata(manifest).and_then(|m| m.modified()).ok() else {
+        return true;
+    };
+    bmtime < mmtime
+}
+fn pesto_manifest() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("penne lives under crates/")
+        .join("pesto")
+        .join("Cargo.toml")
+}
+
 fn run_pesto(bin: &Path, xdg_home: &Path, args: &[&std::ffi::OsStr]) -> Output {
     Command::new(bin)
         .env("XDG_CONFIG_HOME", xdg_home)
@@ -183,6 +204,11 @@ async fn merged_cli_season_output_downloads_and_decrypts_both_episodes() {
     // no rebuild attempt anywhere.
     let bin = find_pesto_bin()
         .expect("prebuilt pesto binary not found; build workspace first (cargo build --bin pesto)");
+    assert!(
+        !binary_is_stale(&bin, &pesto_manifest()),
+        "stale pesto binary {}; rebuild workspace first (cargo build --bin pesto)",
+        bin.display()
+    );
     let password = "merged-season-proof-pass";
     let payload1: Vec<u8> = (0..200u32).map(|i| (i % 251) as u8).collect();
     let payload2: Vec<u8> = (0..200u32).map(|i| (i % 253) as u8).collect();
@@ -367,4 +393,70 @@ async fn merged_cli_season_output_downloads_and_decrypts_both_episodes() {
         payload2,
         "episode 2 plaintext must reconstruct exactly"
     );
+}
+
+#[test]
+fn stale_binary_detection_flags_older_binary_without_rebuild() {
+    use std::time::{Duration, UNIX_EPOCH};
+    let root = tempfile::tempdir().unwrap();
+    let manifest = root.path().join("Cargo.toml");
+    let binary = root.path().join("pesto");
+    std::fs::write(&manifest, b"[package]\n").unwrap();
+    std::fs::write(&binary, b"binary").unwrap();
+    let base = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    std::fs::File::open(&manifest)
+        .unwrap()
+        .set_modified(base)
+        .unwrap();
+    // Binary newer than manifest by 3600s => not stale.
+    std::fs::File::open(&binary)
+        .unwrap()
+        .set_modified(base + Duration::from_secs(3600))
+        .unwrap();
+    assert!(!binary_is_stale(&binary, &manifest));
+    // Binary older than manifest by 3600s => stale.
+    std::fs::File::open(&binary)
+        .unwrap()
+        .set_modified(base - Duration::from_secs(3600))
+        .unwrap();
+    assert!(binary_is_stale(&binary, &manifest));
+    // Missing binary => stale.
+    assert!(binary_is_stale(
+        root.path().join("missing-bin").as_path(),
+        &manifest
+    ));
+    // Missing manifest => stale.
+    assert!(binary_is_stale(
+        &binary,
+        root.path().join("missing-Cargo.toml").as_path()
+    ));
+}
+
+#[test]
+fn stale_binary_detection_without_cargo() {
+    // Pure-predicate exercise: `binary_is_stale` takes only two paths and
+    // reads no CARGO_* env or manifest discovery, so this test uses only
+    // sealed temp files and no cargo/env involvement.
+    use std::time::{Duration, UNIX_EPOCH};
+    let root = tempfile::tempdir().unwrap();
+    let manifest = root.path().join("sealed-manifest.toml");
+    let binary = root.path().join("sealed-pesto");
+    assert!(binary_is_stale(&binary, &manifest));
+    std::fs::write(&manifest, b"manifest").unwrap();
+    std::fs::write(&binary, b"binary").unwrap();
+    let base = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    std::fs::File::open(&manifest)
+        .unwrap()
+        .set_modified(base)
+        .unwrap();
+    std::fs::File::open(&binary)
+        .unwrap()
+        .set_modified(base + Duration::from_secs(3600))
+        .unwrap();
+    assert!(!binary_is_stale(&binary, &manifest));
+    std::fs::File::open(&binary)
+        .unwrap()
+        .set_modified(base - Duration::from_secs(3600))
+        .unwrap();
+    assert!(binary_is_stale(&binary, &manifest));
 }
