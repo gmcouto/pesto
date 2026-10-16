@@ -422,32 +422,56 @@ mod tests {
     use super::*;
 
     #[test]
+    fn bare_encrypt_preserves_positional_files() {
+        let cli = Cli::try_parse_from(["pesto", "--encrypt", "file.mkv"]).unwrap();
+        assert_eq!(cli.encrypt, Some("".to_string()));
+        assert_eq!(cli.files, vec![PathBuf::from("file.mkv")]);
+    }
+
+    #[test]
+    fn explicit_encrypt_with_equals_preserves_positional_files() {
+        let cli = Cli::try_parse_from(["pesto", "--encrypt=my_secret", "file.mkv"]).unwrap();
+        assert_eq!(cli.encrypt, Some("my_secret".to_string()));
+        assert_eq!(cli.files, vec![PathBuf::from("file.mkv")]);
+    }
+
+    #[test]
+    fn encrypt_password_spelling_is_an_unknown_arg_error() {
+        // DEC-1: `--encrypt[=PASS]` is the only form. The removed
+        // `--encrypt-password` alias must not swallow `x` as its value or
+        // as an input file; any form of it is an unknown-arg error.
+        let err = Cli::try_parse_from(["pesto", "--encrypt-password=x", "file.mkv"]).unwrap_err();
+        assert!(
+            err.to_string().contains("--encrypt-password"),
+            "unknown-arg error must name the removed alias, got: {err}"
+        );
+        assert!(!err.to_string().contains("random"), "got: {err}");
+    }
+
+    #[test]
     fn bare_encrypt_prints_generated_password_once() {
         for format in ["text", "json"] {
-            // Cover the alias name too: both spellings reach the same flag.
-            for flag in ["--encrypt", "--encrypt-password="] {
-                let mut cli =
-                    Cli::try_parse_from(["pesto", flag, "--output-format", format, "file.bin"])
-                        .unwrap();
-                let mut stdout = Vec::new();
-                let mut stderr = Vec::new();
-                prepare_encrypt_password(&mut cli, &mut stdout, &mut stderr).unwrap();
-                let password = cli.overrides().encrypt_password.unwrap();
-                assert!(!password.is_empty());
-                prepare_encrypt_password(&mut cli, &mut stdout, &mut stderr).unwrap();
-                assert_eq!(
-                    cli.overrides().encrypt_password.as_deref(),
-                    Some(password.as_str())
-                );
-                let expected = format!("encryption password: {password}\n");
-                let (output, unused) = if format == "json" {
-                    (&stderr, &stdout)
-                } else {
-                    (&stdout, &stderr)
-                };
-                assert_eq!(output, expected.as_bytes());
-                assert!(unused.is_empty());
-            }
+            let mut cli =
+                Cli::try_parse_from(["pesto", "--encrypt", "--output-format", format, "file.bin"])
+                    .unwrap();
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            prepare_encrypt_password(&mut cli, &mut stdout, &mut stderr).unwrap();
+            let password = cli.overrides().encrypt_password.unwrap();
+            assert!(!password.is_empty());
+            prepare_encrypt_password(&mut cli, &mut stdout, &mut stderr).unwrap();
+            assert_eq!(
+                cli.overrides().encrypt_password.as_deref(),
+                Some(password.as_str())
+            );
+            let expected = format!("encryption password: {password}\n");
+            let (output, unused) = if format == "json" {
+                (&stderr, &stdout)
+            } else {
+                (&stdout, &stderr)
+            };
+            assert_eq!(output, expected.as_bytes());
+            assert!(unused.is_empty());
         }
     }
 }

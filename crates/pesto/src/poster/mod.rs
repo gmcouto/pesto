@@ -547,7 +547,7 @@ async fn push_par2_file(
         from,
         date,
         size,
-        file_index: if shared.config.file_counter {
+        file_index: if shared.config.file_counter || shared.encryption_adapter.is_some() {
             file_index
         } else {
             0

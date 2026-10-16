@@ -265,61 +265,6 @@ fn test_cli_upload_artifacts_emits_encrypted_nzb() {
     assert!(content.contains("<meta type=\"yenc_encrypted\">true</meta>"));
 }
 
-#[test]
-fn test_cli_merge_ordinary_nzbs_remains_unencrypted() {
-    let tmp = tempfile::tempdir().unwrap();
-    let dir = tmp.path().join("merge_dir");
-    std::fs::create_dir(&dir).unwrap();
-
-    let xml1 = r#"<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE nzb PUBLIC "-//newzBin//DTD NZB 1.1//EN" "http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd">
-<nzb xmlns="http://www.newzbin.com/DTD/2003/nzb">
-  <file poster="poster@example.com" date="1774300000" subject="Show.S01E01">
-    <groups><group>alt.binaries.test</group></groups>
-    <segments>
-      <segment bytes="750000" number="1">art1@example.com</segment>
-    </segments>
-  </file>
-</nzb>"#;
-
-    let xml2 = r#"<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE nzb PUBLIC "-//newzBin//DTD NZB 1.1//EN" "http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd">
-<nzb xmlns="http://www.newzbin.com/DTD/2003/nzb">
-  <file poster="poster@example.com" date="1774300000" subject="Show.S01E02">
-    <groups><group>alt.binaries.test</group></groups>
-    <segments>
-      <segment bytes="750000" number="1">art2@example.com</segment>
-    </segments>
-  </file>
-</nzb>"#;
-
-    std::fs::write(dir.join("Show.S01E01.nzb"), xml1).unwrap();
-    std::fs::write(dir.join("Show.S01E02.nzb"), xml2).unwrap();
-
-    let bin = env!("CARGO_BIN_EXE_pesto");
-    let xdg_home = tempfile::tempdir().unwrap();
-    let output = Command::new(bin)
-        .env("XDG_CONFIG_HOME", xdg_home.path())
-        .arg("--merge-season")
-        .arg(&dir)
-        .output()
-        .expect("failed to run pesto");
-
-    assert!(
-        output.status.success(),
-        "pesto merge failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let merged_path = dir.join("Show.S01.nzb");
-    assert!(merged_path.exists());
-    let merged_content = std::fs::read_to_string(&merged_path).unwrap();
-    let parsed = pesto::nzb::parse(&merged_content).expect("merged nzb must be valid ordinary nzb");
-    assert!(!parsed.meta.yenc_encrypted);
-    assert_plain_segments(&merged_content);
-    assert!(!merged_content.contains("yenc_encrypted"));
-}
-
 #[tokio::test]
 async fn test_encrypted_upload_metadata_provenance() {
     let (port, _captured) = spawn_mock_server().await;

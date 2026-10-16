@@ -195,16 +195,6 @@ pub struct UploadSessionIdentity {
     pub source_names: Vec<String>,
 }
 
-impl UploadSessionIdentity {
-    pub fn new(salt: [u8; 16], layout: crate::poster::ReleaseLayout) -> Self {
-        Self {
-            salt,
-            layout,
-            source_names: Vec::new(),
-        }
-    }
-}
-
 /// Persistent state for a single upload session.
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(default)]

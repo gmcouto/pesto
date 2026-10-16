@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use super::adapter::{parse_yencryption_line, DownloadDecryptionAdapter, UploadEncryptionAdapter};
-use super::body::{decrypt_body, encrypt_body};
+use super::body::{decrypt_body, encrypt_body, format_body_aad};
 use super::control::{self, extract_bootstrap_from_line1, ff1_decrypt_line, ff1_encrypt_line};
 use super::kdf::EncryptionSession;
 use crate::yenc::PartSpec;
@@ -44,6 +44,8 @@ struct Argon2idVector {
     transport_kdf_input: String,
     salt_hex: String,
     expected_key_hex: String,
+    #[serde(default)]
+    no_normalization_distinct_passwords: Option<Vec<String>>,
 }
 
 #[test]
@@ -67,6 +69,31 @@ fn test_argon2id_kdf_test_vectors() {
             "master key mismatch for vector {}",
             vec.id
         );
+
+        if let Some(triplet) = &vec.no_normalization_distinct_passwords {
+            assert_eq!(triplet.len(), 3, "vector {} triplet size", vec.id);
+            let mut keys: Vec<Vec<u8>> = Vec::new();
+            for password in triplet {
+                let s = EncryptionSession::new(password, salt)
+                    .unwrap_or_else(|e| panic!("session failed for vector {}: {e}", vec.id));
+                keys.push(s.master_key().to_vec());
+            }
+            assert_ne!(
+                keys[0], keys[1],
+                "vector {}: triplet keys 0/1 must differ",
+                vec.id
+            );
+            assert_ne!(
+                keys[0], keys[2],
+                "vector {}: triplet keys 0/2 must differ",
+                vec.id
+            );
+            assert_ne!(
+                keys[1], keys[2],
+                "vector {}: triplet keys 1/2 must differ",
+                vec.id
+            );
+        }
     }
 }
 
@@ -238,6 +265,10 @@ struct BodyEncryptionVector {
 #[derive(Deserialize)]
 struct AadVector {
     expected_aad_hex: String,
+    part_number: u32,
+    part_begin: u32,
+    segment_bytes: u64,
+    name_bytes_hex: String,
 }
 
 #[test]
@@ -256,12 +287,22 @@ fn test_body_encryption_test_vectors() {
         let nonce = session.derive_body_nonce(vec.segment_index);
 
         let plaintext = hex_decode(&vec.plaintext_hex);
-        let aad_hex = vec
-            .aad
-            .as_ref()
-            .map(|a| a.expected_aad_hex.clone())
-            .unwrap_or_default();
-        let aad = hex_decode(&aad_hex);
+        // Deserialize the AAD inputs and compute the AAD, validating
+        // `format_body_aad` against the vector's expected serialization.
+        let aad = match &vec.aad {
+            Some(a) => {
+                let name = hex_decode(&a.name_bytes_hex);
+                let computed = format_body_aad(a.part_number, a.part_begin, a.segment_bytes, &name);
+                assert_eq!(
+                    hex_encode(&computed),
+                    a.expected_aad_hex,
+                    "AAD mismatch for vector {}",
+                    vec.id
+                );
+                computed
+            }
+            None => Vec::new(),
+        };
         let (ct, tag) = encrypt_body(&plaintext, &aad, session.master_key(), &nonce)
             .unwrap_or_else(|e| panic!("encrypt failed for vector {}: {e}", vec.id));
 

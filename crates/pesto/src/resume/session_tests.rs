@@ -37,7 +37,11 @@ fn fingerprint_mismatch_invalidates_session_identity_and_salt() {
 
     let salt = [0x55u8; 16];
     let layout = ReleaseLayout::from_parts(1, &[(1, 2)]).unwrap();
-    s.set_session_identity(UploadSessionIdentity::new(salt, layout));
+    s.set_session_identity(UploadSessionIdentity {
+        salt,
+        layout,
+        source_names: names(&["a.bin"]),
+    });
     s.record("a.bin", 1, "id1@x", 100);
     assert_eq!(s.session_salt(), Some(&salt));
 
@@ -72,7 +76,11 @@ fn session_identity_round_trip() {
 
     let salt = [0x5au8; 16];
     let layout = ReleaseLayout::from_parts(2, &[(1, 2), (2, 3)]).unwrap();
-    state.set_session_identity(UploadSessionIdentity::new(salt, layout.clone()));
+    state.set_session_identity(UploadSessionIdentity {
+        salt,
+        layout: layout.clone(),
+        source_names: names(&["file1.bin", "file2.bin"]),
+    });
 
     state.record_with(
         "file1.bin",
@@ -114,7 +122,7 @@ fn session_identity_round_trip() {
 
     // The unchanged layout still validates on the loaded state, and a
     // pre-schema record (no session identity) loads with identity unset.
-    assert!(loaded2.validate_session(&layout, &[]));
+    assert!(loaded2.validate_session(&layout, &names(&["file1.bin", "file2.bin"])));
     let json = r#"{"files":{},"segments":{"a.bin\u00001":{"message_id":"id1@x","bytes":100}}}"#;
     let loaded: ResumeState = serde_json::from_str(json).unwrap();
     assert!(loaded.session_salt().is_none());
@@ -131,7 +139,11 @@ fn session_validation_invalidates_all_state_on_layout_mismatches() {
 
     let make_state = || {
         let mut s = ResumeState::default();
-        s.set_session_identity(UploadSessionIdentity::new(salt, base_layout.clone()));
+        s.set_session_identity(UploadSessionIdentity {
+            salt,
+            layout: base_layout.clone(),
+            source_names: names(&["a.bin", "b.bin"]),
+        });
         s.set_archive_stem("arch_stem".into());
         s.set_release_identity("rel_prefix".into(), "rel_from".into());
         s.record_file(

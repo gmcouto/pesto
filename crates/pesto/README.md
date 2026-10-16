@@ -424,6 +424,9 @@ and Control Lines Encryption Standards v1.2 — see the
 [Encryption section](../../README.md#encryption-yenc-body--control-lines) in
 the root README for wire format, CLI usage, configuration, and status.
 
+> **Removed:** `--encrypt-password` was previously accepted as an alias of
+> `--encrypt`; it was removed — use `--encrypt` / `--encrypt=PASSWORD` only.
+
 ---
 
 ## PAR2 recovery data
@@ -1074,7 +1077,7 @@ picked up automatically — no config change needed.
 | `--compress-volume-size <SIZE>` | `compression.volume_size` | off | Split the archive into volumes (e.g. `500m`, `4g`); `rar`/`7z` only, rejected with `--compress=zip` |
 | `--password [PASSWORD]` | — | — | Archive password; bare flag = random |
 | **Encryption** | | | |
-| `--encrypt [PASSWORD]` | `encryption.password` | off | Enable yEnc body & control-line encryption; bare flag generates random password; `--encrypt-password` is an alias |
+| `--encrypt [PASSWORD]` | `encryption.password` | off | Enable yEnc body & control-line encryption; bare flag generates random password |
 | **Output** | | | |
 | `-o`, `--out <PATH>` | `output.nzb` | derived | Explicit `.nzb` output path |
 | `--nzb-dir <DIR>` | `output.nzb_dir` | — | Directory where `.nzb` files are saved |

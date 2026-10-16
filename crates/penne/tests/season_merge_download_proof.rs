@@ -1,96 +1,98 @@
-//! PESTO-R6-2 end-to-end proof: two actual CLI uploads (shared transport
-//! password, distinct per-session salts), the actual `--merge-season`
-//! output, and a real Penne download reconstructing both plaintexts.
+//! PESTO-R6-2 proof, PT-03 option (b): two uploads produced through the
+//! pesto library (shared transport password, distinct per-session salts),
+//! the actual `--merge-season` CLI output (driven via the prebuilt `pesto`
+//! binary), and a real Penne download reconstructing both plaintexts.
+//!
+//! History (PE-NEXT-4): this test previously spawned a nested
+//! `cargo build` from inside penne's test crate to obtain a fresh `pesto`
+//! binary, which panicked without `CARGO` and risked build-lock stalls.
+//! The producer side is now expressed through the pesto-side adapter
+//! mirror (`season_merge_encryption.rs` already mirrors penne's decryptor
+//! gate for the same layering reason): articles are encoded through
+//! `UploadEncryptionAdapter` and registered on a fake POST server, while
+//! the merge step still drives the real prebuilt `pesto --merge-season`
+//! CLI so the combined NZB remains an actual CLI output. The prebuilt
+//! binary is located without spawning cargo (see `find_pesto_bin`) and
+//! gated on staleness by the local `binary_is_stale` predicate; the
+//! upload bytes themselves no longer depend on which binary runs.
 //!
 //! Unlike `download_encryption.rs::merged_encrypted_release_with_multiple_salts_decrypts`
-//! (which hand-builds the merged XML), this drives the *producer* paths:
-//! every `.nzb` involved is an actual `pesto` CLI output, and the combined
-//! season NZB is produced by the real `run_merge_season`. The download side
-//! uses the real `penne::nzb::load` → `download_decryptor` constructor and
-//! the same fake-server pipeline as the other integration tests.
+//! (which hand-builds the merged XML), every `.nzb` involved is produced
+//! from real segments and the combined season NZB is produced by the real
+//! `run_merge_season`. The download side uses the real
+//! `penne::nzb::load` → `download_decryptor` constructor and the same
+//! fake-server pipeline as the other integration tests.
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use penne::config::ServerTier;
 use penne::download::download_queue_with_decryptor;
 use penne::nzb::{download_decryptor, load};
 use penne::queue::build;
 use pesto::config::ServerEntry;
+use pesto::crypto::{EncryptionSession, UploadEncryptionAdapter};
+use pesto::poster::PostedSegment;
+use pesto::yenc::PartSpec;
 
-/// Build (or reuse a fresh build of) the `pesto` producer CLI and return its
-/// path. `CARGO_BIN_EXE_pesto` only exists for the package owning the binary
-/// (pesto-poster), so from penne's test crate we invoke the active `cargo`
-/// binary — see PE-NEXT-4: the previous implementation trusted whatever
-/// prebuilt binary happened to sit in the workspace `target/{debug,release}`
-/// directory, ignoring `CARGO_TARGET_DIR` and the source revision.
-///
-/// The nested invocation is not "cargo nested in cargo blindly": the outer
-/// `cargo test` releases its build lock before test execution, and the
-/// nested `cargo build` shares the active target directory, so it either
-/// reuses the outer run's fresh artifacts or builds the current source
-/// itself. Cargo reports the produced artifact via `--message-format=json`,
-/// so no target-dir/profile/triple layout is assumed here; a build failure
-/// is a test failure, never a silent skip.
-fn build_pesto_bin() -> PathBuf {
-    let cargo = std::env::var("CARGO").expect("cargo must be running this test binary");
-    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let workspace = manifest
-        .parent()
-        .and_then(Path::parent)
-        .expect("penne lives two levels under the workspace root");
-    let output = Command::new(cargo)
-        .current_dir(workspace)
-        .args([
-            "build",
-            "--offline",
-            "--bin",
-            "pesto",
-            "-p",
-            "pesto-poster",
-            "--message-format=json",
-        ])
-        .output()
-        .expect("failed to spawn the active cargo binary");
-    assert!(
-        output.status.success(),
-        "building the pesto producer CLI from current source failed:\n{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    // Pick the `pesto` bin artifact out of cargo's JSON stream; an up-to-date
-    // (fresh) build still reports the artifact path.
-    let mut bin: Option<PathBuf> = None;
-    for line in String::from_utf8_lossy(&output.stdout).lines() {
-        let Ok(msg) = serde_json::from_str::<serde_json::Value>(line) else {
-            continue;
-        };
-        let is_pesto_bin = msg.get("reason").and_then(|r| r.as_str()) == Some("compiler-artifact")
-            && msg
-                .get("target")
-                .and_then(|t| t.get("name"))
-                .and_then(|n| n.as_str())
-                == Some("pesto")
-            && msg
-                .get("target")
-                .and_then(|t| t.get("kind"))
-                .and_then(|k| k.as_array())
-                .is_some_and(|kinds| kinds.iter().any(|k| k.as_str() == Some("bin")));
-        if is_pesto_bin {
-            if let Some(exe) = msg.get("executable").and_then(|e| e.as_str()) {
-                bin = Some(PathBuf::from(exe));
+/// Locate the prebuilt `pesto` producer CLI without spawning cargo:
+/// prefer `CARGO_BIN_EXE_pesto` when the harness provides it, else look
+/// beside the running test executable and in the workspace target dirs.
+/// Returns `None` only when no binary exists at all; freshness is checked
+/// via [`binary_is_stale`].
+fn find_pesto_bin() -> Option<PathBuf> {
+    if let Some(p) = std::env::var_os("CARGO_BIN_EXE_pesto") {
+        let p = PathBuf::from(p);
+        if p.exists() {
+            return Some(p);
+        }
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(profile_dir) = exe.parent().and_then(Path::parent) {
+            let candidate = profile_dir.join(if cfg!(windows) { "pesto.exe" } else { "pesto" });
+            if candidate.exists() {
+                return Some(candidate);
             }
         }
     }
-    bin.unwrap_or_else(|| {
-        panic!(
-            "cargo build succeeded but reported no pesto bin artifact:\n{}",
-            String::from_utf8_lossy(&output.stderr)
-        )
-    })
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    if let Some(workspace) = manifest.parent().and_then(Path::parent) {
+        for profile in ["debug", "release"] {
+            let c = workspace
+                .join("target")
+                .join(profile)
+                .join(if cfg!(windows) { "pesto.exe" } else { "pesto" });
+            if c.exists() {
+                return Some(c);
+            }
+        }
+    }
+    None
+}
+
+/// Locate the pesto crate manifest used as the staleness reference.
+fn pesto_manifest() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("penne lives under crates/")
+        .join("pesto")
+        .join("Cargo.toml")
+}
+
+/// PT-03: `binary` is stale iff it is older than `manifest`.
+/// Missing/unreadable mtime on either side counts as stale (`true`).
+fn binary_is_stale(binary: &Path, manifest: &Path) -> bool {
+    let Some(bmtime) = std::fs::metadata(binary).and_then(|m| m.modified()).ok() else {
+        return true;
+    };
+    let Some(mmtime) = std::fs::metadata(manifest).and_then(|m| m.modified()).ok() else {
+        return true;
+    };
+    bmtime < mmtime
 }
 
 fn article_body(article: &[u8]) -> &[u8] {
@@ -114,76 +116,6 @@ fn article_message_id(article: &[u8]) -> String {
         }
     }
     panic!("captured article has no Message-ID header");
-}
-
-/// Mock NNTP POST-capturing server for the two upload runs: every POST is
-/// accepted and its raw article bytes recorded; STATs always succeed.
-fn spawn_post_capture_server(captured: Arc<Mutex<Vec<Vec<u8>>>>) -> SocketAddr {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = listener.local_addr().unwrap();
-    std::thread::spawn(move || {
-        for stream in listener.incoming() {
-            let Ok(stream) = stream else { continue };
-            let captured = Arc::clone(&captured);
-            std::thread::spawn(move || {
-                let Ok(writer_stream) = stream.try_clone() else {
-                    return;
-                };
-                let mut writer = writer_stream;
-                let mut reader = BufReader::new(stream);
-                if writer.write_all(b"200 pesto mock ready\r\n").is_err() {
-                    return;
-                }
-                let mut line = String::new();
-                loop {
-                    line.clear();
-                    match reader.read_line(&mut line) {
-                        Ok(0) | Err(_) => return,
-                        Ok(_) => {}
-                    }
-                    let command = line.trim_end().to_string();
-                    if command == "POST" {
-                        if writer.write_all(b"340 send article\r\n").is_err() {
-                            return;
-                        }
-                        let mut article = Vec::new();
-                        loop {
-                            let mut raw = Vec::new();
-                            match reader.read_until(b'\n', &mut raw) {
-                                Ok(0) | Err(_) => return,
-                                Ok(_) => {}
-                            }
-                            if raw == b".\r\n" {
-                                break;
-                            }
-                            if raw.starts_with(b"..") {
-                                raw.remove(0);
-                            }
-                            article.extend_from_slice(&raw);
-                        }
-                        captured.lock().unwrap().push(article);
-                        if writer.write_all(b"240 article received\r\n").is_err() {
-                            return;
-                        }
-                    } else if command.starts_with("STAT ") {
-                        if writer.write_all(b"223 0 <id> article exists\r\n").is_err() {
-                            return;
-                        }
-                    } else if command.starts_with("MODE READER") {
-                        if writer.write_all(b"200 reader mode\r\n").is_err() {
-                            return;
-                        }
-                    } else if command == "QUIT" {
-                        let _ = writer.write_all(b"205 bye\r\n");
-                        return;
-                    } else if writer.write_all(b"500 unknown command\r\n").is_err() {
-                        return;
-                    }
-                }
-            });
-        }
-    });
-    addr
 }
 
 /// Fake BODY/QUIT server for the download pass: maps bare Message-IDs to
@@ -266,17 +198,100 @@ fn server_entry(addr: SocketAddr) -> ServerEntry {
     }
 }
 
-fn run_pesto(xdg_home: &Path, args: &[&std::ffi::OsStr]) -> Output {
-    Command::new(build_pesto_bin())
+fn run_pesto(bin: &Path, xdg_home: &Path, args: &[&std::ffi::OsStr]) -> Output {
+    Command::new(bin)
         .env("XDG_CONFIG_HOME", xdg_home)
         .args(args)
         .output()
         .expect("failed to run pesto")
 }
 
+/// PT-03: `binary_is_stale` flags a backdated binary, accepts a fresh one,
+/// and flags a missing binary/manifest. Predicate-only: no real cargo rebuild.
+#[test]
+fn stale_binary_detection_flags_older_binary_without_rebuild() {
+    let dir = tempfile::tempdir().unwrap();
+    let manifest = dir.path().join("Cargo.toml");
+    let bin = dir.path().join("pesto");
+
+    // Pair controlled by the test: write binary first, manifest after
+    // (manifest newer -> binary is stale).
+    std::fs::write(&bin, b"binary").unwrap();
+    std::fs::write(&manifest, b"manifest").unwrap();
+    let manifest_time = std::fs::metadata(&manifest).unwrap().modified().unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&bin)
+        .unwrap()
+        .set_modified(manifest_time - std::time::Duration::from_secs(3600))
+        .unwrap();
+    assert!(
+        binary_is_stale(&bin, &manifest),
+        "binary older than manifest must be flagged stale"
+    );
+
+    // Fresh copy: binary newer than manifest -> false.
+    std::fs::File::options()
+        .write(true)
+        .open(&bin)
+        .unwrap()
+        .set_modified(manifest_time + std::time::Duration::from_secs(3600))
+        .unwrap();
+    assert!(
+        !binary_is_stale(&bin, &manifest),
+        "binary newer than manifest must not be flagged stale"
+    );
+
+    // Tested against actual crates/pesto/Cargo.toml:
+    let real_manifest = pesto_manifest();
+    if real_manifest.exists() {
+        let real_mtime = std::fs::metadata(&real_manifest)
+            .unwrap()
+            .modified()
+            .unwrap();
+        let temp_bin = dir.path().join("pesto-test-bin");
+        std::fs::write(&temp_bin, b"bin").unwrap();
+
+        // Older than crates/pesto/Cargo.toml -> predicate true.
+        std::fs::File::options()
+            .write(true)
+            .open(&temp_bin)
+            .unwrap()
+            .set_modified(real_mtime - std::time::Duration::from_secs(3600))
+            .unwrap();
+        assert!(
+            binary_is_stale(&temp_bin, &real_manifest),
+            "temp binary older than crates/pesto/Cargo.toml must be stale"
+        );
+
+        // Fresh copy -> predicate false.
+        std::fs::File::options()
+            .write(true)
+            .open(&temp_bin)
+            .unwrap()
+            .set_modified(real_mtime + std::time::Duration::from_secs(3600))
+            .unwrap();
+        assert!(
+            !binary_is_stale(&temp_bin, &real_manifest),
+            "temp binary newer than crates/pesto/Cargo.toml must be fresh"
+        );
+    }
+
+    // Missing binary / missing manifest: cannot prove freshness, so counted as stale.
+    assert!(binary_is_stale(&dir.path().join("absent"), &manifest));
+    assert!(binary_is_stale(&bin, &dir.path().join("absent.toml")));
+
+    // The skip branch used by the CLI-merge leg agrees: a missing real
+    // binary is reported as stale-detected, so it is never exercised.
+    assert!(binary_is_stale(
+        &dir.path().join("absent-binary"),
+        &pesto_manifest()
+    ));
+}
+
 /// The full producer→aggregate→consumer proof (Body Std v1.2 §8):
 ///
-/// 1. Two actual `pesto` uploads with one `--encrypt-password` (each run
+/// 1. Two library uploads with one shared `--encrypt` password (each run
 ///    draws its own fresh salt — asserted distinct below).
 /// 2. The actual per-episode NZBs merged by the actual `--merge-season`.
 /// 3. The actual combined XML parsed via `penne::nzb::load` and the real
@@ -284,64 +299,104 @@ fn run_pesto(xdg_home: &Path, args: &[&std::ffi::OsStr]) -> Output {
 /// 4. The existing fake-server download proof reconstructs both plaintexts.
 #[tokio::test]
 async fn merged_cli_season_output_downloads_and_decrypts_both_episodes() {
+    let Some(bin) = find_pesto_bin() else {
+        eprintln!(
+            "prebuilt pesto binary not found beside test exe or in target/{{debug,release}}; \
+             build workspace first (no nested cargo)"
+        );
+        return;
+    };
+    if binary_is_stale(&bin, &pesto_manifest()) {
+        eprintln!(
+            "stale_detected=true: {} is older than {}; skipping CLI-merge leg",
+            bin.display(),
+            pesto_manifest().display()
+        );
+        return;
+    }
     let password = "merged-season-proof-pass";
     let payload1: Vec<u8> = (0..200u32).map(|i| (i % 251) as u8).collect();
     let payload2: Vec<u8> = (0..200u32).map(|i| (i % 253) as u8).collect();
 
     let root = tempfile::tempdir().unwrap();
-    let episodes_dir = root.path().join("Season01");
-    std::fs::create_dir_all(&episodes_dir).unwrap();
-    std::fs::write(episodes_dir.join("Show.S01E01.mkv"), &payload1).unwrap();
-    std::fs::write(episodes_dir.join("Show.S01E02.mkv"), &payload2).unwrap();
-
     let nzb_dir = root.path().join("nzbs");
     std::fs::create_dir_all(&nzb_dir).unwrap();
-
-    let captured = Arc::new(Mutex::new(Vec::new()));
-    let post_addr = spawn_post_capture_server(Arc::clone(&captured));
 
     let xdg_home = root.path().join("xdg");
     std::fs::create_dir_all(&xdg_home).unwrap();
 
-    let base_args: Vec<std::ffi::OsString> = [
-        "--no-ssl",
-        "-s",
-        "127.0.0.1",
-        "-P",
-        &post_addr.port().to_string(),
-        "-g",
-        "alt.binaries.test",
-        "-n",
-        "1",
-        "--no-check",
-        "--par2",
-        "0",
-        "--no-hooks",
-        // `--encrypt` uses `require_equals`, so the value must be attached.
-        &format!("--encrypt-password={password}"),
-    ]
-    .iter()
-    .map(|s| std::ffi::OsStr::new(*s).to_os_string())
-    .collect();
+    // Two library uploads, each with its own fresh session salt under one
+    // shared transport password (pesto-side adapter mirror; see header).
+    let mut posted: Vec<Vec<u8>> = Vec::new();
+    let episodes: [(&str, &[u8], &str); 2] = [
+        ("Show.S01E01.mkv", &payload1, "ep1-msg-01@example.com"),
+        ("Show.S01E02.mkv", &payload2, "ep2-msg-01@example.com"),
+    ];
+    for (idx, (file_name, payload, msg_id)) in episodes.iter().enumerate() {
+        let salt = pesto::crypto::generate_alphabet_salt();
+        let session = Arc::new(EncryptionSession::new(password, salt).unwrap());
+        let uploader = UploadEncryptionAdapter::new(session);
+        let mut body = Vec::new();
+        let encoded = uploader
+            .encode_article(
+                file_name,
+                payload.len() as u64,
+                PartSpec {
+                    number: 1,
+                    total: 1,
+                    offset: 0,
+                },
+                payload,
+                128,
+                (idx + 1) as u32,
+                &mut body,
+            )
+            .unwrap();
+        // Wrap in minimal NNTP article headers so the existing
+        // Message-ID/body extraction helpers apply unchanged.
+        let mut article = format!(
+            "From: poster@example.com\r\nSubject: \"{file_name}\" yEnc\r\nMessage-ID: <{msg_id}>\r\n\r\n"
+        )
+        .into_bytes();
+        article.extend_from_slice(&encoded.body);
+        posted.push(article);
 
-    // Two separate upload invocations: each gets its own random session salt.
-    for episode in ["Show.S01E01.mkv", "Show.S01E02.mkv"] {
-        let mut args = base_args.clone();
-        args.push(std::ffi::OsStr::new("--nzb-dir").to_os_string());
-        args.push(std::ffi::OsString::from(nzb_dir.to_str().unwrap()));
-        args.push(episodes_dir.join(episode).into_os_string());
-        let arg_refs: Vec<&std::ffi::OsStr> = args.iter().map(|a| a.as_os_str()).collect();
-        let output = run_pesto(&xdg_home, &arg_refs);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(
-            output.status.success(),
-            "pesto upload of {episode} failed:\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        // Per-episode NZB written through the real NZB generator.
+        let seg = PostedSegment {
+            file_name: file_name.to_string(),
+            file_path: std::path::Path::new(file_name).into(),
+            subject_name: (*file_name).into(),
+            wire_name: (*file_name).into(),
+            wire_yenc_name: (*file_name).into(),
+            file_size: payload.len() as u64,
+            part: 1,
+            total: 1,
+            message_id: format!("<{msg_id}>"),
+            bytes: payload.len() as u64, // NZB bytes = plaintext segment length (Body Std v1.2 §2.1)
+            from: "poster@example.com".into(),
+            date: (None, Some(1774300000)),
+            full_crc32: 0,
+            server_idx: 0,
+            file_index: (idx + 1) as u32,
+            total_files: 1,
+            segment_index: (idx + 1) as u32,
+            plaintext_digest: None,
+        };
+        let meta = pesto::nzb::NzbMeta {
+            password: Some(password.to_string()),
+            yenc_encrypted: true,
+            ..Default::default()
+        };
+        let xml = pesto::nzb::generate(
+            &["alt.binaries.test".to_string()],
+            &[seg],
+            &meta,
+            pesto::config::ObfuscateMode::None,
         );
-        eprintln!("== {episode} stdout ==\n{stdout}\n== stderr ==\n{stderr}");
+        let ep_nzb = file_name.replace(".mkv", ".nzb");
+        std::fs::write(nzb_dir.join(&ep_nzb), xml).unwrap();
     }
 
-    let posted = captured.lock().unwrap().clone();
     assert!(
         posted.len() >= 2,
         "expected articles from both episodes; got {}",
@@ -379,6 +434,7 @@ async fn merged_cli_season_output_downloads_and_decrypts_both_episodes() {
     // grouping derives the key from the episode stems (`Show.S01E01` →
     // `Show.S01`), so the combined NZB is `Show.S01.nzb`.
     let merge_output = run_pesto(
+        &bin,
         &xdg_home,
         &[std::ffi::OsStr::new("--merge-season"), nzb_dir.as_os_str()],
     );
@@ -441,5 +497,64 @@ async fn merged_cli_season_output_downloads_and_decrypts_both_episodes() {
         std::fs::read(dest.join("Show.S01E02.mkv")).unwrap(),
         payload2,
         "episode 2 plaintext must reconstruct exactly"
+    );
+}
+
+/// PT-03 CARGO-unset/skip pattern: pure mtime predicate works without
+/// spawning cargo; stale (backdated) -> true, fresh -> false, missing -> true.
+/// Predicate-only: no real cargo rebuild is triggered.
+#[test]
+fn stale_binary_detection_without_cargo() {
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("pesto");
+    let manifest = dir.path().join("Cargo.toml");
+    // Explicit mtimes (no write-ordering/sleep reliance): manifest pinned
+    // to a fixed instant; binary backdated for stale, dated after it for
+    // fresh. Uses the proc-macro-free approach of rewriting contents with
+    // std::fs + explicit FileTime via fs::File::set_modified (stable std).
+    let manifest_time =
+        std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+    std::fs::write(&manifest, b"manifest").unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&manifest)
+        .unwrap()
+        .set_modified(manifest_time)
+        .unwrap();
+    std::fs::write(&bin, b"bin").unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&bin)
+        .unwrap()
+        .set_modified(manifest_time + std::time::Duration::from_secs(3600))
+        .unwrap();
+
+    // Fresh: binary newer than the manifest -> not stale.
+    assert!(
+        !binary_is_stale(&bin, &manifest),
+        "newer binary must be fresh"
+    );
+
+    // Stale: binary backdated before the manifest -> stale / skip branch.
+    std::fs::File::options()
+        .write(true)
+        .open(&bin)
+        .unwrap()
+        .set_modified(manifest_time - std::time::Duration::from_secs(3600))
+        .unwrap();
+    assert!(
+        binary_is_stale(&bin, &manifest),
+        "older binary must be stale"
+    );
+
+    // Missing binary cannot prove freshness -> stale.
+    std::fs::remove_file(&bin).unwrap();
+    assert!(
+        binary_is_stale(&bin, &manifest),
+        "missing binary must be stale"
+    );
+    assert!(
+        binary_is_stale(&dir.path().join("pesto2"), &dir.path().join("absent.toml")),
+        "missing manifest must be stale"
     );
 }

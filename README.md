@@ -584,8 +584,10 @@ pesto --encrypt movie.mkv
 
 # Encrypt with an explicit password
 pesto --encrypt=MySecret42 movie.mkv
-# `--encrypt-password=MySecret42` is an alias of `--encrypt=MySecret42`
 ```
+
+> **Removed:** `--encrypt-password` was previously accepted as an alias of
+> `--encrypt`; it was removed — use `--encrypt` / `--encrypt=PASSWORD` only.
 
 ### Configuration
 
@@ -1276,7 +1278,7 @@ picked up automatically — no config change needed.
 | `--compress-temp-dir <DIR>` | `compression.temp_dir` | OS temp dir | Where the `--compress` archive is staged before posting |
 | `--password [PASSWORD]` | — | — | Archive password; bare flag = random |
 | **Encryption** | | | |
-| `--encrypt [PASSWORD]` | `encryption.password` | off | Enable yEnc body & control-line encryption; bare flag generates random password; `--encrypt-password` is an alias |
+| `--encrypt [PASSWORD]` | `encryption.password` | off | Enable yEnc body & control-line encryption; bare flag generates random password |
 | **Output** | | | |
 | `-o`, `--out <PATH>` | `output.nzb` | derived | Explicit `.nzb` output path |
 | `--nzb-dir <DIR>` | `output.nzb_dir` | — | Directory where `.nzb` files are saved |

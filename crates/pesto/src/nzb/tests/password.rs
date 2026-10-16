@@ -30,23 +30,6 @@ fn bare_ampersand_nzb_parses_as_upstream() {
 }
 
 #[test]
-fn password_with_newline_and_tab_round_trips() {
-    let complex_password = "first-line\nsecond-line\twith tab and Schlüssel🔑";
-    let meta = NzbMeta {
-        password: Some(complex_password.to_string()),
-        yenc_encrypted: true,
-        ..Default::default()
-    };
-    let xml = generate(&["alt.test".into()], &[], &meta, ObfuscateMode::None);
-    let parsed = parse(&xml).expect("generated XML with complex password must parse");
-    assert_eq!(
-        parsed.meta.password.as_deref(),
-        Some(complex_password),
-        "password with newline and tab must round-trip byte-for-byte"
-    );
-}
-
-#[test]
 fn password_preserves_lf_tab_non_ascii_verbatim() {
     // passwords containing LF, tabs, and non-ASCII UTF-8 bytes
     // must survive generation and parsing without alteration or trimming.

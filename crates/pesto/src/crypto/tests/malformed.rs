@@ -182,8 +182,59 @@ fn test_malformed_inputs_rejection() {
                 );
             }
             "placement" => {
-                if vec.get("has_part_on_ybegin").is_some() {
-                    // Contradictory framing vectors : verified by standards suite
+                if let (Some(has_part), Some(is_ypart)) = (
+                    vec.get("has_part_on_ybegin").and_then(|v| v.as_bool()),
+                    vec.get("is_ypart_on_line2").and_then(|v| v.as_bool()),
+                ) {
+                    // placement-03/04 carry only framing flags and no
+                    // wire bytes: synthesize a contradictory-framing
+                    // article from those flags, encrypt its control
+                    // lines, and drive it through the production
+                    // restoration (Control Std v1.2 §5).
+                    let password = "placement-contradiction-password";
+                    let salt = control::generate_alphabet_salt();
+                    let session = Arc::new(EncryptionSession::new(password, salt).unwrap());
+                    let segment_index = 1u32;
+                    // `=yencryption` placement follows line 2, so the
+                    // salt/index/tag tokens just need to be well-formed.
+                    let mut salt_hex = String::new();
+                    for b in salt {
+                        use std::fmt::Write as _;
+                        write!(&mut salt_hex, "{b:02x}").unwrap();
+                    }
+                    let yenc_line = format!(
+                        "=yencryption cipher=XChaCha20-Poly1305 salt={salt_hex} index=00000001 tag=00000000000000000000000000000000"
+                    );
+                    let restored_block: Vec<u8> = if has_part && !is_ypart {
+                        // placement-04: single-part placement (line 2
+                        // is =yencryption) but =ybegin carries part=.
+                        format!(
+                            "=ybegin part=1 total=1 line=128 size=4 name=place.bin\r\n{yenc_line}\r\ndata\r\n=yend size=4\r\n"
+                        )
+                        .into_bytes()
+                    } else if !has_part && is_ypart {
+                        // placement-03: line 2 is =ypart but =ybegin
+                        // has no part=.
+                        format!(
+                            "=ybegin line=128 size=4 name=place.bin\r\n=ypart begin=1 end=4\r\n{yenc_line}\r\ndata\r\n=yend size=4\r\n"
+                        )
+                        .into_bytes()
+                    } else {
+                        panic!("vector {id}: unexpected framing flag combination");
+                    };
+                    let wire = control::encrypt_yenc_control_lines(
+                        &session,
+                        segment_index,
+                        &restored_block,
+                    )
+                    .unwrap();
+                    let res = control::decrypt_yenc_control_lines(&session, segment_index, &wire);
+                    let err = res.unwrap_err();
+                    let msg = err.to_string();
+                    assert!(
+                        msg.contains(expected_err),
+                        "vector {id} error '{msg}' should contain '{expected_err}'"
+                    );
                     continue;
                 }
                 // The vector says the =yencryption header sits at the wrong

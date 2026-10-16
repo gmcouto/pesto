@@ -319,8 +319,7 @@ pub(super) struct Cli {
         value_name = "PASSWORD",
         num_args = 0..=1,
         default_missing_value = "",
-        require_equals = true,
-        alias = "encrypt-password"
+        require_equals = true
     )]
     pub(super) encrypt: Option<String>,
 
@@ -789,6 +788,3 @@ impl Cli {
         }
     }
 }
-
-#[cfg(test)]
-mod tests;

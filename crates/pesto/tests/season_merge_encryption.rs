@@ -2,9 +2,9 @@
 //! yEnc encryption provenance (Body Encryption Standard v1.2 §8).
 //!
 //! Covered producer paths:
-//! - `--merge-season` (`bin/pesto/merge.rs`): the first encrypted source in
-//!   the existing sorted source order donates its marker and shared
-//!   transport password to the combined metadata;
+//! - `--merge-season` (`bin/pesto/merge.rs`): all sources in a group must
+//!   agree on encryption mode and, when encrypted, on the shared transport
+//!   password; a mismatch or a mixed encrypted/unencrypted group errors;
 //! - `--dry-run --season` (`bin/pesto/batch.rs::run_batch`): the season pack
 //!   gets the same marker and password precedence as the per-episode
 //!   artifacts (`encrypt_password` → `nzb_password` → archive fallback).
@@ -57,8 +57,7 @@ fn assert_plain_segments(xml: &str) {
 
 /// PESTO-R6-2: `--merge-season` over two *encrypted* episode NZBs (distinct
 /// salts, one transport password) must retain the `yenc_encrypted` marker and
-/// the shared transport password from the first encrypted source in sorted
-/// order. The merged output is then driven through the real download
+/// the shared transport password agreed by all sources. The merged output is then driven through the real download
 /// decryptor constructor (`penne`'s seam lives in `crates/penne`; here we
 /// parse the actual XML and construct the real adapter from its metadata).
 #[test]
@@ -159,7 +158,7 @@ fn test_cli_season_encryption_password_wins_over_nzb_and_archive_passwords() {
         .arg("--season")
         .arg("--groups")
         .arg("alt.binaries.test")
-        .arg("--encrypt-password=season-transport-pass")
+        .arg("--encrypt=season-transport-pass")
         .arg("--nzb-password=season-nzb-pass")
         .arg("--password=season-archive-pass")
         .arg("--nzb-dir")
@@ -316,4 +315,102 @@ fn test_cli_merge_archive_password_stays_discarded() {
         decryptor.is_none(),
         "ordinary merged output must not activate transport decryption"
     );
+}
+
+fn encrypted_nzb_xml(episode: &str, msg: &str, password: &str) -> String {
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<nzb xmlns="http://www.newzbin.com/DTD/2003/nzb">
+  <head>
+    <meta type="password">{password}</meta>
+    <meta type="yenc_encrypted">true</meta>
+  </head>
+  <file poster="poster@example.com" date="1774300000" subject="Show.{episode}">
+    <groups><group>alt.binaries.test</group></groups>
+    <segments>
+      <segment bytes="750000" number="1">{msg}</segment>
+    </segments>
+  </file>
+</nzb>"#
+    )
+}
+
+#[test]
+fn test_cli_merge_rejects_differing_encrypted_passwords() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("merge_dir");
+    std::fs::create_dir(&dir).unwrap();
+    std::fs::write(
+        dir.join("Show.S01E01.nzb"),
+        encrypted_nzb_xml("S01E01", "art1@example.com", "pass-one"),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("Show.S01E02.nzb"),
+        encrypted_nzb_xml("S01E02", "art2@example.com", "pass-two"),
+    )
+    .unwrap();
+    let bin = env!("CARGO_BIN_EXE_pesto");
+    let xdg_home = tempfile::tempdir().unwrap();
+    let output = Command::new(bin)
+        .env("XDG_CONFIG_HOME", xdg_home.path())
+        .arg("--merge-season")
+        .arg(&dir)
+        .output()
+        .expect("failed to run pesto");
+    assert!(
+        !output.status.success(),
+        "merge with differing passwords must fail: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("different encryption password"),
+        "error must name the password conflict, got: {stderr}"
+    );
+    assert!(
+        !dir.join("Show.S01.nzb").exists(),
+        "no hybrid NZB may be written on mismatch"
+    );
+}
+
+#[test]
+fn test_cli_merge_rejects_mixed_encrypted_and_unencrypted() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("merge_dir");
+    std::fs::create_dir(&dir).unwrap();
+    std::fs::write(
+        dir.join("Show.S01E01.nzb"),
+        encrypted_nzb_xml("S01E01", "art1@example.com", "pass-one"),
+    )
+    .unwrap();
+    let plain = r#"<?xml version="1.0" encoding="UTF-8"?>
+<nzb xmlns="http://www.newzbin.com/DTD/2003/nzb">
+  <file poster="poster@example.com" date="1774300000" subject="Show.S01E02">
+    <groups><group>alt.binaries.test</group></groups>
+    <segments>
+      <segment bytes="750000" number="1">art2@example.com</segment>
+    </segments>
+  </file>
+</nzb>"#;
+    std::fs::write(dir.join("Show.S01E02.nzb"), plain).unwrap();
+    let bin = env!("CARGO_BIN_EXE_pesto");
+    let xdg_home = tempfile::tempdir().unwrap();
+    let output = Command::new(bin)
+        .env("XDG_CONFIG_HOME", xdg_home.path())
+        .arg("--merge-season")
+        .arg(&dir)
+        .output()
+        .expect("failed to run pesto");
+    assert!(
+        !output.status.success(),
+        "mixed encrypted/unencrypted merge must fail: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("mixed encrypted/unencrypted"),
+        "error must name the mixed-mode conflict, got: {stderr}"
+    );
+    assert!(!dir.join("Show.S01.nzb").exists());
 }

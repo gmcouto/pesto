@@ -10,10 +10,12 @@ fn test_generate_alphabet_salt_properties() {
         }
         let mut line1 = Vec::new();
         line1.extend_from_slice(&salt);
+        line1.extend_from_slice(&1u32.to_be_bytes());
         line1.extend_from_slice(b"=ybegin part=1\r\n");
-        let (extracted, _) =
+        let (extracted, extracted_index) =
             extract_bootstrap_from_line1(&line1).expect("extract salt should succeed");
         assert_eq!(extracted, salt);
+        assert_eq!(extracted_index, 1);
     }
 }
 

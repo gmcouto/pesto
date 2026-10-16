@@ -683,7 +683,7 @@ async fn unencrypted_spoof_rejected_for_encrypted_download() {
 /// (CorruptSegment) and zero output — the pcrc32 check must not be skipped
 /// just because `total == 1`.
 #[tokio::test]
-async fn single_part_with_pcrc32_mismatch_fails_over_with_zero_output() {
+async fn single_part_with_pcrc32_mismatch_fails_closed_with_zero_output() {
     let password = "pcrc32-single-part-password";
     let salt = [0x4Bu8; 16];
     let session = Arc::new(EncryptionSession::new(password, salt).unwrap());
@@ -773,6 +773,152 @@ async fn single_part_with_pcrc32_mismatch_fails_over_with_zero_output() {
     assert!(!dest_dir.path().join("single.bin").exists());
     assert!(!dest_dir.path().join("single.bin.penne-part").exists());
     assert!(penne::cache::load(dest_dir.path(), "pcrc-msg-01").is_none());
+}
+
+/// PT-06 (stronger branch): the tampered-pcrc32 copy is on the primary tier
+/// and a valid copy on a secondary tier — the download must fail over to
+/// the backup and reconstruct the plaintext.
+#[tokio::test]
+async fn single_part_with_pcrc32_mismatch_fails_over_with_zero_output() {
+    let password = "pcrc32-single-part-password";
+    let salt = [0x4Bu8; 16];
+    let session = Arc::new(EncryptionSession::new(password, salt).unwrap());
+    let payload = b"single part with tampered ciphertext pcrc32 payload";
+    let enc = encode_article(
+        &session,
+        "single.bin",
+        payload.len() as u64,
+        single_part(),
+        payload,
+        1,
+    );
+    let restored = pesto::crypto::decrypt_yenc_control_lines(&session, 1, &enc).unwrap();
+    let mut lines: Vec<Vec<u8>> = restored
+        .split_inclusive(|&b| b == b'\n')
+        .map(|l| l.to_vec())
+        .collect();
+    lines[0].splice(8..8, b"part=1 total=1 ".iter().copied());
+    lines.insert(
+        1,
+        format!("=ypart begin=1 end={}\r\n", payload.len()).into_bytes(),
+    );
+    let footer = lines.last_mut().unwrap();
+    let crc_pos = footer
+        .windows(6)
+        .position(|w| w == b"crc32=")
+        .expect("footer carries crc32=");
+    footer.splice(crc_pos..crc_pos + 6, b"part=1 pcrc32=".iter().copied());
+    let framed = pesto::crypto::encrypt_yenc_control_lines(&session, 1, &lines.concat()).unwrap();
+    let tampered = tamper_footer_crc(&session, 1, &framed);
+
+    let mut bad = HashMap::new();
+    bad.insert("pcrc-msg-01".to_string(), tampered);
+    let bad_addr = spawn_fake_server(bad);
+    let mut good = HashMap::new();
+    good.insert("pcrc-msg-01".to_string(), framed.clone());
+    let good_addr = spawn_fake_server(good);
+
+    let queue = queue_with_segments(
+        "single.bin",
+        vec![penne::queue::QueuedSegment {
+            message_id: "pcrc-msg-01".to_string(),
+            part: 1,
+            bytes: payload.len() as u64,
+        }],
+    );
+    let dest_dir = tempfile::tempdir().unwrap();
+    let decryptor = Arc::new(DownloadDecryptionAdapter::with_password(password));
+    let tiers = vec![
+        ServerTier::solo(server_entry(bad_addr)),
+        ServerTier::solo(server_entry(good_addr)),
+    ];
+    let outcome =
+        download_queue_with_decryptor(&queue, &tiers, dest_dir.path(), 0, None, Some(decryptor))
+            .await
+            .expect("download must fail over to the valid backup copy");
+    assert!(outcome.segments.contains("pcrc-msg-01"));
+    assert!(outcome.missing.is_empty());
+    assert!(outcome.corrupt.is_empty());
+    assert_eq!(
+        std::fs::read(dest_dir.path().join("single.bin")).unwrap(),
+        payload
+    );
+    assert_eq!(
+        penne::cache::load(dest_dir.path(), "pcrc-msg-01").unwrap(),
+        framed
+    );
+}
+
+/// PT-06 (real second-tier failover): the primary tier serves an
+/// auth-failing (data-line tampered) copy and the secondary tier serves
+/// the valid copy — the download must fail over to the backup and
+/// reconstruct the identical plaintext, with no corrupt/missing record.
+/// Unlike `tampered_primary_fails_over_to_backup_tier` (which builds the
+/// queue directly), this drives the full NZB → queue → download path.
+#[tokio::test]
+async fn auth_failing_primary_fails_over_to_valid_secondary_tier() {
+    let password = "pt06-second-tier-password";
+    let salt = [0x4Cu8; 16];
+    let session = Arc::new(EncryptionSession::new(password, salt).unwrap());
+    let payload = b"PT-06 payload: primary copy is tampered, secondary is valid.";
+    let encoded = encode_article(
+        &session,
+        "pt06.bin",
+        payload.len() as u64,
+        single_part(),
+        payload,
+        1,
+    );
+    // Single-part: line 0 =ybegin, line 1 =yencryption, line 2 data.
+    let tampered = tamper_data_line(&encoded, 2);
+
+    let primary_counter = Arc::new(AtomicUsize::new(0));
+    let mut primary_known = HashMap::new();
+    primary_known.insert("pt06-msg-01@test".to_string(), tampered);
+    let primary_addr = spawn_fake_server_counting(primary_known, Some(primary_counter.clone()));
+
+    let secondary_counter = Arc::new(AtomicUsize::new(0));
+    let mut secondary_known = HashMap::new();
+    secondary_known.insert("pt06-msg-01@test".to_string(), encoded.clone());
+    let secondary_addr =
+        spawn_fake_server_counting(secondary_known, Some(secondary_counter.clone()));
+
+    let segments = format!(
+        "<segment bytes=\"{}\" number=\"1\">pt06-msg-01@test</segment>",
+        payload.len()
+    );
+    let xml = encrypted_nzb_xml(password, "&quot;pt06.bin&quot; yEnc", &segments);
+    let dest = tempfile::tempdir().unwrap();
+    let tiers = vec![
+        ServerTier::solo(server_entry(primary_addr)),
+        ServerTier::solo(server_entry(secondary_addr)),
+    ];
+    let outcome = run_download_nzb(&xml, &tiers, dest.path()).await;
+
+    // The primary was tried and failed authentication; the backup served
+    // the valid copy — so the segment completed with identical plaintext.
+    assert_eq!(
+        primary_counter.load(Ordering::SeqCst),
+        1,
+        "primary tier must be tried first"
+    );
+    assert_eq!(
+        secondary_counter.load(Ordering::SeqCst),
+        1,
+        "auth failure must fail over to the secondary tier"
+    );
+    assert!(outcome.missing.is_empty(), "missing: {:?}", outcome.missing);
+    assert!(outcome.corrupt.is_empty(), "corrupt: {:?}", outcome.corrupt);
+    assert_eq!(
+        std::fs::read(dest.path().join("pt06.bin")).unwrap(),
+        payload,
+        "plaintext from the secondary tier must be identical"
+    );
+    // Cache holds the intact body fetched from the secondary tier.
+    assert_eq!(
+        penne::cache::load(dest.path(), "pt06-msg-01@test").unwrap(),
+        encoded
+    );
 }
 
 /// Cache resume: after an interrupted run, re-downloading the same release

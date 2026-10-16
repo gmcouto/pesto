@@ -383,11 +383,18 @@ mod index_framing_tests {
     }
 
     #[test]
-    fn new_rejects_all_four_forbidden_indices() {
-        for idx in [10u32, 13, 266, 269] {
-            assert!(!is_safe_segment_index(idx));
+    fn allocator_skips_all_four_forbidden_indices() {
+        // Production allocator: each forbidden candidate's rank maps to
+        // the next permitted index (10→11, 13→14, 266→267, 269→270).
+        for (candidate, expected) in [(10u32, 11u32), (13, 14), (266, 267), (269, 270)] {
+            let rank = safe_index_rank(candidate);
+            assert_eq!(
+                nth_safe_segment_index(rank),
+                Some(expected),
+                "forbidden candidate {candidate} must be skipped to {expected}"
+            );
         }
-        // Neighbors remain valid.
+        // Neighbors of the forbidden values are permitted themselves.
         for idx in [9u32, 11, 12, 14, 265, 267, 268, 270] {
             assert!(is_safe_segment_index(idx));
         }
