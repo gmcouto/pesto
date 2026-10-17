@@ -110,6 +110,24 @@ fn nzb_with_head_tags(head_tags: &str) -> String {
 }
 
 #[test]
+fn encrypted_nzb_in_nzb_1_1_dtd_namespace_parses() {
+    // GAP13-03: an encrypted NZB declaring the NZB 1.1 DTD
+    // (`DTD/nzb/nzb-1.1.dtd`, as emitted by the writer) instead of the
+    // legacy `DTD/2003/nzb` namespace must still parse: the encryption
+    // provenance meta and password are honoured and the segment is kept.
+    let xml = nzb_with_head_tags(
+        "<meta type=\"yenc_encrypted\">true</meta>\n    \
+         <meta type=\"password\">secret</meta>",
+    )
+    .replace("DTD/2003/nzb", "DTD/nzb/nzb-1.1.dtd");
+    assert!(xml.contains("DTD/nzb/nzb-1.1.dtd"), "{xml}");
+    let parsed = parse(&xml).expect("NZB 1.1 DTD namespace NZB must parse");
+    assert!(parsed.meta.yenc_encrypted);
+    assert_eq!(parsed.meta.password.as_deref(), Some("secret"));
+    assert_eq!(parsed.segments.len(), 1);
+}
+
+#[test]
 fn encrypted_nzb_version_and_cipher_metadata_gating() {
     let encrypted = r#"<meta type="yenc_encrypted">true</meta>"#;
     let ok_cipher = r#"<meta type="yenc_cipher">XChaCha20-Poly1305</meta>"#;

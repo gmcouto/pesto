@@ -375,6 +375,39 @@ pub(crate) fn extract_and_remove_yencryption(input: &[u8]) -> Result<(YEncryptio
     Ok((params, out))
 }
 
+/// Reject a plaintext `=yencryption` line in the wire article's data region.
+///
+/// On the wire every genuine control line is FF1-encrypted, so a plaintext
+/// line starting with `=yencryption ` can only be smuggled body content.
+/// Data starts after the fixed header (line 3 single-part, line 4
+/// multipart — a multipart line 3 is the encrypted header, never
+/// plaintext, so index 2 is safe for both) and ends before the footer
+/// (the last non-empty line). Rejected with the same "duplicate or
+/// misplaced =yencryption" error as restored duplicates, before
+/// restoration or the yEnc decoder can consume it as data (Body Std
+/// v1.2 §5/§7). Mirrors NZBGet's `YEncDecryptor` body scan.
+fn ensure_no_data_region_yencryption(body: &[u8]) -> Result<()> {
+    let lines = control::split_lines_preserving_endings(body);
+    let footer_idx = lines
+        .iter()
+        .rposition(|line| !line.content.is_empty())
+        .unwrap_or(lines.len());
+    for (idx, line) in lines
+        .iter()
+        .enumerate()
+        .skip(2)
+        .take_while(|(idx, _)| *idx < footer_idx)
+    {
+        if line.content.starts_with(b"=yencryption ") {
+            bail!(
+                "duplicate or misplaced =yencryption line at line {}",
+                idx + 1
+            );
+        }
+    }
+    Ok(())
+}
+
 /// All values carried by the `key` token prefix (e.g. `size=`) among
 /// whitespace-split control-line tokens.
 fn numeric_field_values<'a>(tokens: &[&'a str], key: &str) -> Vec<&'a str> {
@@ -468,6 +501,16 @@ impl DownloadDecryptionAdapter {
             .context("article has no newline terminators")?;
         let (salt, segment_index) = control::extract_bootstrap_from_line1(first_line.content)?;
         let session = self.get_or_create_session(salt)?;
+
+        // A `=yencryption` line smuggled into the data region (after the
+        // first data line) is a plaintext line on the wire: control-line
+        // restoration passes data lines through untouched, so it would
+        // only surface after restoration (and even then behind the
+        // ciphertext CRC), never as the duplicate/misplaced rejection
+        // below. Reject it here, before restoration can treat the rest of
+        // the block as data. Mirrors NZBGet's body-scan in
+        // YEncDecryptor::RestoreControlLines.
+        ensure_no_data_region_yencryption(body)?;
 
         // Decrypt control lines
         let restored_yenc = control::decrypt_yenc_control_lines(&session, segment_index, body)?;

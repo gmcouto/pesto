@@ -155,7 +155,9 @@ async fn run_encrypted_job(
             .split_inclusive(|&b| b == b'\n')
             .map(|l| l.to_vec())
             .collect();
-        lines[2][0] ^= 0x01;
+        assert!(lines.len() >= 4);
+        let data = lines.len() - 2;
+        lines[data][0] ^= 0x01;
         lines.into_iter().flatten().collect()
     } else {
         encoded.body

@@ -207,6 +207,17 @@ fn encrypted_layout_refuses_four_gib_before_article_production() {
 }
 
 #[test]
+fn encrypted_layout_accepts_largest_encrypted_size() {
+    // GAP13-04 (boundary companion to the 4-GiB refusal above): the largest
+    // legal encrypted file size, 2^32 - 1, must build successfully. Metadata
+    // only — no multi-GiB file is allocated.
+    let mut meta = meta_with_name(std::path::Path::new("huge.bin"), "huge.bin");
+    meta.size = (1u64 << 32) - 1;
+    ReleaseLayout::build(&[Arc::new(meta)], &dry_run_config(), 0, 2048)
+        .expect("largest encrypted size (2^32 - 1) must be accepted");
+}
+
+#[test]
 fn layout_refuses_oversized_generated_par2_volumes() {
     let metas: Vec<_> = (0..4)
         .map(|index| {
