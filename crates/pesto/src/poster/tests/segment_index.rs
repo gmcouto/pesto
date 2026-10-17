@@ -207,7 +207,7 @@ fn encrypted_layout_refuses_four_gib_before_article_production() {
 }
 
 #[test]
-fn encrypted_layout_refuses_oversized_generated_par2_volumes() {
+fn layout_refuses_oversized_generated_par2_volumes() {
     let metas: Vec<_> = (0..4)
         .map(|index| {
             let name = format!("file{index}.bin");
@@ -238,7 +238,7 @@ fn encrypted_layout_refuses_oversized_generated_par2_volumes() {
 }
 
 #[test]
-fn encrypted_layout_refuses_oversized_published_par2_index() {
+fn layout_refuses_oversized_published_par2_index() {
     let metas: Vec<_> = (0..5)
         .map(|index| {
             let name = format!("file{index}.bin");

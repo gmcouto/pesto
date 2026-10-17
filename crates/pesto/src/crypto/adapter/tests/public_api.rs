@@ -148,6 +148,78 @@ fn test_adapter_ciphertext_crc_validation() {
 }
 
 #[test]
+fn test_adapter_flipped_tag_with_intact_wire_crc_fails_authentication() {
+    // True Poly1305 failure (Body Std v1.2 §5): flip one `tag=` hex digit
+    // in the restored `=yencryption` line and re-encrypt the control
+    // lines. Data lines and the footer wire CRC are untouched, so the
+    // ciphertext CRC check passes and AEAD authentication is the failing
+    // step — the error must be AUTHENTICATION_FAILURE, never released
+    // plaintext. This construction needs the crate-private
+    // restore/re-encrypt codec, so it lives here rather than in penne's
+    // public-seam integration tests.
+    let password = "tag-flip-authentication-password";
+    let salt = control::generate_alphabet_salt();
+    let session = Arc::new(EncryptionSession::new(password, salt).unwrap());
+    let upload_adapter = UploadEncryptionAdapter::new(session.clone());
+
+    let payload = b"Payload whose authentication tag is tampered with valid CRC.";
+    let spec = PartSpec {
+        number: 1,
+        total: 1,
+        offset: 0,
+    };
+    let segment_index = 1;
+    let mut body = Vec::new();
+    let enc = upload_adapter
+        .encode_article(
+            "tagflip.bin",
+            payload.len() as u64,
+            spec,
+            payload,
+            128,
+            segment_index,
+            &mut body,
+        )
+        .unwrap();
+
+    let download_adapter = DownloadDecryptionAdapter::with_password(password);
+    assert_eq!(
+        download_adapter.decode_article(&enc.body).unwrap().data,
+        payload,
+        "intact article must decode before tag tampering"
+    );
+
+    let restored = control::decrypt_yenc_control_lines(&session, segment_index, &enc.body).unwrap();
+    // Flip exactly one hex digit of `tag=` inside the `=yencryption`
+    // line, preserving the line's length and lowercase-hex grammar.
+    let yenc_pos = restored
+        .windows(b"=yencryption".len())
+        .position(|w| w == b"=yencryption")
+        .expect("restored article carries its =yencryption line");
+    let tag_rel = restored[yenc_pos..]
+        .windows(4)
+        .position(|w| w == b"tag=")
+        .expect("=yencryption line carries tag=");
+    let digit_pos = yenc_pos + tag_rel + 4;
+    let mut tampered = restored.clone();
+    tampered[digit_pos] = if tampered[digit_pos] == b'0' {
+        b'1'
+    } else {
+        b'0'
+    };
+    assert_eq!(tampered.len(), restored.len());
+    assert_ne!(tampered, restored);
+
+    let re_encrypted =
+        control::encrypt_yenc_control_lines(&session, segment_index, &tampered).unwrap();
+    let err = download_adapter.decode_article(&re_encrypted).unwrap_err();
+    assert!(
+        err.to_string().contains("AUTHENTICATION_FAILURE"),
+        "flipped tag with intact wire CRC must fail Poly1305 authentication, got: {err}"
+    );
+}
+
+#[test]
 fn test_adapter_zero_output_rejection_matrix() {
     let password = "zero-output-rejection-password";
     let salt = control::generate_alphabet_salt();

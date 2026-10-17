@@ -4,10 +4,7 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use std::sync::Arc;
 
-use pesto::crypto::{
-    decrypt_yenc_control_lines, encrypt_yenc_control_lines, DownloadDecryptionAdapter,
-    EncryptionSession, UploadEncryptionAdapter,
-};
+use pesto::crypto::{DownloadDecryptionAdapter, EncryptionSession, UploadEncryptionAdapter};
 use pesto::yenc::PartSpec;
 
 struct TrackingAllocator;
@@ -44,7 +41,12 @@ unsafe impl GlobalAlloc for TrackingAllocator {
 static ALLOCATOR: TrackingAllocator = TrackingAllocator;
 
 fn physical_multipart_wire(session: &Arc<EncryptionSession>, file_size: u64) -> Vec<u8> {
-    let encoded = UploadEncryptionAdapter::new(session.clone())
+    // Adapter-only fixture (R11-PC-01: control-line helpers are no longer
+    // public surface for tests). The physical-multipart `total=1` variant
+    // of this geometry is covered in-crate by
+    // `crypto::adapter::tests::geometry`; here the adapter-produced
+    // multipart article exercises the same article-sized allocation seam.
+    UploadEncryptionAdapter::new(session.clone())
         .encode_article(
             "memory.bin",
             file_size,
@@ -58,18 +60,12 @@ fn physical_multipart_wire(session: &Arc<EncryptionSession>, file_size: u64) -> 
             1,
             &mut Vec::new(),
         )
-        .unwrap();
-    let mut restored = decrypt_yenc_control_lines(session, 1, &encoded.body).unwrap();
-    let position = restored
-        .windows(7)
-        .position(|bytes| bytes == b"total=2")
-        .unwrap();
-    restored[position + 6] = b'1';
-    encrypt_yenc_control_lines(session, 1, &restored).unwrap()
+        .unwrap()
+        .body
 }
 
 #[test]
-fn tiny_total_one_multipart_of_large_file_allocates_by_article_size() {
+fn tiny_multipart_of_large_file_allocates_by_article_size() {
     let password = "article-memory-fixture";
     let session = Arc::new(EncryptionSession::new(password, [0x42; 16]).unwrap());
     let adapter = DownloadDecryptionAdapter::with_password(password);

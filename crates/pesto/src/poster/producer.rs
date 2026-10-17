@@ -23,8 +23,8 @@ use super::par2::{
 use super::shared::Shared;
 use super::task::{PostTask, TaskDispatcher};
 use super::{
-    make_task, par2_output_dir, par2_release_base, par2_temp_dir, push_par2_file,
-    spawn_double_buffered_reader, FileMeta,
+    make_task, par2_output_dir, par2_release_base, par2_temp_dir, par2_volume_ordinal,
+    push_par2_file, spawn_double_buffered_reader, FileMeta,
 };
 /// Pad the accumulated real bytes to the full PAR2 slice size and forward
 /// the slice to the background [`Par2Worker`]. Leaves `accum` empty (or
@@ -745,9 +745,11 @@ pub(super) async fn producer(
                             .release_prefix
                             .as_deref()
                             .map(|prefix| layout::volume_name(prefix, *vol));
-                        let index_offset =
-                            u32::from(shared.config.obfuscate.policy().publish_par2_index);
-                        let file_index = metas.len() as u32 + 1 + index_offset + vol_idx as u32;
+                        let file_index = par2_volume_ordinal(
+                            metas.len(),
+                            shared.config.obfuscate.policy().publish_par2_index,
+                            vol_idx,
+                        );
                         push_par2_file(&vol_path, vol_name, wire_override, file_index, &shared, tx)
                             .await?;
                     }

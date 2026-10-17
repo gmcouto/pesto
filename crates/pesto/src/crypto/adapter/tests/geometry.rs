@@ -128,6 +128,76 @@ fn total_one_physical_multipart_requires_pcrc32_despite_competing_crc32() {
     assert_eq!(adapter.decode_article(&wire).unwrap().data, b"test");
 }
 
+#[test]
+fn multipart_pcrc32_accepts_non_eight_hex_widths() {
+    // Body Std v1.2 §5 step 5 / X-2: the wire pcrc32 is a hexadecimal
+    // string of any width that parses as a CRC-32 value; it need not be
+    // zero-padded to eight digits. Mint a multipart article whose
+    // ciphertext CRC has a leading zero nibble (so a genuinely short
+    // form exists), then rewrite the restored footer pcrc32= to a
+    // 10-digit leading-zero form and to the short minimal form, and
+    // require `decode_article` to succeed with the plaintext both times.
+    // This needs the crate-private restore/re-encrypt codec, so it
+    // lives here rather than in penne's public-seam integration tests.
+    let password = "pcrc32-width";
+    let session = Arc::new(EncryptionSession::new(password, [0x42; 16]).unwrap());
+    let adapter = DownloadDecryptionAdapter::with_password(password);
+
+    // Deterministic search for a payload whose ciphertext pcrc32 has a
+    // zero top nibble (probability 1/16 per candidate).
+    let mut fixture = None;
+    for i in 0..512 {
+        let payload = format!("pcrc width payload {i}").into_bytes();
+        let encoded = UploadEncryptionAdapter::new(session.clone())
+            .encode_article(
+                "width.bin",
+                payload.len() as u64 * 2,
+                PartSpec {
+                    number: 1,
+                    total: 2,
+                    offset: 0,
+                },
+                &payload,
+                128,
+                1,
+                &mut Vec::new(),
+            )
+            .unwrap();
+        let restored = control::decrypt_yenc_control_lines(&session, 1, &encoded.body).unwrap();
+        let lines = control::split_lines_preserving_endings(&restored);
+        let footer = std::str::from_utf8(lines.last().unwrap().content).unwrap();
+        let pcrc = footer
+            .split_whitespace()
+            .find_map(|token| token.strip_prefix("pcrc32="))
+            .unwrap();
+        let value = u32::from_str_radix(pcrc, 16).unwrap();
+        if value < 0x1000_0000 {
+            fixture = Some((payload, restored, value));
+            break;
+        }
+    }
+    let (payload, restored, pcrc) =
+        fixture.expect("a leading-zero pcrc32 candidate must occur within 512 payloads");
+    let canonical = format!("pcrc32={pcrc:08x}");
+    assert!(restored
+        .windows(canonical.len())
+        .any(|w| w == canonical.as_bytes()));
+
+    for formatted in [format!("pcrc32={pcrc:010x}"), format!("pcrc32={pcrc:x}")] {
+        let width = formatted.len() - "pcrc32=".len();
+        assert!(
+            width == 10 || width < 8,
+            "rewritten pcrc32 must be non-canonical width, got {width} digits: {formatted}"
+        );
+        let damaged = replace_fixture_bytes(&restored, canonical.as_bytes(), formatted.as_bytes());
+        let wire = control::encrypt_yenc_control_lines(&session, 1, &damaged).unwrap();
+        let decoded = adapter
+            .decode_article(&wire)
+            .unwrap_or_else(|e| panic!("pcrc32 width {width} ({formatted}) must decode: {e}"));
+        assert_eq!(decoded.data, payload, "pcrc32 width {width} plaintext");
+    }
+}
+
 /// An encrypted article with single-part total=1
 /// and an explicit =ypart line (e.g. from nyuu single-part posts) is tolerated
 /// on the encrypted decode path: =ypart is skipped before yenc::decode_part.

@@ -24,8 +24,7 @@ mod tests;
 
 pub use adapter::{DownloadDecryptionAdapter, UploadEncryptionAdapter};
 pub use control::{
-    decrypt_yenc_control_lines, encrypt_yenc_control_lines, extract_bootstrap_from_line1,
-    generate_alphabet_salt, split_lines_preserving_endings, LineSlice,
+    extract_bootstrap_from_line1, generate_alphabet_salt, split_lines_preserving_endings,
 };
 pub use kdf::EncryptionSession;
 

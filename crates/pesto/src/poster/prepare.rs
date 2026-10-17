@@ -211,7 +211,7 @@ pub(super) async fn prepare_inputs(
             let mut state = resume.lock().unwrap();
             let known_file = state.has_file(&real_name);
             if !state.file_matches(&real_name, &file_fp) {
-                if state.session_salt().is_some() {
+                if state.session_salt().is_some() && config.encrypt_password.is_some() {
                     eprintln!(
                         "resume: `{real_name}` changed size or modification time since the \
                          saved session state was recorded — invalidating entire session"
@@ -240,7 +240,10 @@ pub(super) async fn prepare_inputs(
                     );
                     state.forget_file(&real_name);
                 }
-            } else if state.session_salt().is_some() && !known_file {
+            } else if state.session_salt().is_some()
+                && config.encrypt_password.is_some()
+                && !known_file
+            {
                 // A source name the encrypted session never recorded: the
                 // input set itself changed (e.g. `b.bin` replaced by
                 // `c.bin` at the same ordinal/part count). The count-only
@@ -398,9 +401,9 @@ pub(super) async fn prepare_inputs(
 /// An entry in a release layout representing one file's ordinal, part count,
 /// and prefix part sum (total segments preceding this file in release order).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LayoutEntry {
-    pub part_count: u32,
-    pub prefix_parts: u64,
+pub(crate) struct LayoutEntry {
+    pub(crate) part_count: u32,
+    pub(crate) prefix_parts: u64,
 }
 
 /// An immutable, complete release layout computed before concurrent task dispatch.
@@ -421,7 +424,7 @@ impl ReleaseLayout {
     /// - Every ordinal from 1 to `total_files` is present exactly once
     /// - Every file has `part_count >= 1`
     /// - Cumulative segments and individual indices do not overflow `u32::MAX`
-    pub fn from_parts(total_files: u32, parts: &[(u32, u32)]) -> Result<Self> {
+    pub(crate) fn from_parts(total_files: u32, parts: &[(u32, u32)]) -> Result<Self> {
         if total_files == 0 {
             bail!("release layout cannot have 0 total files");
         }
@@ -476,7 +479,7 @@ impl ReleaseLayout {
     }
 
     /// Get the layout entry for a given 1-based `file_index`.
-    pub fn entry(&self, file_index: u32) -> Option<&LayoutEntry> {
+    pub(crate) fn entry(&self, file_index: u32) -> Option<&LayoutEntry> {
         if file_index == 0 || file_index > self.total_files {
             None
         } else {
@@ -496,7 +499,7 @@ impl ReleaseLayout {
     /// path) goes through this method, so all consumers receive safe,
     /// monotonic, injective indices. Identity is finalized here BEFORE any
     /// salt/KDF derivation happens downstream.
-    pub fn segment_identity(&self, file_index: u32, part_number: u32) -> Option<u32> {
+    pub(crate) fn segment_identity(&self, file_index: u32, part_number: u32) -> Option<u32> {
         let entry = self.entry(file_index)?;
         if part_number == 0 || part_number > entry.part_count {
             return None;
@@ -694,8 +697,9 @@ pub(super) async fn prepare_resources(
     // encrypted uploads: unencrypted uploads have no bootstrap, no nonce
     // and no index, so running the planner there only adds a hand-written
     // PAR2 packet-size prediction that can fail or panic on an upload that
-    // never needed it. `FileMeta::file_index` is still assigned by
-    // `prepare_inputs` for every run; the plain path never reads it back.
+    // never needed it. `FileMeta::file_index` is assigned when
+    // `--file-counter` or encryption needs it; the plain path never reads
+    // it back.
     let release_layout = Arc::new(if config.encrypt_password.is_some() {
         ReleaseLayout::build(metas, config, recovery_count, par2_slice_size)?
     } else {

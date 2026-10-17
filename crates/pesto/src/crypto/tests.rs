@@ -1,4 +1,3 @@
-use hmac::Mac;
 use proptest::prelude::*;
 use serde::Deserialize;
 use std::path::PathBuf;
@@ -114,9 +113,9 @@ struct BodyNonceVector {
 #[derive(Deserialize)]
 struct ControlTweakVector {
     id: String,
+    master_key_hex: String,
     segment_index: u32,
     line_index: u32,
-    full_hmac_hex: String,
     expected_tweak_hex: String,
 }
 
@@ -127,40 +126,58 @@ fn test_nonce_and_tweak_test_vectors() {
         .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()));
     let fixture: NonceTweakFixture = serde_json::from_str(&content).unwrap();
 
+    // The body-nonce vectors all share one master key (the Argon2id key
+    // for `test123` / salt `1a2b…`, verified against argon2id.json by
+    // `test_argon2id_kdf_test_vectors`). Anchor a production session on
+    // that pair and verify every vector through the production
+    // derivation instead of re-implementing the HMAC here.
+    let anchor = fixture
+        .body_nonce_vectors
+        .first()
+        .expect("body nonce vectors must be present");
+    let anchor_key = hex_decode(&anchor.key_hex);
+    let argon2id_path = test_vectors_dir().join("argon2id.json");
+    let argon2id_content = std::fs::read_to_string(&argon2id_path)
+        .unwrap_or_else(|e| panic!("failed to read {}: {e}", argon2id_path.display()));
+    let argon2id_fixture: Argon2idFixture = serde_json::from_str(&argon2id_content).unwrap();
+    let anchor_vec = argon2id_fixture
+        .vectors
+        .iter()
+        .find(|v| hex_decode(&v.expected_key_hex) == anchor_key)
+        .expect("body nonce key must be an argon2id vector key");
+    let mut anchor_salt = [0u8; 16];
+    anchor_salt.copy_from_slice(&hex_decode(&anchor_vec.salt_hex));
+    let body_session =
+        EncryptionSession::new(&anchor_vec.transport_kdf_input, anchor_salt).unwrap();
+    assert_eq!(
+        hex_encode(body_session.master_key()),
+        anchor.key_hex,
+        "body nonce session must carry the vectors' master key"
+    );
     for vec in &fixture.body_nonce_vectors {
-        let key_bytes = hex_decode(&vec.key_hex);
-        let mut master_key = [0u8; 32];
-        master_key.copy_from_slice(&key_bytes);
-
-        // Derive nonce directly via HMAC-SHA256
-        let mut mac = <hmac::Hmac<sha2::Sha256> as hmac::Mac>::new_from_slice(&master_key).unwrap();
-        mac.update(b"yenc-body nonce");
-        mac.update(&vec.segment_index.to_be_bytes());
-        let digest = mac.finalize().into_bytes();
-        let nonce_hex = hex_encode(&digest[0..24]);
-
         assert_eq!(
-            nonce_hex, vec.expected_nonce_hex,
+            vec.key_hex, anchor.key_hex,
+            "body nonce vector {} must share the anchored key",
+            vec.id
+        );
+        let nonce = body_session.derive_body_nonce(vec.segment_index);
+        assert_eq!(
+            hex_encode(&nonce),
+            vec.expected_nonce_hex,
             "body nonce mismatch for vector {}",
             vec.id
         );
     }
 
-    let argon2id_path = test_vectors_dir().join("argon2id.json");
-    let argon2id_content = std::fs::read_to_string(&argon2id_path)
-        .unwrap_or_else(|e| panic!("failed to read {}: {e}", argon2id_path.display()));
-    let argon2id_fixture: Argon2idFixture = serde_json::from_str(&argon2id_content).unwrap();
+    assert!(
+        !fixture.control_tweak_vectors.is_empty(),
+        "control tweak vectors must be present"
+    );
     // v1.2 nonce_tweak.json no longer carries a
     // `control_tweak_argon2id_vector` reference; the control tweak vectors
     // carry `master_key_hex` directly. Anchor the Argon2id session on the
     // first control tweak vector's segment/line setup via its referenced
     // control_line_encryption vector instead.
-    let first_tweak = fixture
-        .control_tweak_vectors
-        .first()
-        .expect("control tweak vectors must be present");
-    let _ = first_tweak;
-
     let control_path = test_vectors_dir().join("control_line_encryption.json");
     let control_content = std::fs::read_to_string(&control_path)
         .unwrap_or_else(|e| panic!("failed to read {}: {e}", control_path.display()));
@@ -207,31 +224,28 @@ fn test_nonce_and_tweak_test_vectors() {
         "session master key must match the referenced argon2id vector"
     );
 
-    let mut key_mac =
-        <hmac::Hmac<sha2::Sha256> as hmac::Mac>::new_from_slice(session.master_key()).unwrap();
-    key_mac.update(b"yenc-control key");
-    let enc_key = key_mac.finalize().into_bytes();
     assert_eq!(
-        hex_encode(&enc_key),
+        hex_encode(session.control_key()),
         control_vector["derived_enc_key_hex"].as_str().unwrap(),
         "derived control key mismatch"
     );
 
+    // Every tweak vector must name the anchored session's master key;
+    // that is what makes the production-derivation assertions below
+    // meaningful for these vectors.
     for vec in &fixture.control_tweak_vectors {
-        let mut tweak_mac =
-            <hmac::Hmac<sha2::Sha256> as hmac::Mac>::new_from_slice(session.master_key()).unwrap();
-        tweak_mac.update(b"yenc-control tweak");
-        tweak_mac.update(&vec.segment_index.to_be_bytes());
-        tweak_mac.update(&vec.line_index.to_be_bytes());
-        let tweak = tweak_mac.finalize().into_bytes();
         assert_eq!(
-            hex_encode(&tweak),
-            vec.full_hmac_hex,
-            "control HMAC mismatch for vector {}",
+            hex_decode(&vec.master_key_hex),
+            session.master_key().to_vec(),
+            "control tweak vector {} must share the anchored master key",
             vec.id
         );
+    }
+
+    for vec in &fixture.control_tweak_vectors {
+        let tweak = session.derive_control_tweak(vec.segment_index, vec.line_index);
         assert_eq!(
-            hex_encode(&tweak[0..8]),
+            hex_encode(&tweak),
             vec.expected_tweak_hex,
             "control tweak mismatch for vector {}",
             vec.id
@@ -251,6 +265,8 @@ struct BodyEncryptionVector {
     transport_kdf_input: String,
     salt_hex: String,
     segment_index: u32,
+    derived_key_hex: String,
+    derived_nonce_hex: String,
     #[serde(default)]
     aad: Option<AadVector>,
     plaintext_hex: String,
@@ -284,7 +300,19 @@ fn test_body_encryption_test_vectors() {
         salt.copy_from_slice(&salt_bytes);
 
         let session = EncryptionSession::new(&vec.transport_kdf_input, salt).unwrap();
+        assert_eq!(
+            hex_encode(session.master_key()),
+            vec.derived_key_hex,
+            "derived key mismatch for vector {}",
+            vec.id
+        );
         let nonce = session.derive_body_nonce(vec.segment_index);
+        assert_eq!(
+            hex_encode(&nonce),
+            vec.derived_nonce_hex,
+            "derived nonce mismatch for vector {}",
+            vec.id
+        );
 
         let plaintext = hex_decode(&vec.plaintext_hex);
         // Deserialize the AAD inputs and compute the AAD, validating

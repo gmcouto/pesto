@@ -14,8 +14,9 @@
 //! CLI so the combined NZB remains an actual CLI output. The prebuilt
 //! binary is located locally in this test file by `find_pesto_bin`
 //! without spawning cargo; the proof hard-fails when the binary is
-//! absent, and hard-fails when the binary is stale versus the pesto
-//! manifest, so build the workspace first (`cargo build --bin pesto`).
+//! absent, and hard-fails when the binary is stale versus the newest
+//! mtime under `crates/pesto/src/**` (where the merge CLI lives), so
+//! build the workspace first (`cargo build --bin pesto`).
 //! The upload bytes themselves do not depend on which binary runs.
 //!
 //! Unlike `download_encryption.rs::merged_encrypted_release_with_multiple_salts_decrypts`
@@ -32,7 +33,6 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::Arc;
 
-use penne::binary_is_stale;
 use penne::config::ServerTier;
 use penne::download::download_queue_with_decryptor;
 use penne::nzb::{download_decryptor, load};
@@ -163,12 +163,58 @@ fn find_pesto_bin() -> Option<PathBuf> {
     candidates.into_iter().find(|p| p.exists())
 }
 
-fn pesto_manifest() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+/// R11-PT-03: the merge CLI lives under `crates/pesto/src/**`
+/// (`src/bin/pesto/merge.rs`, `command.rs`, ...), not in `Cargo.toml`,
+/// so a `Cargo.toml`-only comparison cannot see merge-CLI edits.
+/// Returns the newest mtime under `crates/pesto/src/**`, falling back
+/// to the crate manifest when the source tree cannot be walked.
+/// Panics when neither yields an mtime, so the proof hard-fails rather
+/// than silently trusting a possibly-stale binary.
+fn newest_pesto_source_mtime() -> std::time::SystemTime {
+    let pesto_crate = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("penne lives under crates/")
-        .join("pesto")
-        .join("Cargo.toml")
+        .join("pesto");
+    let mut newest: Option<std::time::SystemTime> = None;
+    let mut stack: Vec<PathBuf> = vec![pesto_crate.join("src")];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if file_type.is_dir() {
+                stack.push(path);
+            } else if let Ok(modified) = entry.metadata().and_then(|m| m.modified()) {
+                if newest.is_none_or(|current| modified > current) {
+                    newest = Some(modified);
+                }
+            }
+        }
+    }
+    if let Some(newest) = newest {
+        return newest;
+    }
+    std::fs::metadata(pesto_crate.join("Cargo.toml"))
+        .and_then(|m| m.modified())
+        .expect("pesto source tree and manifest must be readable for the stale check")
+}
+
+/// PT-03 stale-binary check (test-local; R11-PD-01/R11-PT-01): `binary`
+/// is stale iff it is older than `newest_source` (the newest mtime
+/// under `crates/pesto/src/**`; see [`newest_pesto_source_mtime`]).
+/// A missing/unreadable binary mtime counts as stale (`true`) so
+/// callers hard-fail rather than exercising a possibly-outdated
+/// binary. Pure predicate — no cargo process is spawned here, keeping
+/// the no-nested-cargo guarantee.
+fn binary_is_stale(binary: &Path, newest_source: std::time::SystemTime) -> bool {
+    let Some(bmtime) = std::fs::metadata(binary).and_then(|m| m.modified()).ok() else {
+        return true;
+    };
+    bmtime < newest_source
 }
 
 fn run_pesto(bin: &Path, xdg_home: &Path, args: &[&std::ffi::OsStr]) -> Output {
@@ -194,7 +240,7 @@ async fn merged_cli_season_output_downloads_and_decrypts_both_episodes() {
     let bin = find_pesto_bin()
         .expect("prebuilt pesto binary not found; build workspace first (cargo build --bin pesto)");
     assert!(
-        !binary_is_stale(&bin, &pesto_manifest()),
+        !binary_is_stale(&bin, newest_pesto_source_mtime()),
         "stale pesto binary {}; rebuild workspace first (cargo build --bin pesto)",
         bin.display()
     );
@@ -301,7 +347,7 @@ async fn merged_cli_season_output_downloads_and_decrypts_both_episodes() {
         "the two uploads must use distinct salts under one shared password"
     );
 
-    // Actual per-episode NZBs (written by the CLI above) must be marked and
+    // Per-episode NZBs generated via `pesto::nzb::generate` must be marked and
     // carry the transport password.
     for episode in ["Show.S01E01.nzb", "Show.S01E02.nzb"] {
         let content = std::fs::read_to_string(nzb_dir.join(episode)).unwrap();
@@ -384,68 +430,27 @@ async fn merged_cli_season_output_downloads_and_decrypts_both_episodes() {
     );
 }
 
+/// The sole stale-predicate test (R11-PT-02), next to its only
+/// consumer. `binary_is_stale` is a pure predicate over a binary path
+/// and a source mtime: it spawns no cargo and reads no `CARGO_*` env.
 #[test]
 fn stale_binary_detection_flags_older_binary_without_rebuild() {
     use std::time::{Duration, UNIX_EPOCH};
     let root = tempfile::tempdir().unwrap();
-    let manifest = root.path().join("Cargo.toml");
     let binary = root.path().join("pesto");
-    std::fs::write(&manifest, b"[package]\n").unwrap();
     std::fs::write(&binary, b"binary").unwrap();
     let base = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
-    std::fs::File::open(&manifest)
+    std::fs::File::open(&binary)
         .unwrap()
         .set_modified(base)
         .unwrap();
-    // Binary newer than manifest by 3600s => not stale.
-    std::fs::File::open(&binary)
-        .unwrap()
-        .set_modified(base + Duration::from_secs(3600))
-        .unwrap();
-    assert!(!binary_is_stale(&binary, &manifest));
-    // Binary older than manifest by 3600s => stale.
-    std::fs::File::open(&binary)
-        .unwrap()
-        .set_modified(base - Duration::from_secs(3600))
-        .unwrap();
-    assert!(binary_is_stale(&binary, &manifest));
+    // Binary newer than the newest source mtime => not stale.
+    assert!(!binary_is_stale(&binary, base - Duration::from_secs(3600)));
+    // Binary older than the newest source mtime => stale.
+    assert!(binary_is_stale(&binary, base + Duration::from_secs(3600)));
     // Missing binary => stale.
     assert!(binary_is_stale(
         root.path().join("missing-bin").as_path(),
-        &manifest
+        base
     ));
-    // Missing manifest => stale.
-    assert!(binary_is_stale(
-        &binary,
-        root.path().join("missing-Cargo.toml").as_path()
-    ));
-}
-
-#[test]
-fn stale_binary_detection_without_cargo() {
-    // Pure-predicate exercise: `binary_is_stale` takes only two paths and
-    // reads no CARGO_* env or manifest discovery, so this test uses only
-    // sealed temp files and no cargo/env involvement.
-    use std::time::{Duration, UNIX_EPOCH};
-    let root = tempfile::tempdir().unwrap();
-    let manifest = root.path().join("sealed-manifest.toml");
-    let binary = root.path().join("sealed-pesto");
-    assert!(binary_is_stale(&binary, &manifest));
-    std::fs::write(&manifest, b"manifest").unwrap();
-    std::fs::write(&binary, b"binary").unwrap();
-    let base = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
-    std::fs::File::open(&manifest)
-        .unwrap()
-        .set_modified(base)
-        .unwrap();
-    std::fs::File::open(&binary)
-        .unwrap()
-        .set_modified(base + Duration::from_secs(3600))
-        .unwrap();
-    assert!(!binary_is_stale(&binary, &manifest));
-    std::fs::File::open(&binary)
-        .unwrap()
-        .set_modified(base - Duration::from_secs(3600))
-        .unwrap();
-    assert!(binary_is_stale(&binary, &manifest));
 }

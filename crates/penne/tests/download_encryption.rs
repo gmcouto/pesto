@@ -1,9 +1,13 @@
 //! Consolidated Penne encrypted-download integration tests:
 //! multipart decrypt round trip, tamper failover, zero output/no cache on
 //! authentication failure, spoof rejection, cache resume, boundary segment
-//! indices, real-PAR2 verify/repair assertions, and the negative-case
-//! failures with true causes (wrong password, truncation, malformed
-//! `=yencryption`, true Poly1305 tag failure).
+//! indices, real-PAR2 verify/repair assertions, and negative cases through
+//! the public download seam (data-line ciphertext CRC mismatch, wrong
+//! password, truncation). Cases that need the crate-private
+//! restore/re-encrypt codec — a flipped `tag=` with intact wire CRC
+//! (true Poly1305 failure), malformed `=yencryption` grammar, and
+//! non-canonical-width `pcrc32=` — live in the pesto crate's adapter
+//! tests, where that codec is available.
 
 mod support;
 
@@ -14,7 +18,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use pesto::config::ServerEntry;
-use pesto::crypto::{DownloadDecryptionAdapter, EncryptionSession, UploadEncryptionAdapter};
+use pesto::crypto::{
+    split_lines_preserving_endings, DownloadDecryptionAdapter, EncryptionSession,
+    UploadEncryptionAdapter,
+};
 use pesto::yenc::{encode_part, PartSpec};
 use tempfile::NamedTempFile;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -208,37 +215,75 @@ fn tamper_data_line(article: &[u8], data_line_index: usize) -> Vec<u8> {
     lines.into_iter().flatten().collect()
 }
 
-fn tamper_footer_crc(
-    session: &EncryptionSession,
-    segment_index: u32,
+/// Rebuild an adapter-produced article with one ciphertext byte flipped.
+///
+/// The control-line restore/re-encrypt codec is no longer public
+/// (PC-01), so the rebuilt wire is produced through the public upload
+/// seam instead: decode to plaintext, re-encode — the re-encode emits
+/// the correct CRC — then flip one data-line byte. The flip lands in
+/// the ciphertext, so the adapter's pre-AEAD check reports the
+/// `ciphertext CRC mismatch` a footer-CRC flip would also produce, and
+/// the caller-visible outcomes (corrupt classification, zero output, no
+/// cache entry, failover) are unchanged.
+fn tamper_ciphertext_crc(
+    session: &Arc<EncryptionSession>,
+    password: &str,
     wire_article: &[u8],
+    file_name: &str,
+    file_size: u64,
+    spec: PartSpec,
+    segment_index: u32,
 ) -> Vec<u8> {
-    let restored =
-        pesto::crypto::decrypt_yenc_control_lines(session, segment_index, wire_article).unwrap();
-    let text = String::from_utf8_lossy(&restored);
-    let tampered_text = if let Some(idx) = text.find("pcrc32=") {
-        let mut t = text.into_owned();
-        let replacement = if &t[idx + 7..idx + 8] == "f" {
-            "0"
-        } else {
-            "f"
-        };
-        t.replace_range(idx + 7..idx + 8, replacement);
-        t
-    } else if let Some(idx) = text.find("crc32=") {
-        let mut t = text.into_owned();
-        let replacement = if &t[idx + 6..idx + 7] == "f" {
-            "0"
-        } else {
-            "f"
-        };
-        t.replace_range(idx + 6..idx + 7, replacement);
-        t
-    } else {
-        panic!("neither pcrc32 nor crc32 found in yend");
-    };
-    pesto::crypto::encrypt_yenc_control_lines(session, segment_index, tampered_text.as_bytes())
-        .unwrap()
+    let decoded = DownloadDecryptionAdapter::with_password(password)
+        .decode_article(wire_article)
+        .expect("intact article must decode before footer tampering");
+    let rebuilt = encode_article(
+        session,
+        file_name,
+        file_size,
+        spec,
+        &decoded.data,
+        segment_index,
+    );
+    // Multipart layout: line 0 =ybegin, 1 =ypart, 2 =yencryption,
+    // 3 = first data line. Single-part: data starts at line 2.
+    let data_line = if spec.total > 1 { 3 } else { 2 };
+    tamper_data_line(&rebuilt, data_line)
+}
+
+/// Build the `part=1` / `=ypart` / `pcrc32=` framed article the pcrc32
+/// tests exercise.
+///
+/// The encoder emits that framing only when `spec.total > 1`, so the
+/// original construction restored the control lines, spliced
+/// `part=1 total=1` into `=ybegin`, inserted `=ypart`, and rewrote the
+/// footer before re-encrypting. The restore/re-encrypt codec is no
+/// longer public (PC-01); the adapter seam's equivalent is to encode
+/// as part 1 of 2 with `file_size == payload.len()`: the wire then
+/// physically carries `=ypart` and `pcrc32=`, and the adapter's decode
+/// keys its pcrc32 enforcement off that physical `=ypart` presence,
+/// not off `total=`. The callers present the article as the queue's
+/// only segment. (A wire whose `=ybegin` literally carries `total=1`
+/// alongside that physical multipart framing is covered in the
+/// crate-internal `geometry.rs` tests.)
+fn frame_single_part_pcrc32(
+    session: &Arc<EncryptionSession>,
+    file_name: &str,
+    payload: &[u8],
+    segment_index: u32,
+) -> Vec<u8> {
+    encode_article(
+        session,
+        file_name,
+        payload.len() as u64,
+        PartSpec {
+            number: 1,
+            total: 2,
+            offset: 0,
+        },
+        payload,
+        segment_index,
+    )
 }
 
 /// Multipart encrypted round trip through the production download path:
@@ -678,10 +723,10 @@ async fn unencrypted_spoof_rejected_for_encrypted_download() {
     );
 }
 
-/// A bad ciphertext pcrc32 on a part=1 total=1 article (single-part
-/// with explicit multipart framing) must fail with provider failover
-/// (CorruptSegment) and zero output — the pcrc32 check must not be skipped
-/// just because `total == 1`.
+/// A bad ciphertext pcrc32 on a physically-multipart article served as
+/// the queue's only segment must fail with provider failover
+/// (CorruptSegment) and zero output — the pcrc32 check is keyed off the
+/// physical `=ypart` framing, not off the queued segment count.
 #[tokio::test]
 async fn single_part_with_pcrc32_mismatch_fails_closed_with_zero_output() {
     let password = "pcrc32-single-part-password";
@@ -689,50 +734,32 @@ async fn single_part_with_pcrc32_mismatch_fails_closed_with_zero_output() {
     let session = Arc::new(EncryptionSession::new(password, salt).unwrap());
 
     let payload = b"single part with tampered ciphertext pcrc32 payload";
-    let enc = encode_article(
+    // The encoder emits `part=`/`=ypart`/`pcrc32=` framing only when
+    // `spec.total > 1` (see `yenc::encode_part_into`), so the framed wire
+    // comes from the shared `frame_single_part_pcrc32` helper — per
+    // combined mode, the framing exists before control-line encryption
+    // (Body Std v1.2 §5). The helper encodes with `total=2`; what this
+    // test exercises is that the adapter enforces pcrc32 whenever the
+    // physical `=ypart` framing is present. (A physically-multipart
+    // article whose `=ybegin` literally carries `total=1` is covered in
+    // the crate-internal `geometry.rs` tests.)
+    let framed = frame_single_part_pcrc32(&session, "single.bin", payload, 1);
+
+    // Tamper the pcrc32 on the framed article (rebuilt through the
+    // public adapter seam; see `tamper_ciphertext_crc`).
+    let tampered = tamper_ciphertext_crc(
         &session,
+        password,
+        &framed,
         "single.bin",
         payload.len() as u64,
-        single_part(),
-        payload,
+        PartSpec {
+            number: 1,
+            total: 2,
+            offset: 0,
+        },
         1,
     );
-
-    // The encoder emits `part=`/`=ypart`/`pcrc32=` framing only when
-    // `spec.total > 1` (see `yenc::encode_part_into`), so `encode_article`
-    // above produced an unframed single-part article. Rebuild it with REAL
-    // `part=1 total=1` framing (nyuu-style) while the control lines are
-    // restored, then re-encrypt them — per combined mode, the framing must
-    // exist before control-line encryption (Body Std v1.2 §5). The good
-    // pcrc32 is the ciphertext CRC the encoder already wrote as `crc32=`.
-    let restored = pesto::crypto::decrypt_yenc_control_lines(&session, 1, &enc).unwrap();
-    let mut lines: Vec<Vec<u8>> = restored
-        .split_inclusive(|&b| b == b'\n')
-        .map(|l| l.to_vec())
-        .collect();
-    assert!(lines[0].starts_with(b"=ybegin line="), "unframed =ybegin");
-    assert!(lines[0].ends_with(b"\r\n"));
-    // =ybegin gains `part=1 total=1` (before `line=`, matching the encoder).
-    lines[0].splice(8..8, b"part=1 total=1 ".iter().copied());
-    // Inject `=ypart` between =ybegin and =yencryption.
-    lines.insert(
-        1,
-        format!("=ypart begin=1 end={}\r\n", payload.len()).into_bytes(),
-    );
-    // Footer: `crc32=<crc>` becomes `part=1 pcrc32=<crc>` (drop `crc32=`).
-    let footer = lines.last_mut().unwrap();
-    assert!(footer.starts_with(b"=yend size="));
-    let crc_pos = footer
-        .windows(6)
-        .position(|w| w == b"crc32=")
-        .expect("footer carries crc32=");
-    footer.splice(crc_pos..crc_pos + 6, b"part=1 pcrc32=".iter().copied());
-
-    let framed = pesto::crypto::encrypt_yenc_control_lines(&session, 1, &lines.concat()).unwrap();
-
-    // Tamper the pcrc32 on the framed article (tamper_footer_crc hits its
-    // `pcrc32=` branch now that the footer carries one).
-    let tampered = tamper_footer_crc(&session, 1, &framed);
 
     let mut known = HashMap::new();
     known.insert("pcrc-msg-01".to_string(), tampered);
@@ -775,41 +802,29 @@ async fn single_part_with_pcrc32_mismatch_fails_closed_with_zero_output() {
     assert!(penne::cache::load(dest_dir.path(), "pcrc-msg-01").is_none());
 }
 
-/// PT-06 (stronger branch): the tampered-pcrc32 copy is on the primary tier
-/// and a valid copy on a secondary tier — the download must fail over to
-/// the backup and reconstruct the plaintext.
+/// The tampered-pcrc32 copy is on the primary tier and a valid copy on a
+/// secondary tier — the download must fail over to the backup and
+/// reconstruct the plaintext.
 #[tokio::test]
-async fn single_part_with_pcrc32_mismatch_fails_over_with_zero_output() {
+async fn single_part_with_pcrc32_mismatch_fails_over_to_valid_backup() {
     let password = "pcrc32-single-part-password";
     let salt = [0x4Bu8; 16];
     let session = Arc::new(EncryptionSession::new(password, salt).unwrap());
     let payload = b"single part with tampered ciphertext pcrc32 payload";
-    let enc = encode_article(
+    let framed = frame_single_part_pcrc32(&session, "single.bin", payload, 1);
+    let tampered = tamper_ciphertext_crc(
         &session,
+        password,
+        &framed,
         "single.bin",
         payload.len() as u64,
-        single_part(),
-        payload,
+        PartSpec {
+            number: 1,
+            total: 2,
+            offset: 0,
+        },
         1,
     );
-    let restored = pesto::crypto::decrypt_yenc_control_lines(&session, 1, &enc).unwrap();
-    let mut lines: Vec<Vec<u8>> = restored
-        .split_inclusive(|&b| b == b'\n')
-        .map(|l| l.to_vec())
-        .collect();
-    lines[0].splice(8..8, b"part=1 total=1 ".iter().copied());
-    lines.insert(
-        1,
-        format!("=ypart begin=1 end={}\r\n", payload.len()).into_bytes(),
-    );
-    let footer = lines.last_mut().unwrap();
-    let crc_pos = footer
-        .windows(6)
-        .position(|w| w == b"crc32=")
-        .expect("footer carries crc32=");
-    footer.splice(crc_pos..crc_pos + 6, b"part=1 pcrc32=".iter().copied());
-    let framed = pesto::crypto::encrypt_yenc_control_lines(&session, 1, &lines.concat()).unwrap();
-    let tampered = tamper_footer_crc(&session, 1, &framed);
 
     let mut bad = HashMap::new();
     bad.insert("pcrc-msg-01".to_string(), tampered);
@@ -846,78 +861,6 @@ async fn single_part_with_pcrc32_mismatch_fails_over_with_zero_output() {
     assert_eq!(
         penne::cache::load(dest_dir.path(), "pcrc-msg-01").unwrap(),
         framed
-    );
-}
-
-/// PT-06 (real second-tier failover): the primary tier serves an
-/// auth-failing (data-line tampered) copy and the secondary tier serves
-/// the valid copy — the download must fail over to the backup and
-/// reconstruct the identical plaintext, with no corrupt/missing record.
-/// Unlike `tampered_primary_fails_over_to_backup_tier` (which builds the
-/// queue directly), this drives the full NZB → queue → download path.
-#[tokio::test]
-async fn auth_failing_primary_fails_over_to_valid_secondary_tier() {
-    let password = "pt06-second-tier-password";
-    let salt = [0x4Cu8; 16];
-    let session = Arc::new(EncryptionSession::new(password, salt).unwrap());
-    let payload = b"PT-06 payload: primary copy is tampered, secondary is valid.";
-    let encoded = encode_article(
-        &session,
-        "pt06.bin",
-        payload.len() as u64,
-        single_part(),
-        payload,
-        1,
-    );
-    // Single-part: line 0 =ybegin, line 1 =yencryption, line 2 data.
-    let tampered = tamper_data_line(&encoded, 2);
-
-    let primary_counter = Arc::new(AtomicUsize::new(0));
-    let mut primary_known = HashMap::new();
-    primary_known.insert("pt06-msg-01@test".to_string(), tampered);
-    let primary_addr = spawn_fake_server_counting(primary_known, Some(primary_counter.clone()));
-
-    let secondary_counter = Arc::new(AtomicUsize::new(0));
-    let mut secondary_known = HashMap::new();
-    secondary_known.insert("pt06-msg-01@test".to_string(), encoded.clone());
-    let secondary_addr =
-        spawn_fake_server_counting(secondary_known, Some(secondary_counter.clone()));
-
-    let segments = format!(
-        "<segment bytes=\"{}\" number=\"1\">pt06-msg-01@test</segment>",
-        payload.len()
-    );
-    let xml = encrypted_nzb_xml(password, "&quot;pt06.bin&quot; yEnc", &segments);
-    let dest = tempfile::tempdir().unwrap();
-    let tiers = vec![
-        ServerTier::solo(server_entry(primary_addr)),
-        ServerTier::solo(server_entry(secondary_addr)),
-    ];
-    let outcome = run_download_nzb(&xml, &tiers, dest.path()).await;
-
-    // The primary was tried and failed authentication; the backup served
-    // the valid copy — so the segment completed with identical plaintext.
-    assert_eq!(
-        primary_counter.load(Ordering::SeqCst),
-        1,
-        "primary tier must be tried first"
-    );
-    assert_eq!(
-        secondary_counter.load(Ordering::SeqCst),
-        1,
-        "auth failure must fail over to the secondary tier"
-    );
-    assert!(outcome.missing.is_empty(), "missing: {:?}", outcome.missing);
-    assert!(outcome.corrupt.is_empty(), "corrupt: {:?}", outcome.corrupt);
-    assert_eq!(
-        std::fs::read(dest.path().join("pt06.bin")).unwrap(),
-        payload,
-        "plaintext from the secondary tier must be identical"
-    );
-    // Cache holds the intact body fetched from the secondary tier.
-    assert_eq!(
-        penne::cache::load(dest.path(), "pt06-msg-01@test").unwrap(),
-        encoded
     );
 }
 
@@ -1297,16 +1240,25 @@ async fn unencrypted_download_round_trips_without_decryptor() {
     );
 }
 
-// --- Negative cases with TRUE failure causes (pesto-download-6) -----------
+// --- Negative cases through the public download seam --------------------
 //
-// The existing "auth failure" tests above flip a data byte and therefore
-// trip the wire-CRC check (`ciphertext CRC mismatch`) before AEAD ever
-// runs. The tests in this section build copies whose data lines and wire
-// CRCs remain intact, so the failure cause is the intended one:
-// - wrong password        -> CONTROL_LINE_DECRYPT_FAILURE (FF1 garbage Line 1)
-// - truncation            -> LINE_TRUNCATED / LINE_TOO_SHORT
-// - malformed =yencryption-> INVALID_TOKEN_COUNT / UNSUPPORTED_CIPHER / ...
-// - flipped tag, valid CRC-> AUTHENTICATION_FAILURE (true Poly1305 failure)
+// The "auth failure" tests above flip a data byte and therefore trip the
+// wire-CRC check (`ciphertext CRC mismatch`) before AEAD ever runs. The
+// cases in this section assert distinct observable failure causes at this
+// seam:
+// - data-line flip, intact control lines -> ciphertext CRC mismatch
+// - wrong password                       -> CONTROL_LINE_DECRYPT_FAILURE
+//                                           (FF1 garbage Line 1)
+// - truncation                           -> LINE_TRUNCATED / LINE_TOO_SHORT
+//
+// Cases that need a wire mintable only with the crate-private
+// restore/re-encrypt codec — a flipped `tag=` with intact wire CRC (true
+// Poly1305 AUTHENTICATION_FAILURE), malformed `=yencryption` grammar,
+// and non-canonical-width `pcrc32=` — are covered in the pesto crate's
+// adapter tests instead (see `test_adapter_flipped_tag_with_intact_
+// wire_crc_fails_authentication`, the `parse_yencryption_line` /
+// malformed-vector coverage, and `multipart_pcrc32_accepts_non_eight_
+// hex_widths`).
 //
 // Each case asserts the three binding behaviors: the error carries its
 // specific cause, the copy is retried on another server (failover), and no
@@ -1388,68 +1340,42 @@ async fn assert_bad_copy_fails_over_with_zero_output(
     );
 }
 
-/// Single-part article whose data lines and wire CRC are intact but whose
-/// `=yencryption` tag was flipped: wire CRC verifies, Poly1305 fails.
-/// TRUE authentication failure (Body Std v1.2 §5, Zero-Output Guarantee).
+/// Single-part article with one data-line byte flipped: the control
+/// lines restore cleanly, but the flipped ciphertext byte breaks the
+/// footer wire CRC, so the adapter rejects the copy with `ciphertext
+/// CRC mismatch` before AEAD ever runs (Body Std v1.2 §5,
+/// Zero-Output Guarantee).
+///
+/// A true Poly1305 failure — flipped `tag=` with intact wire CRC —
+/// cannot be minted through the public upload adapter, because the tag
+/// lives FF1-encrypted inside the control lines and the adapter always
+/// pairs ciphertext and tag; that exact construction is covered inside
+/// the pesto crate by `test_adapter_flipped_tag_with_intact_wire_crc_
+/// fails_authentication`, which asserts AUTHENTICATION_FAILURE.
 #[tokio::test]
-async fn flipped_tag_with_intact_wire_crc_fails_poly1305_then_fails_over() {
-    let password = "tag-flip-password";
+async fn flipped_data_line_fails_ciphertext_crc_then_fails_over() {
+    let password = "data-line-flip-password";
     let salt = [0x71u8; 16];
     let session = Arc::new(EncryptionSession::new(password, salt).unwrap());
-    let payload = b"Payload whose authentication tag is tampered with valid CRC.";
+    let payload = b"Payload whose data line is tampered, breaking the wire CRC.";
     let encoded = encode_article(
         &session,
-        "tagflip.bin",
+        "crcflip.bin",
         payload.len() as u64,
         single_part(),
         payload,
         1,
     );
 
-    // Flip one hex digit INSIDE the encrypted `=yencryption` tag, then
-    // restore the FF1 control-line ciphertext so only the tag bit changes.
-    // The tag is stored encrypted on the wire, so: decrypt control lines,
-    // locate the restored `tag=` hex on the control line, flip a hex digit,
-    // re-encrypt. Data lines are arbitrary binary bytes and untouched
-    // throughout, so the wire CRC still verifies.
-    let restored = pesto::crypto::decrypt_yenc_control_lines(&session, 1, &encoded).unwrap();
-    let lines = pesto::crypto::split_lines_preserving_endings(&restored);
-    let mut modified = Vec::new();
-    for line in lines {
-        if line.content.starts_with(b"=yencryption") {
-            let text = std::str::from_utf8(line.content).unwrap();
-            let idx = text.find("tag=").expect("restored article carries tag=");
-            let mut tampered_line = text.to_string();
-            let digit_pos = idx + 4; // first hex char of the 32-hex-digit tag
-            let replacement = if &tampered_line[digit_pos..digit_pos + 1] == "f" {
-                "0"
-            } else {
-                "f"
-            };
-            tampered_line.replace_range(digit_pos..digit_pos + 1, replacement);
-            modified.extend_from_slice(tampered_line.as_bytes());
-            modified.extend_from_slice(line.ending);
-        } else {
-            modified.extend_from_slice(line.content);
-            modified.extend_from_slice(line.ending);
-        }
-    }
-    let tampered = pesto::crypto::encrypt_yenc_control_lines(&session, 1, &modified).unwrap();
-
-    // The data line is byte-identical between the two copies.
-    let data_line = |a: &[u8]| a.split(|&b| b == b'\n').nth(2).unwrap().to_vec();
-    assert_eq!(
-        data_line(&encoded),
-        data_line(&tampered),
-        "tag flip must leave data lines intact"
-    );
+    // Single-part: line 0 =ybegin, line 1 =yencryption, line 2 data.
+    let tampered = tamper_data_line(&encoded, 2);
 
     assert_bad_copy_fails_over_with_zero_output(
         password,
         tampered,
-        "tagflip.bin",
-        "tagflip-msg-01",
-        "AUTHENTICATION_FAILURE",
+        "crcflip.bin",
+        "crcflip-msg-01",
+        "ciphertext CRC mismatch",
     )
     .await;
 }
@@ -1503,7 +1429,7 @@ async fn truncated_encrypted_body_is_reported_corrupt_with_failover() {
     // Cut after Line 1 while keeping its CRLF line ending intact so NNTP
     // wire framing succeeds: the article is truncated to 1 line (< 3 lines
     // required for single-part encrypted articles).
-    let lines = pesto::crypto::split_lines_preserving_endings(&encoded);
+    let lines = split_lines_preserving_endings(&encoded);
     assert!(lines.len() >= 3, "valid article must have at least 3 lines");
     let truncated = [lines[0].content, lines[0].ending].concat();
 
@@ -1515,160 +1441,6 @@ async fn truncated_encrypted_body_is_reported_corrupt_with_failover() {
         "LINE_TRUNCATED",
     )
     .await;
-}
-
-/// A malformed `=yencryption` line (missing fields / bad grammar, built by
-/// rewriting the restored line and re-encrypting control lines) must be
-/// rejected with its grammar error and retried on the next server.
-#[tokio::test]
-async fn malformed_yencryption_line_is_rejected_with_failover() {
-    let password = "malformed-yencryption-password";
-    let salt = [0x74u8; 16];
-    let session = Arc::new(EncryptionSession::new(password, salt).unwrap());
-    let payload = b"Payload carried by an article with a malformed =yencryption line.";
-    let encoded = encode_article(
-        &session,
-        "malformed.bin",
-        payload.len() as u64,
-        single_part(),
-        payload,
-        1,
-    );
-
-    // Rebuild the restored article with a `=yencryption` line missing the
-    // `tag=` field (bad grammar), then re-encrypt the control lines. Data
-    // lines stay intact, so this is not a wire-CRC failure.
-    let restored = pesto::crypto::decrypt_yenc_control_lines(&session, 1, &encoded).unwrap();
-    let lines = pesto::crypto::split_lines_preserving_endings(&restored);
-    let mut modified = Vec::new();
-    for line in lines {
-        if line.content.starts_with(b"=yencryption") {
-            let text = std::str::from_utf8(line.content).unwrap();
-            let salt_str = text
-                .split(" salt=")
-                .nth(1)
-                .unwrap()
-                .split(" index=")
-                .next()
-                .unwrap();
-            let malformed_line =
-                format!("=yencryption cipher=XChaCha20-Poly1305 salt={salt_str} index=00000001");
-            modified.extend_from_slice(malformed_line.as_bytes());
-            modified.extend_from_slice(line.ending);
-        } else {
-            modified.extend_from_slice(line.content);
-            modified.extend_from_slice(line.ending);
-        }
-    }
-    let malformed = pesto::crypto::encrypt_yenc_control_lines(&session, 1, &modified).unwrap();
-
-    assert_bad_copy_fails_over_with_zero_output(
-        password,
-        malformed,
-        "malformed.bin",
-        "malformed-msg-01",
-        "INVALID_TOKEN_COUNT",
-    )
-    .await;
-}
-
-/// Body Std v1.2 §5 step 5 / Q-8 / X-2: the wire pcrc32 value is a hexadecimal
-/// string of any width that parses as a CRC-32 value; it need not be
-/// zero-padded to eight digits, and non-eight-digit widths (e.g. 10 digits
-/// with leading zeros, or fewer than 8 digits) must be accepted.
-#[tokio::test]
-async fn multipart_pcrc32_accepts_non_eight_hex_width() {
-    let password = "pcrc32-width-password";
-    let salt = [0x55u8; 16];
-    let session = Arc::new(EncryptionSession::new(password, salt).unwrap());
-    let payload_p1 = b"First part of payload with non-8-digit hex pcrc32.";
-    let payload_p2 = b"Second part of payload with non-8-digit hex pcrc32.";
-    let mut original = Vec::new();
-    original.extend_from_slice(payload_p1);
-    original.extend_from_slice(payload_p2);
-    let total_len = original.len() as u64;
-
-    let art1 = encode_article(
-        &session,
-        "width.bin",
-        total_len,
-        PartSpec {
-            number: 1,
-            total: 2,
-            offset: 0,
-        },
-        payload_p1,
-        1,
-    );
-    let art2 = encode_article(
-        &session,
-        "width.bin",
-        total_len,
-        PartSpec {
-            number: 2,
-            total: 2,
-            offset: payload_p1.len() as u64,
-        },
-        payload_p2,
-        2,
-    );
-
-    // Re-format art1's footer pcrc32 to have 10 hex digits (leading zeroes "00"),
-    // which has width 10 != 8 but parses to the exact same u32 CRC.
-    let restored1 = pesto::crypto::decrypt_yenc_control_lines(&session, 1, &art1).unwrap();
-    let lines1 = pesto::crypto::split_lines_preserving_endings(&restored1);
-    let mut modified1 = Vec::new();
-    for line in lines1 {
-        if line.content.starts_with(b"=yend") {
-            let text = std::str::from_utf8(line.content).unwrap();
-            let idx = text.find("pcrc32=").expect("footer carries pcrc32=");
-            let crc_hex = &text[idx + 7..idx + 15];
-            let new_footer = format!("{}00{}{}", &text[..idx + 7], crc_hex, &text[idx + 15..]);
-            modified1.extend_from_slice(new_footer.as_bytes());
-            modified1.extend_from_slice(line.ending);
-        } else {
-            modified1.extend_from_slice(line.content);
-            modified1.extend_from_slice(line.ending);
-        }
-    }
-    let art1_custom = pesto::crypto::encrypt_yenc_control_lines(&session, 1, &modified1).unwrap();
-
-    let mut known = HashMap::new();
-    known.insert("width-msg-01".to_string(), art1_custom);
-    known.insert("width-msg-02".to_string(), art2);
-    let addr = spawn_fake_server(known);
-
-    let queue = queue_with_segments(
-        "width.bin",
-        vec![
-            penne::queue::QueuedSegment {
-                message_id: "width-msg-01".to_string(),
-                part: 1,
-                bytes: payload_p1.len() as u64,
-            },
-            penne::queue::QueuedSegment {
-                message_id: "width-msg-02".to_string(),
-                part: 2,
-                bytes: payload_p2.len() as u64,
-            },
-        ],
-    );
-
-    let dest_dir = tempfile::tempdir().unwrap();
-    let decryptor = Arc::new(DownloadDecryptionAdapter::with_password(password));
-    let tiers = vec![ServerTier::solo(server_entry(addr))];
-
-    let outcome =
-        download_queue_with_decryptor(&queue, &tiers, dest_dir.path(), 0, None, Some(decryptor))
-            .await
-            .expect("download must succeed when pcrc32 width != 8 is valid hex");
-
-    assert!(outcome.corrupt.is_empty(), "corrupt: {:?}", outcome.corrupt);
-    assert!(outcome.missing.is_empty(), "missing: {:?}", outcome.missing);
-    assert_eq!(
-        std::fs::read(dest_dir.path().join("width.bin")).unwrap(),
-        original
-    );
 }
 
 /// PROOF TEST for pesto-upload-7: an NZB merging files from distinct upload

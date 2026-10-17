@@ -31,7 +31,7 @@ use tracing::{debug, info, warn};
 /// iteration; equivalence with the naive enumeration is property-tested in
 /// this module and exercised by the `index_allocation.json` conformance
 /// vectors.
-pub fn nth_safe_segment_index(ordinal: u64) -> Option<u32> {
+pub(crate) fn nth_safe_segment_index(ordinal: u64) -> Option<u32> {
     if ordinal == 0 {
         return None;
     }

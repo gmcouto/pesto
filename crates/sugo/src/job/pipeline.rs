@@ -156,7 +156,7 @@ pub async fn run_job(state: &Arc<AppState>, job_id: Uuid) -> Result<()> {
         decryptor,
     )
     .await?;
-    // `download_queue` owns the only sender clone, so the channel closes on
+    // `download_queue_with_decryptor` owns the only sender clone, so the channel closes on
     // its own once it returns; this just waits for the forwarder's last
     // update to land before moving on to the next phase.
     forward_task.await.ok();

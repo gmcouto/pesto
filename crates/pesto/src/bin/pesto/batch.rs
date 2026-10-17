@@ -487,9 +487,15 @@ pub(super) async fn run_batch(
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_else(|| "season".to_string());
             let total_bytes: u64 = all_segments.iter().map(|s| s.bytes).sum();
+            // Q-G: hooks are functional — they must receive the password the
+            // season NZB itself carries (NZB-meta precedence: encryption
+            // password first, then NZB password, then the season/archive
+            // password), matching `season NzbMeta` above and the library
+            // upload hook. Ordinary seasons (no encryption) are unchanged.
             let effective_password = config
-                .nzb_password
+                .encrypt_password
                 .clone()
+                .or_else(|| config.nzb_password.clone())
                 .or_else(|| season_password.clone());
             let season_obfuscate = match config.obfuscate {
                 ObfuscateMode::None => "none",

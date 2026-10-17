@@ -256,13 +256,15 @@ pub async fn download_queue_with_decryptor(
         for seg in &file.segments {
             if let Some(cached) = cache::load(dest_dir, &seg.message_id) {
                 if let Ok(decoded) = decode_body(&decryptor, &cached) {
-                    // Body Std v1.2 §2.1: a cache hit must pass the same
-                    // optional declared-bytes predicate a fresh fetch
-                    // applies, so a changed nonzero NZB `bytes` value is
-                    // rejected on a warm cache exactly like on a cold one
-                    // (PE-NEXT-5). The predicate is encrypted-only; a
-                    // mismatch falls through to the provider fetch below and
-                    // leaves the cached bytes themselves untouched.
+                    // Body Std v1.2 B §8 + B §5 (optional bytes
+                    // comparison, PROVIDER_FAILOVER): a cache hit must
+                    // pass the same optional declared-bytes predicate a
+                    // fresh fetch applies, so a changed nonzero NZB
+                    // `bytes` value is rejected on a warm cache exactly
+                    // like on a cold one (PE-NEXT-5). The predicate is
+                    // encrypted-only; a mismatch falls through to the
+                    // provider fetch below and leaves the cached bytes
+                    // themselves untouched.
                     let declared_bytes_ok = decryptor.is_none()
                         || seg.bytes == 0
                         || decoded.data.len() as u64 == seg.bytes;
@@ -605,14 +607,15 @@ async fn worker_loop(
         };
 
         let decoded_result = decode_body(&ctx.decryptor, &body).and_then(|decoded| {
-            // Body Std v1.2 §2.1: the NZB `bytes` attribute is the plaintext
-            // segment length, and checking it is optional (a MAY). The check
-            // applies only to encrypted downloads (the plain path keeps
-            // upstream's no-check behavior). When this check fails, the copy
-            // is a corrupt provider copy. The error goes to the leftover
-            // queue as provider failover (not a METADATA_VALIDATION
-            // failure), so the next server is tried. Only the last server's
-            // copy is reported as SegmentCorrupt.
+            // Body Std v1.2 B §8 + B §5 (optional bytes comparison,
+            // PROVIDER_FAILOVER): the NZB `bytes` attribute is the
+            // plaintext segment length, and checking it is optional (a
+            // MAY). The check applies only to encrypted downloads (the
+            // plain path keeps upstream's no-check behavior). When this
+            // check fails, the copy is a corrupt provider copy. The error
+            // goes to the leftover queue as provider failover (not a
+            // METADATA_VALIDATION failure), so the next server is tried.
+            // Only the last server's copy is reported as SegmentCorrupt.
             if ctx.decryptor.is_some()
                 && item.bytes > 0
                 && decoded.data.len() as u64 != item.bytes

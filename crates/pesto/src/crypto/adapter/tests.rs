@@ -256,39 +256,6 @@ fn adapter_rejects_uu_encoded_substitute_fail_closed() {
 }
 
 #[test]
-fn zero_length_encrypted_body_round_trips() {
-    let password = "zero-length-body";
-    let salt = control::generate_alphabet_salt();
-    let session = Arc::new(EncryptionSession::new(password, salt).unwrap());
-    let upload_adapter = UploadEncryptionAdapter::new(session);
-    let mut body = Vec::new();
-    let encoded = upload_adapter
-        .encode_article(
-            "empty.bin",
-            0,
-            PartSpec {
-                number: 1,
-                total: 1,
-                offset: 0,
-            },
-            b"",
-            128,
-            1u32,
-            &mut body,
-        )
-        .unwrap();
-
-    // Zero-output sanity for empty segments: plaintext is empty (so decoded
-    // data stays empty), file_size=0 — begin==end==1 is permitted (nothing
-    // written to the assembly).
-    let decoded = DownloadDecryptionAdapter::with_password(password)
-        .decode_article(&encoded.body)
-        .unwrap();
-    assert!(decoded.data.is_empty());
-    assert_eq!(decoded.file_size, 0);
-}
-
-#[test]
 fn filenames_containing_control_keywords_round_trip() {
     // Filenames embedding yEnc control keywords (`part=`, `=ypart`) must
     // survive the full encode/decode round trip in both framings.
@@ -595,6 +562,110 @@ fn encrypted_missing_name_or_crc_fails_closed() {
         assert!(DownloadDecryptionAdapter::with_password(password)
             .decode_article(&wire)
             .is_err());
+    }
+}
+
+#[test]
+fn parse_yencryption_line_rejects_mutated_first_token_and_129_byte_line() {
+    // R11-PC-03: mutated first token (`=yencryptionX`, 129 bytes) must not
+    // parse, even though every field token is individually valid.
+    let valid = "=yencryption cipher=XChaCha20-Poly1305 salt=1a2b3c4d5e6f7890abcdef1234567890 index=00000001 tag=22e2fc27ec65d630332c351dbc5ba362";
+    assert_eq!(valid.len(), super::CANONICAL_YENCRYPTION_LINE_LEN);
+    parse_yencryption_line(valid.as_bytes()).expect("canonical line must parse");
+
+    let mutated = "=yencryptionX cipher=XChaCha20-Poly1305 salt=1a2b3c4d5e6f7890abcdef1234567890 index=00000001 tag=22e2fc27ec65d630332c351dbc5ba362";
+    assert_eq!(
+        mutated.len(),
+        129,
+        "mutated-token case is the 129-byte line"
+    );
+    let err = parse_yencryption_line(mutated.as_bytes())
+        .expect_err("mutated first token must be rejected");
+    assert!(
+        err.to_string().contains("INVALID_TOKEN_COUNT")
+            || err.to_string().contains("INVALID_LENGTH"),
+        "got: {err}"
+    );
+
+    // A 129-byte line with the exact first token (longer cipher token)
+    // is likewise rejected rather than accepted as canonical grammar.
+    let long = "=yencryption cipher=XChaCha20-Poly1305X salt=1a2b3c4d5e6f7890abcdef1234567890 index=00000001 tag=22e2fc27ec65d630332c351dbc5ba362";
+    assert_eq!(long.len(), 129);
+    assert!(
+        parse_yencryption_line(long.as_bytes()).is_err(),
+        "129-byte line must be rejected"
+    );
+}
+
+#[test]
+fn parse_yencryption_line_rejects_forbidden_segment_index_bytes() {
+    // R11-PC-05: index whose uint32_be contains 0x0A/0x0D is rejected at
+    // the grammar layer (PROVIDER_FAILOVER), not only via dual-bootstrap.
+    for (index_hex, idx) in [("0000000a", 10u32), ("0000000d", 13), ("0000010a", 266)] {
+        let line = format!(
+            "=yencryption cipher=XChaCha20-Poly1305 salt=1a2b3c4d5e6f7890abcdef1234567890 index={index_hex} tag=22e2fc27ec65d630332c351dbc5ba362"
+        );
+        assert_eq!(line.len(), super::CANONICAL_YENCRYPTION_LINE_LEN);
+        let err = parse_yencryption_line(line.as_bytes())
+            .expect_err(&format!("index {idx} ({index_hex}) must be rejected"));
+        assert!(
+            err.to_string().contains("FORBIDDEN_SEGMENT_INDEX_BYTE"),
+            "index {idx}: got {err}"
+        );
+    }
+}
+
+#[test]
+fn encode_article_rejects_zero_and_forbidden_segment_indices() {
+    // R11-PC-04: the producing seam fails closed before nonce derivation.
+    let password = "encode-index-guard";
+    let salt = control::generate_alphabet_salt();
+    let session = Arc::new(EncryptionSession::new(password, salt).unwrap());
+    let uploader = UploadEncryptionAdapter::new(session);
+    for idx in [0u32, 10, 13, 266, 269] {
+        let err = match uploader.encode_article(
+            "guard.bin",
+            4,
+            PartSpec {
+                number: 1,
+                total: 1,
+                offset: 0,
+            },
+            b"data",
+            128,
+            idx,
+            &mut Vec::new(),
+        ) {
+            Ok(_) => panic!("segment_index {idx} must be rejected at the seam"),
+            Err(e) => e,
+        };
+        let expected = if idx == 0 {
+            "ZERO_SEGMENT_INDEX"
+        } else {
+            "FORBIDDEN_SEGMENT_INDEX_BYTE"
+        };
+        assert!(
+            err.to_string().contains(expected),
+            "index {idx}: expected {expected}, got {err}"
+        );
+    }
+    // Neighbouring safe indices still encode.
+    for idx in [1u32, 9, 11, 267] {
+        uploader
+            .encode_article(
+                "guard.bin",
+                4,
+                PartSpec {
+                    number: 1,
+                    total: 1,
+                    offset: 0,
+                },
+                b"data",
+                128,
+                idx,
+                &mut Vec::new(),
+            )
+            .unwrap_or_else(|e| panic!("safe index {idx} must encode: {e}"));
     }
 }
 

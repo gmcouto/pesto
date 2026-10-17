@@ -5,7 +5,7 @@ use argon2::{Algorithm, Argon2, Params, Version};
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use std::fmt;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -20,21 +20,27 @@ impl EncryptionSession {
         let params = Params::new(65536, 1, 4, Some(32))
             .map_err(|e| anyhow::anyhow!("invalid argon2 params: {e}"))?;
         let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
-        let mut master_key = [0u8; 32];
+        // KDF intermediates are key material: keep them in `Zeroizing`
+        // from creation so no plain stack copy survives the move into
+        // the session (which itself stores `Zeroizing` keys).
+        let mut master_key = Zeroizing::new([0u8; 32]);
         argon2
-            .hash_password_into(password.as_bytes(), &salt, &mut master_key)
+            .hash_password_into(password.as_bytes(), &salt, &mut *master_key)
             .map_err(|e| anyhow::anyhow!("argon2 kdf computation failed: {e}"))?;
 
-        let mut mac = HmacSha256::new_from_slice(&master_key)
+        let mut mac = HmacSha256::new_from_slice(&*master_key)
             .map_err(|e| anyhow::anyhow!("hmac init error: {e}"))?;
         mac.update(b"yenc-control key");
-        let control_digest = mac.finalize().into_bytes();
-        let mut control_key = [0u8; 32];
+        // `GenericArray` does not implement `Zeroize` in this build, so
+        // copy into a `Zeroizing` array and zero the digest explicitly.
+        let mut control_digest = mac.finalize().into_bytes();
+        let mut control_key = Zeroizing::new([0u8; 32]);
         control_key.copy_from_slice(&control_digest);
+        control_digest.as_mut_slice().zeroize();
 
         Ok(Self {
-            master_key: Zeroizing::new(master_key),
-            control_key: Zeroizing::new(control_key),
+            master_key,
+            control_key,
             salt,
         })
     }

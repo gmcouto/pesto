@@ -542,9 +542,14 @@ async fn run_season_hooks(
         servers: season_servers_str,
         group: config.groups.first().cloned().unwrap_or_default(),
         groups: config.groups.join(":"),
+        // Q-G: hooks are functional — they must receive the password the
+        // season NZB itself carries (`season_nzb_meta` precedence:
+        // encryption password first, then NZB password, then the
+        // season/archive password). Ordinary seasons are unchanged.
         password: config
-            .nzb_password
+            .encrypt_password
             .as_deref()
+            .or(config.nzb_password.as_deref())
             .or(config.compress_password.as_deref())
             .unwrap_or("")
             .to_string(),

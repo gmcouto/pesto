@@ -75,8 +75,14 @@ fn test_malformed_inputs_rejection() {
             "control_syntax" => {
                 if let Some(salt_hex) = vec.get("tampered_salt_hex").and_then(|v| v.as_str()) {
                     let salt_bytes = hex_decode(salt_hex);
-                    // construct a line1 with 16-byte salt + minimal content
-                    let line1 = [salt_bytes.as_slice(), b"=ybegin line=128 size=18"].concat();
+                    // construct a line1 with 16-byte salt + segmentIndex +
+                    // minimal content (mirrors public_api.rs bootstrap shape)
+                    let line1 = [
+                        salt_bytes.as_slice(),
+                        &1u32.to_be_bytes(),
+                        b"=ybegin line=128 size=18",
+                    ]
+                    .concat();
                     let res = extract_bootstrap_from_line1(&line1);
                     assert!(res.is_err(), "vector {id} expected error {expected_err}");
                     let err_msg = res.unwrap_err().to_string();
@@ -335,7 +341,9 @@ fn test_malformed_inputs_rejection() {
             }
             "framing" => {
                 // A body-only article lacks the combined-mode bootstrap and
-                // must fail closed at the provider corruption gate.
+                // must fail closed at the provider corruption gate with the
+                // fixture's declared classification.
+                assert_eq!(id, "metadata-04-body-only-vs-combined-only");
                 let password = "body-only-password";
                 let download_adapter = DownloadDecryptionAdapter::with_password(password);
                 let body_only = b"=ybegin line=128 size=4 name=meta.bin\r\n=yencryption cipher=XChaCha20-Poly1305 salt=1a2b3c4d5e6f7890abcdef1234567890 index=00000001 tag=ed70d238067735a20783df5e094ccafa\r\ntest\r\n=yend size=4 crc32=d87f7e0c\r\n";
@@ -346,8 +354,8 @@ fn test_malformed_inputs_rejection() {
                 );
                 let msg = res.unwrap_err().to_string();
                 assert!(
-                    !msg.contains("test"),
-                    "vector {id}: error must not leak the body bytes"
+                    msg.contains(expected_err),
+                    "vector {id} error '{msg}' should contain '{expected_err}'"
                 );
             }
             "metadata_validation" => {

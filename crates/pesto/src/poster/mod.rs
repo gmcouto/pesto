@@ -49,7 +49,7 @@ mod orchestrator;
 mod pipeline;
 mod prepare;
 pub use orchestrator::post_files_inner_with_release_prefix;
-pub use prepare::ReleaseLayout;
+pub(crate) use prepare::ReleaseLayout;
 mod producer;
 mod result;
 pub use result::repost_failed_tasks;
@@ -81,8 +81,9 @@ struct FileMeta {
     /// `Shared::total_files > 0`; encrypted uploads always assign it, while
     /// unencrypted uploads zero it when `--file-counter` is off.
     file_index: u32,
-    /// Preserved size/mtime fingerprint for resume invalidation. None for
-    /// PAR2-generated files (no on-disk source to compare against).
+    /// Preserved size/mtime fingerprint for resume invalidation.
+    /// `mtime: None` for PAR2-generated files (no on-disk source to compare
+    /// against).
     fingerprint: crate::resume::FileFingerprint,
 }
 
@@ -333,8 +334,11 @@ async fn post_pregenerated_release(
             .release_prefix
             .as_deref()
             .map(|prefix| layout::volume_name(prefix, *vol));
-        let index_offset = u32::from(shared.config.obfuscate.policy().publish_par2_index);
-        let file_index = metas.len() as u32 + 1 + index_offset + vol_idx as u32;
+        let file_index = par2_volume_ordinal(
+            metas.len(),
+            shared.config.obfuscate.policy().publish_par2_index,
+            vol_idx,
+        );
         push_par2_file(&vol_path, vol_name, wire_override, file_index, shared, tx).await?;
     }
     Ok(())

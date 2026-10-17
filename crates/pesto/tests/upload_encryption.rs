@@ -227,7 +227,7 @@ async fn unencrypted_upload_preserves_standard_yenc_wire_format() {
 }
 
 #[test]
-fn test_cli_upload_artifacts_emits_encrypted_nzb() {
+fn cli_upload_artifacts_emits_encrypted_nzb() {
     let tmp = tempfile::tempdir().unwrap();
     let file = tmp.path().join("file.bin");
     std::fs::write(&file, b"test content for encryption").unwrap();
@@ -266,7 +266,7 @@ fn test_cli_upload_artifacts_emits_encrypted_nzb() {
 }
 
 #[tokio::test]
-async fn test_encrypted_upload_metadata_provenance() {
+async fn encrypted_upload_metadata_provenance() {
     let (port, _captured) = spawn_mock_server().await;
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("two_parts.bin");
@@ -304,7 +304,7 @@ async fn test_encrypted_upload_metadata_provenance() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_encrypted_upload_multifile_par2_standard() {
+async fn encrypted_upload_multifile_par2_standard() {
     let (port, captured) = spawn_mock_server().await;
     let dir = tempfile::tempdir().unwrap();
     let path1 = dir.path().join("data1.bin");
@@ -436,7 +436,7 @@ async fn test_encrypted_upload_multifile_par2_standard() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_encrypted_upload_multifile_par2_obfuscated() {
+async fn encrypted_upload_multifile_par2_obfuscated() {
     for obf_mode in [ObfuscateMode::Full, ObfuscateMode::Article] {
         let (port, captured) = spawn_mock_server().await;
         let dir = tempfile::tempdir().unwrap();
@@ -569,7 +569,7 @@ async fn test_encrypted_upload_multifile_par2_obfuscated() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_persistence_lifecycle_invariants() {
+async fn encrypted_resume_reuses_session_salt_and_indices() {
     let (port, captured) = spawn_mock_server().await;
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("resume_test.bin");

@@ -103,6 +103,20 @@ impl UploadEncryptionAdapter {
         if file_size >= (1u64 << 32) {
             bail!("SIZE_OVERFLOW: encrypted file size must be less than 4 GiB (2^32 bytes)");
         }
+        // Fail closed at the producing seam (Body Std v1.2 §4/§8,
+        // Control Std v1.2 §2): a zero index or one whose big-endian
+        // bytes contain 0x0A/0x0D mints an article every conforming
+        // decoder must reject, so refuse before nonce derivation.
+        if segment_index == 0 {
+            bail!("ZERO_SEGMENT_INDEX: segment index cannot be zero");
+        }
+        if segment_index
+            .to_be_bytes()
+            .iter()
+            .any(|&b| b == 0x0A || b == 0x0D)
+        {
+            bail!("FORBIDDEN_SEGMENT_INDEX_BYTE: segment index bytes contain 0x0A or 0x0D");
+        }
         let nonce = self.session.derive_body_nonce(segment_index);
         // AAD geometry (Body Encryption Standard v1.2 §2.1): multipart
         // partBegin is the =ypart `begin` (= offset + 1); single-part
@@ -141,14 +155,14 @@ impl UploadEncryptionAdapter {
 
 /// Parameters extracted from the `=yencryption` control line.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct YEncryptionParams {
-    pub salt: [u8; 16],
-    pub segment_index: u32,
-    pub tag: [u8; 16],
+pub(crate) struct YEncryptionParams {
+    pub(crate) salt: [u8; 16],
+    pub(crate) segment_index: u32,
+    pub(crate) tag: [u8; 16],
 }
 
 /// Byte length of the canonical `=yencryption` line (v1.2 Body Std §4).
-pub const CANONICAL_YENCRYPTION_LINE_LEN: usize = 128;
+pub(crate) const CANONICAL_YENCRYPTION_LINE_LEN: usize = 128;
 
 /// Parse parameters from `=yencryption ...` control line.
 ///
@@ -165,7 +179,7 @@ pub const CANONICAL_YENCRYPTION_LINE_LEN: usize = 128;
 /// rejected. Ordinary yEnc headers (`=ybegin`/`=ypart`/`=yend` in
 /// `yenc/decode.rs`) historically allow flexible whitespace and are
 /// deliberately NOT made strict here.
-pub fn parse_yencryption_line(line: &[u8]) -> Result<YEncryptionParams> {
+pub(crate) fn parse_yencryption_line(line: &[u8]) -> Result<YEncryptionParams> {
     ensure!(
         line.starts_with(b"=yencryption"),
         "INVALID_TOKEN_COUNT: line does not begin with =yencryption token"
@@ -189,6 +203,13 @@ pub fn parse_yencryption_line(line: &[u8]) -> Result<YEncryptionParams> {
             tokens.len()
         );
     }
+    // First token must be exactly `=yencryption` (Body Std v1.2 §4 ABNF):
+    // a mutated token such as `=yencryptionX` is a grammar violation, not
+    // a valid header with a longer name.
+    ensure!(
+        tokens[0] == "=yencryption",
+        "INVALID_TOKEN_COUNT: first token must be =yencryption"
+    );
     let (cipher, salt, index, tag) = (&tokens[1], &tokens[2], &tokens[3], &tokens[4]);
     if !cipher.starts_with("cipher=") {
         bail!("UNSUPPORTED_CIPHER: cipher parameter out of order");
@@ -232,6 +253,27 @@ pub fn parse_yencryption_line(line: &[u8]) -> Result<YEncryptionParams> {
     if segment_index == 0 {
         bail!("ZERO_SEGMENT_INDEX: segment index cannot be zero");
     }
+    // Index framing rule (Body Std v1.2 §5 step 2): the big-endian
+    // encoding must not contain 0x0A/0x0D (PROVIDER_FAILOVER).
+    if segment_index
+        .to_be_bytes()
+        .iter()
+        .any(|&b| b == 0x0A || b == 0x0D)
+    {
+        bail!("FORBIDDEN_SEGMENT_INDEX_BYTE: segment index bytes contain 0x0A or 0x0D");
+    }
+    // Canonical length (Body Std v1.2 §4/§5 step 2): exactly 128 bytes.
+    // Checked after the field-specific validations above so the
+    // vector-matched field errors (e.g. INVALID_SALT_LENGTH for a
+    // truncated/extended salt, which also changes the total length)
+    // keep precedence; the only lines reaching here with a non-128
+    // length are those whose first token or cipher token length
+    // differs — the mutated-token case (`=yencryptionX`, 129 bytes).
+    ensure!(
+        line.len() == CANONICAL_YENCRYPTION_LINE_LEN,
+        "INVALID_LENGTH: =yencryption line must be exactly {CANONICAL_YENCRYPTION_LINE_LEN} bytes, got {}",
+        line.len()
+    );
 
     Ok(YEncryptionParams {
         salt,
@@ -275,7 +317,7 @@ fn decode_hex_field(
 /// - For multipart input (line 2 is `=ypart`), line 3 must be the sole `=yencryption` line
 /// - For single-part input, line 2 must be the sole `=yencryption` line
 /// - Any duplicate or misplaced `=yencryption` line anywhere in the article is rejected
-pub fn extract_and_remove_yencryption(input: &[u8]) -> Result<(YEncryptionParams, Vec<u8>)> {
+pub(crate) fn extract_and_remove_yencryption(input: &[u8]) -> Result<(YEncryptionParams, Vec<u8>)> {
     let lines = control::split_lines_preserving_endings(input);
     ensure!(
         lines.len() >= 2,

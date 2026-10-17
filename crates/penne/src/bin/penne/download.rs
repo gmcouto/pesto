@@ -110,7 +110,7 @@ pub(super) async fn run(
         decryptor,
     )
     .await?;
-    // `download_queue` now assembles every file internally as it completes,
+    // `download_queue_with_decryptor` now assembles every file internally as it completes,
     // so its own progress sender is the only copy left by the time it
     // returns — the channel closes on its own, and awaiting the renderer
     // here just waits for its last redraw to flush before the summary below

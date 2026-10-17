@@ -33,7 +33,7 @@ pub fn validate_groups(groups: &[String]) -> Result<()> {
 ///
 /// XML 1.0 Section 2.2 defines valid Char as:
 /// `#x9 | #xA | #xD | [#x20-#xD7FF] | [#xE000-#xFFFD] | [#x10000-#x10FFFF]`
-pub fn is_xml_representable(s: &str) -> bool {
+pub(crate) fn is_xml_representable(s: &str) -> bool {
     s.chars().all(|c| {
         matches!(
             c,
@@ -50,7 +50,7 @@ pub fn is_xml_representable(s: &str) -> bool {
 /// - If both `encrypt_password` and `nzb_password` are set, one silently wins
 ///   at the use site (`encrypt_password.or(nzb_password)`); there is no
 ///   archive-vs-encryption conflict rule.
-pub fn validate_encryption(encrypt_password: Option<&str>) -> Result<()> {
+pub(crate) fn validate_encryption(encrypt_password: Option<&str>) -> Result<()> {
     if let Some(pw) = encrypt_password {
         if pw.is_empty() {
             bail!("encryption password cannot be empty");
