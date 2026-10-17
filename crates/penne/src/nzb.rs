@@ -26,13 +26,35 @@ pub fn load(path: &Path) -> Result<ParsedNzb> {
 pub fn download_decryptor(
     meta: &pesto::nzb::NzbMeta,
 ) -> Result<Option<std::sync::Arc<pesto::crypto::DownloadDecryptionAdapter>>> {
+    download_decryptor_with_password_override(meta, None)
+}
+
+/// Construct a transport decryption adapter from NZB metadata, letting an
+/// explicitly supplied password (CLI `--password`, DECISIONS 2026-10-16 Q1(a))
+/// override `<meta type="password">` for transport decryption.
+///
+/// The `yenc_encrypted` marker remains the only gate: without it the override
+/// is never used for transport and `Ok(None)` is returned, so ordinary NZBs
+/// (including those carrying only an archive password) are unaffected. With
+/// the marker, the explicit override wins when present (even if the meta
+/// password is absent); otherwise `meta.password` is used. An empty *effective*
+/// password is rejected; the override being an empty string therefore fails
+/// closed instead of silently falling back to the meta password. The password
+/// is never printed in error messages.
+pub fn download_decryptor_with_password_override(
+    meta: &pesto::nzb::NzbMeta,
+    password_override: Option<&str>,
+) -> Result<Option<std::sync::Arc<pesto::crypto::DownloadDecryptionAdapter>>> {
     if !meta.yenc_encrypted {
         return Ok(None);
     }
-    let password = meta
-        .password
-        .as_deref()
-        .context("encrypted NZB is missing password metadata")?;
+    let password = match password_override {
+        Some(overridden) => overridden,
+        None => meta
+            .password
+            .as_deref()
+            .context("encrypted NZB is missing password metadata")?,
+    };
     if password.is_empty() {
         bail!("encrypted NZB password is empty");
     }
@@ -176,5 +198,56 @@ mod tests {
             ..Default::default()
         };
         assert!(download_decryptor(&meta_whitespace_pwd).is_ok());
+    }
+
+    #[test]
+    fn test_download_decryptor_with_password_override() {
+        // Q1(a): the CLI `--password` override is transport-only behind the
+        // marker. Without the marker it never yields a decryptor; with the
+        // marker it substitutes for absent/wrong meta passwords and an empty
+        // override fails closed instead of falling back.
+        let meta_unencrypted = pesto::nzb::NzbMeta {
+            yenc_encrypted: false,
+            password: Some("archive-secret".into()),
+            ..Default::default()
+        };
+        assert!(
+            download_decryptor_with_password_override(&meta_unencrypted, Some("cli-secret"))
+                .unwrap()
+                .is_none(),
+            "override must not enable transport decryption without the marker"
+        );
+
+        let meta_missing_pwd = pesto::nzb::NzbMeta {
+            yenc_encrypted: true,
+            password: None,
+            ..Default::default()
+        };
+        assert!(
+            download_decryptor_with_password_override(&meta_missing_pwd, Some("cli-secret"))
+                .unwrap()
+                .is_some(),
+            "explicit override must supply an absent meta password"
+        );
+
+        let meta_encrypted = pesto::nzb::NzbMeta {
+            yenc_encrypted: true,
+            password: Some("meta-secret".into()),
+            ..Default::default()
+        };
+        assert!(
+            download_decryptor_with_password_override(&meta_encrypted, Some("cli-secret"))
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            download_decryptor_with_password_override(&meta_encrypted, None)
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            download_decryptor_with_password_override(&meta_encrypted, Some("")).is_err(),
+            "an empty explicit override must fail closed, not fall back to meta"
+        );
     }
 }

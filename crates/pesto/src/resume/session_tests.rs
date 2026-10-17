@@ -261,3 +261,22 @@ fn pre_name_session_identity_rotates_rather_than_count_match() {
     );
     assert_eq!(s.len(), 0);
 }
+
+#[test]
+fn no_check_record_never_sets_confirmed() {
+    let mut s = ResumeState::default();
+    s.record_with(
+        "a.bin",
+        1,
+        SegmentRecord {
+            message_id: "id@x".into(),
+            bytes: 10,
+            confirmed: false,
+            check_disabled: true,
+            server_idx: 0,
+            wire_identity: None,
+        },
+    );
+    let rec = s.get("a.bin", 1).unwrap();
+    assert!(!rec.confirmed && rec.check_disabled);
+}

@@ -5,6 +5,7 @@ use anyhow::{bail, Context, Result};
 use fpe::ff1::{FlexibleNumeralString, FF1};
 
 use super::kdf::EncryptionSession;
+use super::ybegin::name_token_boundary;
 
 /// Map byte octet to numeral 0..252 per yEnc Control Lines Standard v1.2.
 pub fn byte_to_numeral(b: u8) -> Result<u16> {
@@ -285,9 +286,7 @@ pub fn decrypt_yenc_control_lines(
     // - If line 2 starts with `=yencryption `, it is single-part:
     //   and restored `=ybegin` (pt1) must NOT contain `part=` (otherwise MISPLACED_ENCRYPTION_HEADER).
     // - If line 2 starts with neither, fail with CONTROL_LINE_DECRYPT_FAILURE.
-    let pt1_has_part = pt1
-        .windows(5)
-        .position(|w| w == b"name=")
+    let pt1_has_part = name_token_boundary(&pt1)
         .map(|name_idx| {
             let kv_prefix = &pt1[..name_idx];
             kv_prefix

@@ -140,14 +140,31 @@ pub fn parse(content: &str) -> Result<ParsedNzb> {
                     while idx + 1 < lines.len() {
                         idx += 1;
                         let (next_line, next_ending) = lines[idx];
+                        // PU12-02: the continuation scan must stop at the
+                        // next tag — an unterminated password meta must not
+                        // swallow following <meta>/<file> lines (which would
+                        // hide yenc_version/yenc_cipher from the fail-closed
+                        // validation below and corrupt the password). The
+                        // stop check runs before the close check: a following
+                        // `<meta ...>...</meta>` line on one physical line is
+                        // a new tag, not this password's continuation.
+                        // Treat unterminated-before-tag as unset: rewind so
+                        // the tag line is processed normally.
+                        let next_trimmed = next_line.trim_start();
+                        if next_trimmed.starts_with("<meta ")
+                            || next_trimmed.starts_with("<file ")
+                            || next_trimmed.starts_with("</head>")
+                        {
+                            idx -= 1;
+                            break;
+                        }
                         if let Some(close_pos) = next_line.find("</meta>") {
                             full_val.push_str(&next_line[..close_pos]);
                             closed = true;
                             break;
-                        } else {
-                            full_val.push_str(next_line);
-                            full_val.push_str(next_ending);
                         }
+                        full_val.push_str(next_line);
+                        full_val.push_str(next_ending);
                     }
                     if closed {
                         meta.password = Some(xml_unescape(&full_val));

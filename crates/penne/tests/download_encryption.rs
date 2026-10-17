@@ -911,21 +911,31 @@ async fn download_resumes_from_cache_without_network_requests() {
     let req_counter = Arc::new(AtomicUsize::new(0));
     let addr = spawn_fake_server_counting(known, Some(req_counter.clone()));
 
-    let segments = |first: &str, second: &str| {
+    // Each closure argument is a complete `<segment>` element. Run 1 emits
+    // them in part order; run 2 genuinely reorders the XML elements, emitting
+    // `number="2"` (with its own bytes/Message-ID) before `number="1"` —
+    // XML order has no cryptographic or assembly meaning (`parse` sorts by
+    // part), so the cached bodies must still satisfy the download.
+    let seg1 = || {
         format!(
-            "<segment bytes=\"{}\" number=\"1\">{first}</segment>\n\
-             <segment bytes=\"{}\" number=\"2\">{second}</segment>",
-            payload_p1.len(),
+            "<segment bytes=\"{}\" number=\"1\">cache-msg-01@test</segment>",
+            payload_p1.len()
+        )
+    };
+    let seg2 = || {
+        format!(
+            "<segment bytes=\"{}\" number=\"2\">cache-msg-02@test</segment>",
             payload_p2.len()
         )
     };
+    let segments = |first: String, second: String| format!("{first}\n{second}");
     let dest = tempfile::tempdir().unwrap();
 
     // Run 1: download from the mock NNTP and populate the cache.
     let xml1 = encrypted_nzb_xml(
         password,
         "&quot;resume.bin&quot; yEnc",
-        &segments("cache-msg-01@test", "cache-msg-02@test"),
+        &segments(seg1(), seg2()),
     );
     let outcome1 =
         run_download_nzb(&xml1, &[ServerTier::solo(server_entry(addr))], dest.path()).await;
@@ -939,7 +949,7 @@ async fn download_resumes_from_cache_without_network_requests() {
     let xml2 = encrypted_nzb_xml(
         password,
         "&quot;resume.bin&quot; yEnc",
-        &segments("cache-msg-02@test", "cache-msg-01@test"),
+        &segments(seg2(), seg1()),
     );
     req_counter.store(0, Ordering::SeqCst);
     let outcome2 =

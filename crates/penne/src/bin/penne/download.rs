@@ -99,7 +99,12 @@ pub(super) async fn run(
         None
     };
 
-    let decryptor = penne::nzb::download_decryptor(&parsed.meta)?;
+    // Q1(a) (2026-10-16): an explicitly typed `--password` is also a transport
+    // (yEnc-decryption) password, ahead of `<meta type="password">`; the
+    // `yenc_encrypted` marker in the helper remains the only gate. The same
+    // value keeps its downstream archive-extraction role below.
+    let decryptor =
+        penne::nzb::download_decryptor_with_password_override(&parsed.meta, password.as_deref())?;
 
     let outcome = penne::download::download_queue_with_decryptor(
         &queue,

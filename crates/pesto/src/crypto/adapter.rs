@@ -8,6 +8,7 @@ use zeroize::Zeroizing;
 use super::body;
 use super::control;
 use super::kdf::EncryptionSession;
+use super::ybegin::{name_token_boundary, ybegin_raw_name};
 use crate::yenc::{self, DecodedPart, EncodedPart, PartSpec};
 
 /// Build the canonical `=yencryption` control line (Body Encryption Standard
@@ -76,6 +77,12 @@ pub struct UploadEncryptionAdapter {
 impl UploadEncryptionAdapter {
     pub fn new(session: Arc<EncryptionSession>) -> Self {
         Self { session }
+    }
+
+    /// The session salt this adapter encrypts under (used to stamp spool
+    /// entries with the creating run's identity; never logged).
+    pub fn salt(&self) -> [u8; 16] {
+        self.session.salt()
     }
 
     /// Encrypt and yEnc-encode a raw article segment.
@@ -368,24 +375,6 @@ pub(crate) fn extract_and_remove_yencryption(input: &[u8]) -> Result<(YEncryptio
     Ok((params, out))
 }
 
-/// Raw bytes of the `name=` value on the restored `=ybegin` line (the first
-/// line of `restored`). `name=` is the last `=ybegin` keyword and its value
-/// runs to the end of the line (Body Std v1.2 §2.1), so no byte is decoded.
-fn ybegin_raw_name(restored: &[u8]) -> Result<Vec<u8>> {
-    let end = restored
-        .iter()
-        .position(|&b| b == b'\n')
-        .context("restored article has no =ybegin line terminator")?;
-    let line = restored[..end]
-        .strip_suffix(b"\r")
-        .unwrap_or(&restored[..end]);
-    let pos = line
-        .windows(5)
-        .position(|w| w == b"name=")
-        .context("MISSING_AAD_INPUT: =ybegin line has no name= parameter")?;
-    Ok(line[pos + 5..].to_vec())
-}
-
 /// All values carried by the `key` token prefix (e.g. `size=`) among
 /// whitespace-split control-line tokens.
 fn numeric_field_values<'a>(tokens: &[&'a str], key: &str) -> Vec<&'a str> {
@@ -541,10 +530,7 @@ impl DownloadDecryptionAdapter {
             None
         };
 
-        let name_idx = lines[0]
-            .content
-            .windows(5)
-            .position(|w| w == b"name=")
+        let name_idx = name_token_boundary(lines[0].content)
             .context("MISSING_AAD_INPUT: =ybegin line has no name= parameter")?;
         // Only the text before `name=` carries key=value fields; the filename
         // bytes after `name=` may themselves contain `size=`/`part=`-like
@@ -620,7 +606,28 @@ impl DownloadDecryptionAdapter {
         // never touched. Validation above guarantees exactly one parsed
         // size value; keep the raw byte span rather than re-tokenizing so
         // the seam replacement is unambiguous.
-        let header = &lines[0].content[..name_idx];
+        //
+        // The ordinary decoder splits `name=` off by substring search
+        // (yenc/decode.rs, upstream behaviour), so a keyword value
+        // containing `name=` before the real name would make it read the
+        // header keywords from inside that value and lose `line=`. The
+        // synthetic decode copy therefore neutralizes embedded `name=`
+        // bytes inside keyword values (before the real token) — the
+        // authenticated AAD name above is computed from the untouched
+        // restored line, so this cannot change authentication.
+        let mut sanitized_header = lines[0].content[..name_idx].to_vec();
+        {
+            let mut i = 0;
+            while i + 5 <= sanitized_header.len() {
+                if &sanitized_header[i..i + 5] == b"name=" {
+                    sanitized_header[i + 4] = b'-';
+                    i += 5;
+                } else {
+                    i += 1;
+                }
+            }
+        }
+        let header = &sanitized_header[..];
         let mut size_span = None;
         let mut i = 0;
         while i < header.len() {
@@ -638,9 +645,11 @@ impl DownloadDecryptionAdapter {
         let (size_start, size_end) =
             size_span.context("INVALID_GEOMETRY: =ybegin missing or invalid size=")?;
         let mut clean_for_decode = Vec::with_capacity(clean_yenc.len());
-        clean_for_decode.extend_from_slice(&lines[0].content[..size_start]);
+        clean_for_decode.extend_from_slice(&header[..size_start]);
         clean_for_decode.extend_from_slice(format!("size={segment_bytes}").as_bytes());
-        clean_for_decode.extend_from_slice(&lines[0].content[size_end..]);
+        clean_for_decode.extend_from_slice(&header[size_end..]);
+        // Re-attach the untouched name token + filename bytes.
+        clean_for_decode.extend_from_slice(&lines[0].content[name_idx..]);
         clean_for_decode.extend_from_slice(lines[0].ending);
         for (idx, line) in lines.iter().enumerate().skip(1) {
             if multipart && idx == 1 {

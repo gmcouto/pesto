@@ -222,6 +222,9 @@ pub struct ResumeState {
     /// Set when the session was invalidated so the spool directory is cleared.
     #[serde(skip)]
     session_invalidated: bool,
+    /// Loaded non-empty from disk (PU12-01 validates spool). Not serialized.
+    #[serde(skip)]
+    loaded_validated: bool,
 }
 
 impl ResumeState {
@@ -243,10 +246,24 @@ impl ResumeState {
                     .with_context(|| format!("reading resume state `{}`", path.display()));
             }
         };
-        match serde_json::from_str(&text) {
-            Ok(state) => Ok(state),
+        match serde_json::from_str::<Self>(&text) {
+            Ok(mut state) => {
+                // PU12-01: only a non-empty loaded state validates a spool.
+                state.loaded_validated = state.fingerprint.is_some()
+                    || state.session_identity.is_some()
+                    || !state.segments.is_empty()
+                    || !state.files.is_empty()
+                    || state.archive_stem.is_some()
+                    || state.release_prefix.is_some();
+                Ok(state)
+            }
             Err(_) => Ok(Self::default()),
         }
+    }
+
+    /// Whether this state was loaded non-empty (see the field doc).
+    pub fn was_loaded_validated(&self) -> bool {
+        self.loaded_validated
     }
 
     /// Write the current state to `path` via a sibling temp file + rename
@@ -803,25 +820,6 @@ mod tests {
             resume_action(true, Some(&check_off)),
             ResumeAction::ReStatStoredId
         );
-    }
-
-    #[test]
-    fn no_check_record_never_sets_confirmed() {
-        let mut s = ResumeState::default();
-        s.record_with(
-            "a.bin",
-            1,
-            SegmentRecord {
-                message_id: "id@x".into(),
-                bytes: 10,
-                confirmed: false,
-                check_disabled: true,
-                server_idx: 0,
-                wire_identity: None,
-            },
-        );
-        let rec = s.get("a.bin", 1).unwrap();
-        assert!(!rec.confirmed && rec.check_disabled);
     }
 }
 

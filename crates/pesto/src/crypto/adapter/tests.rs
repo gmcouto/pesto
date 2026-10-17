@@ -669,5 +669,72 @@ fn encode_article_rejects_zero_and_forbidden_segment_indices() {
     }
 }
 
+#[test]
+fn name_token_boundary_ignores_name_inside_keyword_value() {
+    // PU12-04 / Q-B: a keyword value containing `name=` before the real
+    // name must not be mistaken for the name token.
+    use super::super::ybegin::name_token_boundary;
+    let line = b"=ybegin note=name=x size=4 name=real.bin";
+    let pos = name_token_boundary(line).expect("real name= token");
+    assert_eq!(&line[pos + 5..], b"real.bin");
+    // The ordinary shape still resolves to the first (only) token.
+    let plain = b"=ybegin line=128 size=4 name=t.bin";
+    assert_eq!(&plain[name_token_boundary(plain).unwrap() + 5..], b"t.bin");
+    assert!(name_token_boundary(b"=ybegin line=128 size=4").is_none());
+}
+
+#[test]
+fn ybegin_with_name_inside_keyword_value_authenticates() {
+    // End-to-end PU12-04: craft a restored article whose =ybegin carries a
+    // keyword value containing `name=` before the real name, authenticate
+    // it with the AAD name taken at the token boundary, and require the
+    // download adapter to decrypt it. With the old substring lookup the
+    // AAD name would be `1 size=.. name=real.bin` and AEAD would fail.
+    let password = "name-boundary-password";
+    let salt = [0x6bu8; 16];
+    let session = Arc::new(EncryptionSession::new(password, salt).unwrap());
+    let payload = b"boundary payload";
+    let mut body = Vec::new();
+    let encoded = UploadEncryptionAdapter::new(session.clone())
+        .encode_article(
+            "real.bin",
+            payload.len() as u64,
+            PartSpec {
+                number: 1,
+                total: 1,
+                offset: 0,
+            },
+            payload,
+            128,
+            1,
+            &mut body,
+        )
+        .unwrap();
+    let restored = control::decrypt_yenc_control_lines(&session, 1, &encoded.body).unwrap();
+    // Rewrite the restored =ybegin to carry an extra keyword whose value
+    // contains `name=` before the real name (`note=name=x` ahead of
+    // `name=`). Before PU12-04 the name lookup found the first `name=`
+    // substring, i.e. inside this keyword value, corrupting the AAD name.
+    // (The ordinary decoder's own `line=` parse rejects a `name=`-valued
+    // `line=` token regardless, so the carrier keyword is an inert one.)
+    let mut mutated = Vec::new();
+    for line in control::split_lines_preserving_endings(&restored) {
+        if line.content.starts_with(b"=ybegin") {
+            let text = String::from_utf8(line.content.to_vec()).unwrap();
+            let text = text.replacen(" size=", " note=name=x size=", 1);
+            mutated.extend_from_slice(text.as_bytes());
+        } else {
+            mutated.extend_from_slice(line.content);
+        }
+        mutated.extend_from_slice(line.ending);
+    }
+    let wire = control::encrypt_yenc_control_lines(&session, 1, &mutated).unwrap();
+    let decoded = DownloadDecryptionAdapter::with_password(password)
+        .decode_article(&wire)
+        .expect("name= inside a keyword value must not corrupt the AAD name");
+    assert_eq!(decoded.data, payload);
+    assert_eq!(decoded.name, "real.bin");
+}
+
 // Body Standard v1.2 geometry, allocation, and decode-seam tests live in
 // `tests/geometry.rs` (they share the multipart fixture helpers).

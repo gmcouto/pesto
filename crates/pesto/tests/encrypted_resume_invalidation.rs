@@ -556,6 +556,160 @@ async fn test_pe_next_3_ordinary_to_encrypted_transition_discards_incompatible_s
     assert!(xml.contains("yenc_encrypted"), "got: {xml}");
 }
 
+/// PU12-01 (Q3(a)): state file removed, spool retained — plain spool must
+/// not be replayed into an encrypted run (confidentiality break /
+/// undecryptable NZB), and an encrypted spool must not be replayed into an
+/// ordinary run. Both directions post freshly encoded articles instead.
+#[tokio::test]
+async fn orphaned_spool_without_state_is_not_replayed_plain_to_encrypted() {
+    let server = MockServer::spawn(0).await; // reject all: spool retained
+    let dir = tempfile::tempdir().unwrap();
+    let state_path = dir.path().join("upload.pesto-state");
+    let spool_dir = pesto::spool::spool_dir(&state_path);
+
+    let test_path = dir.path().join("test.bin");
+    std::fs::write(&test_path, vec![0x77u8; 64]).unwrap();
+    let files = vec![InputFile {
+        path: test_path.clone(),
+        name: "test.bin".into(),
+    }];
+
+    // Run 0: ordinary upload, all posts rejected -> plain spool retained.
+    let ord_config = make_config(server.port, None, 32);
+    let outcome0 = post_files_with_progress(&ord_config, &files, None, Some(&state_path), None)
+        .await
+        .unwrap();
+    assert!(!outcome0.failures.is_empty());
+    assert!(spool_dir.exists(), "ordinary spool must be retained");
+    let spooled = pesto::spool::read(&spool_dir, "test.bin", 1).unwrap();
+    assert!(spooled.body.starts_with(b"=ybegin "));
+
+    // Operator deletes/corrupts the state file but keeps the spool.
+    std::fs::remove_file(&state_path).unwrap();
+    assert!(!state_path.exists());
+    assert!(spool_dir.exists());
+
+    server.clear_captured();
+    server.set_max_accept(100);
+
+    // Run 1: encrypted resume. The orphaned plain spool must be cleared /
+    // refused, and genuinely encrypted articles posted.
+    let enc_config = make_config(server.port, Some("orphanpw".into()), 32);
+    let outcome1 = post_files_with_progress(&enc_config, &files, None, Some(&state_path), None)
+        .await
+        .unwrap();
+    assert!(
+        outcome1.failures.is_empty(),
+        "encrypted resume over orphaned spool must succeed: {:?}",
+        outcome1.failures
+    );
+    let posted = server.captured_articles();
+    assert_eq!(posted.len(), 2, "both parts freshly posted");
+    for article in &posted {
+        let body = article_body(article);
+        assert!(
+            !body.starts_with(b"=ybegin "),
+            "PU12-01: plain spool body must never be replayed into an encrypted run"
+        );
+        let (salt, index) = extract_bootstrap_from_line1(body).expect("encrypted bootstrap");
+        assert!(index > 0);
+        assert_ne!(salt, [0u8; 16]);
+    }
+}
+
+#[tokio::test]
+async fn orphaned_spool_without_state_is_not_replayed_encrypted_to_plain() {
+    let server = MockServer::spawn(0).await;
+    let dir = tempfile::tempdir().unwrap();
+    let state_path = dir.path().join("upload.pesto-state");
+    let spool_dir = pesto::spool::spool_dir(&state_path);
+
+    let test_path = dir.path().join("test.bin");
+    std::fs::write(&test_path, vec![0x88u8; 64]).unwrap();
+    let files = vec![InputFile {
+        path: test_path.clone(),
+        name: "test.bin".into(),
+    }];
+
+    // Run 0: encrypted upload, all rejected -> encrypted spool retained.
+    let enc_config = make_config(server.port, Some("orphanpw2".into()), 32);
+    let outcome0 = post_files_with_progress(&enc_config, &files, None, Some(&state_path), None)
+        .await
+        .unwrap();
+    assert!(!outcome0.failures.is_empty());
+    assert!(spool_dir.exists());
+    let spooled = pesto::spool::read(&spool_dir, "test.bin", 1).unwrap();
+    assert!(!spooled.body.starts_with(b"=ybegin "));
+
+    std::fs::remove_file(&state_path).unwrap();
+
+    server.clear_captured();
+    server.set_max_accept(100);
+
+    // Run 1: ordinary resume. Ciphertext spool must not be replayed.
+    let ord_config = make_config(server.port, None, 32);
+    let outcome1 = post_files_with_progress(&ord_config, &files, None, Some(&state_path), None)
+        .await
+        .unwrap();
+    assert!(outcome1.failures.is_empty());
+    let posted = server.captured_articles();
+    assert_eq!(posted.len(), 2);
+    for article in &posted {
+        assert!(
+            article_body(article).starts_with(b"=ybegin "),
+            "PU12-01: encrypted spool body must never be replayed into an ordinary run"
+        );
+    }
+}
+
+/// PU12-01 stamp half: with the state file present, a spool entry stamped
+/// under a different salt is refused on replay even if the spool directory
+/// survived session invalidation (defence in depth behind the clear).
+#[tokio::test]
+async fn stamped_spool_mismatch_is_refused_when_state_present() {
+    let server = MockServer::spawn(0).await;
+    let dir = tempfile::tempdir().unwrap();
+    let state_path = dir.path().join("upload.pesto-state");
+
+    let test_path = dir.path().join("test.bin");
+    std::fs::write(&test_path, vec![0x55u8; 64]).unwrap();
+    let files = vec![InputFile {
+        path: test_path.clone(),
+        name: "test.bin".into(),
+    }];
+
+    // Run 0: encrypted upload (password A), all rejected.
+    let config_a = make_config(server.port, Some("password-a".into()), 32);
+    let _ = post_files_with_progress(&config_a, &files, None, Some(&state_path), None)
+        .await
+        .unwrap();
+    assert!(state_path.exists());
+    let salt_a = *ResumeState::load(&state_path)
+        .unwrap()
+        .session_salt()
+        .expect("salt A");
+
+    server.clear_captured();
+    server.set_max_accept(100);
+
+    // Run 1: same state file, different encryption password. The fingerprint
+    // mismatch invalidates the session (new salt), and any spool entry from
+    // run 0 is stamped with salt A — replay must refuse it and post fresh
+    // articles under the new salt.
+    let config_b = make_config(server.port, Some("password-b".into()), 32);
+    let outcome1 = post_files_with_progress(&config_b, &files, None, Some(&state_path), None)
+        .await
+        .unwrap();
+    assert!(outcome1.failures.is_empty());
+    let posted = server.captured_articles();
+    assert_eq!(posted.len(), 2);
+    for article in &posted {
+        let (salt, _) =
+            extract_bootstrap_from_line1(article_body(article)).expect("encrypted bootstrap");
+        assert_ne!(salt, salt_a, "rotated session must not replay salt-A spool");
+    }
+}
+
 /// Unchanged encrypted retry retains the exact salt, index, and wire bytes.
 #[tokio::test]
 async fn test_pe_unchanged_encrypted_retry_preserves_wire_identity() {

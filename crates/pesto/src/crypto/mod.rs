@@ -18,6 +18,7 @@ pub(crate) mod adapter;
 pub(crate) mod body;
 pub(crate) mod control;
 pub(crate) mod kdf;
+pub(crate) mod ybegin;
 
 #[cfg(test)]
 mod tests;

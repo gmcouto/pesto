@@ -57,7 +57,7 @@ impl EncryptionSession {
         &self.control_key
     }
 
-    pub fn derive_body_nonce(&self, segment_index: u32) -> [u8; 24] {
+    pub(crate) fn derive_body_nonce(&self, segment_index: u32) -> [u8; 24] {
         let mut mac = HmacSha256::new_from_slice(&self.master_key[..]).expect("valid key length");
         mac.update(b"yenc-body nonce");
         mac.update(&segment_index.to_be_bytes());
@@ -67,7 +67,7 @@ impl EncryptionSession {
         nonce
     }
 
-    pub fn derive_control_tweak(&self, segment_index: u32, line_index: u32) -> [u8; 8] {
+    pub(crate) fn derive_control_tweak(&self, segment_index: u32, line_index: u32) -> [u8; 8] {
         let mut mac = HmacSha256::new_from_slice(&self.master_key[..]).expect("valid key length");
         mac.update(b"yenc-control tweak");
         mac.update(&segment_index.to_be_bytes());

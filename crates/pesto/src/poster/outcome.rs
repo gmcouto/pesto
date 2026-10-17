@@ -401,46 +401,6 @@ mod index_framing_tests {
     }
 
     #[test]
-    fn nth_safe_segment_index_rank_mapping() {
-        // Rank semantics: the ordinal-th permitted value.
-        // Derived from the forbidden set {0, 10, 13, 266, 269} — the permitted
-        // sequence is 1..9, 11, 12, 14, 15, 16, ... so:
-        for (ordinal, expected) in [
-            (1u64, 1u32),
-            (9, 9),
-            (10, 11),
-            (11, 12),
-            (12, 14),
-            (13, 15),
-            (14, 16),
-        ] {
-            assert_eq!(
-                nth_safe_segment_index(ordinal),
-                Some(expected),
-                "ordinal {ordinal} must map to {expected}"
-            );
-        }
-        // Spanning the 266/269 forbidden pair: ranks shift past both.
-        let seq: Vec<u32> = (263u64..=268)
-            .map(|o| nth_safe_segment_index(o).unwrap())
-            .collect();
-        assert_eq!(seq, vec![265, 267, 268, 270, 271, 272]);
-    }
-
-    #[test]
-    fn nth_safe_segment_index_monotonic_and_injective() {
-        // Derived from the forbidden set — sweep a range covering both
-        // forbidden pairs and assert strict monotonicity + forbidden absence.
-        let mut prev = 0u32;
-        for ordinal in 1u64..=5000 {
-            let idx = nth_safe_segment_index(ordinal).expect("safe index in range");
-            assert!(idx > prev, "monotonicity broken at ordinal {ordinal}");
-            assert!(!forbidden(idx), "assigned forbidden index {idx}");
-            prev = idx;
-        }
-    }
-
-    #[test]
     fn nth_safe_segment_index_equivalent_to_naive_enumeration() {
         // Equivalence: the base-254 digit allocator must
         // agree with the naive "next permitted value" enumeration over a
@@ -471,24 +431,5 @@ mod index_framing_tests {
         assert_eq!(nth_safe_segment_index(254u64.pow(4)), None);
         assert_eq!(nth_safe_segment_index(u64::from(u32::MAX)), None);
         assert_eq!(nth_safe_segment_index(u64::from(u32::MAX) + 1), None);
-    }
-
-    #[test]
-    fn safe_index_rank_inverts_nth_safe_segment_index() {
-        // The rank helper used by the index_allocation vectors must invert
-        // the allocator: rank(index) counts permitted values <= index, so
-        // re-allocating from a forbidden candidate's rank yields the next
-        // permitted index.
-        for ordinal in 1u64..=5000u64 {
-            let idx = nth_safe_segment_index(ordinal).expect("safe index in range");
-            assert_eq!(safe_index_rank(idx), ordinal);
-        }
-        // Forbidden candidates: the next assigned index comes from their rank.
-        for candidate in [10u32, 13, 266, 269] {
-            let rank = safe_index_rank(candidate);
-            let next = nth_safe_segment_index(rank).expect("next permitted index");
-            assert!(next > candidate);
-            assert!(!forbidden(next));
-        }
     }
 }

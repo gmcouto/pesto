@@ -213,6 +213,81 @@ fn encrypted_nzb_version_and_cipher_metadata_gating() {
     }
 }
 
+#[test]
+fn unterminated_password_meta_does_not_swallow_following_metas() {
+    // PU12-02: a multi-line password meta with no `</meta>` before the next
+    // tag must leave the following metas visible to the fail-closed
+    // validation, and the password stays unset.
+    let unterminated_password = "<meta type=\"password\">unterminated";
+    let cases: Vec<(String, Option<&str>, bool)> = vec![
+        // (head tags, expected error, password must be unset)
+        (
+            format!(
+                "{unterminated_password}\n    <meta type=\"yenc_encrypted\">true</meta>\n    \
+                 <meta type=\"yenc_version\">1.3</meta>"
+            ),
+            Some("unsupported yenc_version"),
+            true,
+        ),
+        (
+            format!(
+                "{unterminated_password}\n    <meta type=\"yenc_encrypted\">true</meta>\n    \
+                 <meta type=\"yenc_cipher\">AES</meta>"
+            ),
+            Some("unsupported yenc_cipher"),
+            true,
+        ),
+        // Following metas are collected normally when they are valid.
+        (
+            format!("{unterminated_password}\n    <meta type=\"yenc_encrypted\">true</meta>"),
+            None,
+            true,
+        ),
+        // Stop at </head> as well: no password, no marker.
+        (unterminated_password.to_string(), None, true),
+    ];
+    for (head_tags, expected, password_unset) in cases {
+        let xml = nzb_with_head_tags(&head_tags);
+        match expected {
+            Some(err) => {
+                let got = parse(&xml).unwrap_err();
+                assert!(
+                    got.to_string().contains(err),
+                    "case {head_tags:?}: expected {err:?}, got: {got}"
+                );
+            }
+            None => {
+                let parsed =
+                    parse(&xml).unwrap_or_else(|e| panic!("case {head_tags:?} must parse: {e}"));
+                if password_unset {
+                    assert_eq!(
+                        parsed.meta.password, None,
+                        "case {head_tags:?}: unterminated password must stay unset"
+                    );
+                }
+                let marked = head_tags.contains("yenc_encrypted");
+                assert_eq!(parsed.meta.yenc_encrypted, marked, "case {head_tags:?}");
+            }
+        }
+    }
+    // Stop at <file : the file/segments after an unterminated password meta
+    // (with no </head> in between) are still parsed.
+    let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<nzb xmlns="http://www.newzbin.com/DTD/2003/nzb">
+  <head>
+    <meta type="password">unterminated
+  <file poster="poster@example.com" date="1774300000" subject="[1/1] - &quot;file.bin&quot; yEnc (1/1)">
+    <groups><group>alt.binaries.test</group></groups>
+    <segments>
+      <segment bytes="750000" number="1">art1@example.com</segment>
+    </segments>
+  </file>
+</nzb>"#;
+    let parsed = parse(xml).expect("file after unterminated password meta must parse");
+    assert_eq!(parsed.meta.password, None);
+    assert_eq!(parsed.segments.len(), 1);
+}
+
 /// A `<meta type="password">` without the `yenc_encrypted` provenance marker
 /// is an archive-extraction password: the NZB is not encrypted, nothing
 /// infers transport identity from it, and regenerating from the parsed

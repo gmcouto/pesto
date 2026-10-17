@@ -180,6 +180,26 @@ async fn prepare_ready(shared: &Arc<Shared>, mut task: PostTask) -> Option<Ready
             );
             None
         }
+        Some(entry) => {
+            // PU12-01 (Q3(a), first half): replay only entries stamped by a
+            // run with the same encryption mode and salt fingerprint as
+            // this run. A mismatch (plain↔encrypted, or a rotated salt)
+            // falls back to a fresh encode under the current identity —
+            // never post the stale bytes verbatim.
+            let current_stamp = crate::spool::SpoolEncryptionStamp::for_adapter(
+                shared.encryption_adapter.as_deref(),
+            );
+            if current_stamp.allows_replay(entry.encryption_stamp.as_ref()) {
+                Some(entry)
+            } else {
+                warn!(
+                    file = %task.meta.real_name,
+                    part = task.part,
+                    "ignoring spool entry whose encryption stamp does not match this run"
+                );
+                None
+            }
+        }
         entry => entry,
     };
 
@@ -275,6 +295,9 @@ async fn prepare_ready(shared: &Arc<Shared>, mut task: PostTask) -> Option<Ready
         if let Some(dir) = &shared.spool_dir {
             let identity =
                 persisted_identity(&task.subject_name, &task.yenc_name, &task.from, &task.date);
+            let stamp = crate::spool::SpoolEncryptionStamp::for_adapter(
+                shared.encryption_adapter.as_deref(),
+            );
             if let Err(e) = crate::spool::write_with_identity(
                 dir,
                 &task.meta.real_name,
@@ -283,6 +306,7 @@ async fn prepare_ready(shared: &Arc<Shared>, mut task: PostTask) -> Option<Ready
                 &headers,
                 &encoded.body,
                 &identity,
+                &stamp,
             )
             .await
             {

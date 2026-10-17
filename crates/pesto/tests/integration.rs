@@ -784,13 +784,8 @@ async fn resume_reuses_the_full_shared_prefix_across_runs() {
     );
 }
 
-/// Type-1 spool: a segment that was encoded and (maybe) sent before an
-/// interruption, but never confirmed by the streaming check nor recorded in
-/// resume state, must be replayed byte-for-byte under its original
-/// Message-ID on `--resume` — not silently re-encoded and posted under a
-/// fresh one, which would risk a duplicate article if the original `POST`
-/// had actually landed. See `pesto::spool` / GitHub issue #18's resume
-/// follow-up discussion.
+/// Type-1 spool: a segment spooled before an interruption must be replayed
+/// byte-for-byte under its original Message-ID on `--resume` (issue #18).
 #[tokio::test]
 async fn resume_replays_a_spooled_article_under_its_original_message_id() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -815,10 +810,13 @@ async fn resume_replays_a_spooled_article_under_its_original_message_id() {
     let mut config = make_config(addr.port());
     config.resume = true;
 
-    // Simulate an interrupted run that had already encoded and spooled this
-    // segment's article (and quite possibly sent it — the ack was lost)
-    // before dying, without ever getting far enough to record it in resume
-    // state (that only happens once the response comes back).
+    // Simulate an interrupted run that spooled this segment before dying.
+    // PU12-01: the spool survives only when a loaded state validated it.
+    std::fs::write(
+        &state_path,
+        r#"{"segments":{"s\u00001":{"message_id":"s@x","bytes":1}}}"#,
+    )
+    .unwrap();
     let spool_dir = pesto::spool::spool_dir(&state_path);
     pesto::spool::write(
         &spool_dir,

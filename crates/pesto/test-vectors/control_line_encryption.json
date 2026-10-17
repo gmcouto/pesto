@@ -57,7 +57,7 @@
     },
     {
       "id": "control-vec-04-line-3-yencryption",
-      "description": "Header line 3 =yencryption (exact length preservation)",
+      "description": "FF1-primitive fixture (control-line layer only; not a combined-mode-valid article: its =yencryption salt does not match the fixture Line 1 bootstrap salt, so dual-bootstrap agreement fails): Header line 3 =yencryption (exact length preservation)",
       "password": "test123",
       "salt_hex": "4b376d5839704c32715238764e34775a",
       "segment_index": 1,
@@ -72,7 +72,7 @@
     },
     {
       "id": "control-vec-05-line-4-yend-single",
-      "description": "Footer line 4 =yend minimal (exact length preservation)",
+      "description": "FF1-primitive fixture (control-line layer only; not a combined-mode-valid article: its =yend carries no applicable ciphertext CRC): Footer line 4 =yend minimal (exact length preservation)",
       "password": "test123",
       "salt_hex": "4b376d5839704c32715238764e34775a",
       "segment_index": 1,

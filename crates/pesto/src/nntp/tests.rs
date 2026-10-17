@@ -198,57 +198,45 @@ fn dot_stuffs_lines_starting_with_dot() {
 }
 
 #[tokio::test]
-async fn post_parts_dot_stuffs_an_encrypted_control_line_starting_with_dot() {
-    let (mut conn, mut server) = mock_conn(b"340 Send article\r\n240 Article received\r\n").await;
-    let body = b"header\r\n.encrypted-control\r\npayload\r\n";
-
-    conn.post_parts(b"Subject: test\r\n\r\n", body)
-        .await
-        .unwrap();
-
-    let mut sent = vec![0u8; 256];
-    let count = tokio::io::AsyncReadExt::read(&mut server, &mut sent)
-        .await
-        .unwrap();
-    sent.truncate(count);
-    assert!(sent
-        .windows(b"\r\n..encrypted-control\r\n".len())
-        .any(|window| window == b"\r\n..encrypted-control\r\n"));
-}
-
-#[tokio::test]
-async fn write_body_dot_stuffs_a_later_leading_dot_line_even_when_body_starts_with_ybegin() {
-    // Body Std v1.2 §9 / RFC 3977 §3.1.1: dot-stuffing is decided by the
-    // actual bytes on the wire, never by a wire-prefix shortcut. A body
-    // whose first line begins with `=ybegin` (e.g. a valid forced salt
-    // `=ybegin...` restored as ordinary-looking framing) that ALSO carries
-    // a later line starting with '.' must have that line stuffed; skipping
-    // the stuffing because of the prefix would terminate the article early
-    // server-side (and trip the removed debug assertion in debug builds).
-    let (mut conn, mut server) = mock_conn(b"340 Send article\r\n240 Article received\r\n").await;
-    let body = b"=ybegin line=128 size=8 name=t.bin\r\n.leading\r\npayload!\r\n=yend size=8\r\n";
-
-    conn.post_parts(b"Subject: t\r\n\r\n", body).await.unwrap();
-
-    let mut sent = vec![0u8; 512];
-    let count = tokio::io::AsyncReadExt::read(&mut server, &mut sent)
-        .await
-        .unwrap();
-    sent.truncate(count);
-    let wire = &sent[..count];
-    // The later leading-dot line must be stuffed on the wire...
-    assert!(
-        wire.windows(b"\r\n..leading\r\n".len())
-            .any(|window| window == b"\r\n..leading\r\n"),
-        "later leading-dot line must be dot-stuffed, got: {}",
-        String::from_utf8_lossy(wire)
-    );
-    // ...while the first line (not starting with '.') stays unstuffed.
-    assert!(
-        wire.windows(b"\r\n\r\n=ybegin".len())
-            .any(|window| window == b"\r\n\r\n=ybegin"),
-        "first line must not be stuffed"
-    );
+async fn post_parts_dot_stuffs_leading_dot_lines_by_wire_bytes() {
+    // Dot-stuffing is decided by the actual wire bytes (Body Std v1.2 §9 /
+    // RFC 3977 §3.1.1), never by a prefix shortcut: a leading-dot line is
+    // stuffed whether it follows headers (encrypted control line) or a
+    // `=ybegin` first line, while a non-dot first line stays unstuffed.
+    for (headers, body, stuffed, unstuffed) in [
+        (
+            &b"Subject: test\r\n\r\n"[..],
+            &b"header\r\n.encrypted-control\r\npayload\r\n"[..],
+            &b"\r\n..encrypted-control\r\n"[..],
+            None,
+        ),
+        (
+            &b"Subject: t\r\n\r\n"[..],
+            &b"=ybegin line=128 size=8 name=t.bin\r\n.leading\r\npayload!\r\n=yend size=8\r\n"[..],
+            &b"\r\n..leading\r\n"[..],
+            Some(&b"\r\n\r\n=ybegin"[..]),
+        ),
+    ] {
+        let (mut conn, mut server) =
+            mock_conn(b"340 Send article\r\n240 Article received\r\n").await;
+        conn.post_parts(headers, body).await.unwrap();
+        let mut sent = vec![0u8; 512];
+        let count = tokio::io::AsyncReadExt::read(&mut server, &mut sent)
+            .await
+            .unwrap();
+        sent.truncate(count);
+        assert!(
+            sent.windows(stuffed.len()).any(|w| w == stuffed),
+            "leading-dot line must be dot-stuffed, got: {}",
+            String::from_utf8_lossy(&sent)
+        );
+        if let Some(plain) = unstuffed {
+            assert!(
+                sent.windows(plain.len()).any(|w| w == plain),
+                "first line must not be stuffed"
+            );
+        }
+    }
 }
 
 #[test]
