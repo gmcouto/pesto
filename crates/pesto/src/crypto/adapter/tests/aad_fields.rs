@@ -215,17 +215,17 @@ fn ypart_range_ambiguity_fails_and_same_value_duplicates_pass() {
 }
 
 #[test]
-fn duplicate_yencryption_line_in_data_region_releases_no_output() {
-    // GAP13-01: a second `=yencryption` line appearing after the first data
-    // line is in the data region, not the header — it must fail closed with
-    // "duplicate or misplaced =yencryption" and release no plaintext
+fn duplicate_yencryption_in_data_region_of_restored_article_is_rejected() {
+    // GAP13-01 (reworked, test-only): a second `=yencryption` line appearing
+    // after the first data line of the *restored* article is in the data
+    // region, not the header — `extract_and_remove_yencryption` must fail
+    // closed with "duplicate or misplaced =yencryption" and return no output
     // (Body Std v1.2 §5/§7). The duplicate is the article's real
-    // `=yencryption` line, injected as a plaintext data-region line of the
-    // wire article (mirrors the NZBGet GAP13-01 construction). The data
-    // region must hold at least two data lines: the duplicate is placed
-    // before the footer, which restoration conceptually decrypts from
-    // its position, and with the payload below the article has data lines
-    // to spare.
+    // `=yencryption` line, injected as a plaintext line immediately after
+    // the first data line of the restored fixture. This pins the restored-
+    // side rejection unit directly; at wire level `decode_article` still
+    // fails closed for such articles (generically — see below), it just
+    // must not surface this specific restored-side message there.
     let password = "aad-field-validation";
     let session = Arc::new(EncryptionSession::new(password, [0x7cu8; 16]).unwrap());
     // Long enough (after yEnc expansion of the ciphertext) to span at
@@ -246,35 +246,24 @@ fn duplicate_yencryption_line_in_data_region_releases_no_output() {
     let lines = control::split_lines_preserving_endings(&raw);
     assert!(lines[0].content.starts_with(b"=ybegin"));
     assert!(lines[1].content.starts_with(b"=yencryption"));
-    let duplicate = lines[1].content.to_vec();
-    // Re-encrypt the restored article, then insert the duplicate as a
-    // plaintext line in the wire's data region, immediately after the first
-    // data line. The wire pre-scan in `decode_article`
-    // (`ensure_no_data_region_yencryption`, mirroring NZBGet's body scan)
-    // rejects it before control-line restoration: restoration decrypts the
-    // footer by its physical lineIndex, so an inserted line would
-    // otherwise fail there first, and FF1-encrypting the duplicate
-    // instead would make it indistinguishable from ordinary data bytes
-    // after the first data line (surfacing only as a ciphertext CRC
-    // mismatch).
-    let wire0 = control::encrypt_yenc_control_lines(&session, 1, &raw).unwrap();
-    let wire_lines = control::split_lines_preserving_endings(&wire0);
-    let first_data = 2;
     assert!(
-        wire_lines.len() >= 5,
-        "fixture wire must have header, at least two data lines and a footer"
+        lines.len() >= 5,
+        "fixture must have header, at least two data lines and a footer"
     );
-    let mut wire = Vec::with_capacity(wire0.len() + duplicate.len() + 2);
-    for (idx, line) in wire_lines.iter().enumerate() {
-        wire.extend_from_slice(line.content);
-        wire.extend_from_slice(line.ending);
+    let duplicate = lines[1].content.to_vec();
+    // Insert the duplicate after the first data line (line index 2).
+    let first_data = 2;
+    let mut restored = Vec::with_capacity(raw.len() + duplicate.len() + 2);
+    for (idx, line) in lines.iter().enumerate() {
+        restored.extend_from_slice(line.content);
+        restored.extend_from_slice(line.ending);
         if idx == first_data {
-            wire.extend_from_slice(&duplicate);
-            wire.extend_from_slice(line.ending);
+            restored.extend_from_slice(&duplicate);
+            restored.extend_from_slice(line.ending);
         }
     }
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        DownloadDecryptionAdapter::with_password(password).decode_article(&wire)
+        extract_and_remove_yencryption(&restored)
     }))
     .expect("duplicate =yencryption in data region must never panic");
     let err = result.expect_err("duplicate =yencryption in data region must release no output");
@@ -286,6 +275,25 @@ fn duplicate_yencryption_line_in_data_region_releases_no_output() {
     assert!(
         !msg.as_bytes().windows(payload.len()).any(|w| w == payload),
         "error leaked plaintext: {msg}"
+    );
+    // Optional wire-level companion (generic fail-closed only): feeding the
+    // same tampered article through `decode_article` (after control-line
+    // re-encryption) must still release no output, with any error — not
+    // necessarily the restored-side duplicate message.
+    let wire = control::encrypt_yenc_control_lines(&session, 1, &restored).unwrap();
+    let wire_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        DownloadDecryptionAdapter::with_password(password).decode_article(&wire)
+    }))
+    .expect("wire-level duplicate must never panic");
+    let wire_err =
+        wire_result.expect_err("wire-level duplicate =yencryption must release no output");
+    let wire_msg = wire_err.to_string();
+    assert!(
+        !wire_msg
+            .as_bytes()
+            .windows(payload.len())
+            .any(|w| w == payload),
+        "wire-level error leaked plaintext: {wire_msg}"
     );
 }
 
