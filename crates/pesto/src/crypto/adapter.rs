@@ -7,7 +7,7 @@ use zeroize::Zeroizing;
 
 use super::body;
 use super::control;
-use super::kdf::EncryptionSession;
+use super::kdf::{EncryptionSession, LocalCryptoError};
 use super::ybegin::{name_token_boundary, ybegin_raw_name};
 use crate::yenc::{self, DecodedPart, EncodedPart, PartSpec};
 
@@ -743,6 +743,19 @@ impl DownloadDecryptionAdapter {
         Ok(decoded)
     }
 
+    /// Test seam: poison `cached_sessions` (panics in a scoped thread while
+    /// holding the lock; the join error is ignored).
+    #[doc(hidden)]
+    pub fn poison_session_cache_for_tests(&self) {
+        let _ = std::thread::scope(|s| {
+            s.spawn(|| {
+                let _g = self.cached_sessions.lock().unwrap();
+                panic!("poison session cache for tests");
+            })
+            .join()
+        });
+    }
+
     fn get_or_create_session(&self, salt: [u8; 16]) -> Result<Arc<EncryptionSession>> {
         self.get_or_derive_session(salt, || EncryptionSession::new(&self.password, salt))
     }
@@ -752,12 +765,11 @@ impl DownloadDecryptionAdapter {
         salt: [u8; 16],
         derive: impl FnOnce() -> Result<EncryptionSession>,
     ) -> Result<Arc<EncryptionSession>> {
-        // A poisoned lock fails closed as a crypto error instead of panicking.
+        // A poisoned lock is a local failure, not provider corruption.
         let slot = {
-            let mut guard = self
-                .cached_sessions
-                .lock()
-                .map_err(|_| anyhow::anyhow!("session cache lock poisoned"))?;
+            let mut guard = self.cached_sessions.lock().map_err(|_| {
+                anyhow::Error::new(LocalCryptoError::new("session cache lock poisoned"))
+            })?;
             if let Some(slot) = guard.0.get(&salt) {
                 slot.clone()
             } else {
@@ -778,7 +790,7 @@ impl DownloadDecryptionAdapter {
         // workers for the same salt wait for its result.
         slot.get_or_init(|| derive().map(Arc::new).map_err(|e| format!("{e:#}")))
             .clone()
-            .map_err(|e| anyhow::anyhow!(e))
+            .map_err(|e| anyhow::Error::new(LocalCryptoError::new(e)))
     }
 }
 

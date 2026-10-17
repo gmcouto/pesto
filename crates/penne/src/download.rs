@@ -52,7 +52,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use pesto::config::ServerEntry;
-use pesto::crypto::DownloadDecryptionAdapter;
+use pesto::crypto::{DownloadDecryptionAdapter, LocalCryptoError};
 use pesto::yenc::{decode_part, DecodedPart};
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::task::JoinSet;
@@ -632,7 +632,10 @@ async fn worker_loop(
         match decoded_result {
             Ok(decoded) => {
                 // Cache the raw body, not the decoded form — see the module
-                // docs on `crate::cache` for why.
+                // docs on `crate::cache` for why. Only an AEAD-authenticated
+                // body reaches this store (PESTO13-02, Q7(a)): cache hits are
+                // fully re-authenticated (restore → CRC → AEAD) in
+                // `decode_body` before any byte reaches assembly.
                 let _ = cache::store(&ctx.dest_dir, &item.message_id, &body);
                 emit(&ctx.progress, || ProgressEvent::SegmentDownloaded {
                     file_name: item.file_name.clone(),
@@ -651,6 +654,11 @@ async fn worker_loop(
                 fetched.push(item);
             }
             Err(e) => {
+                // Local crypto failure (Argon2id/cache) is not provider
+                // corruption: no other tier can fix it, so abort at once.
+                if e.is::<LocalCryptoError>() {
+                    return Err(e);
+                }
                 if is_last_server {
                     emit(&ctx.progress, || ProgressEvent::SegmentCorrupt {
                         file_name: item.file_name.clone(),

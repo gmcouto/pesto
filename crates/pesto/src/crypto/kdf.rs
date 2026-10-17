@@ -9,6 +9,34 @@ use zeroize::{Zeroize, Zeroizing};
 
 type HmacSha256 = Hmac<Sha256>;
 
+/// A local cryptographic failure: Argon2id derivation/allocation failure or
+/// a poisoned session-cache lock in this process.
+///
+/// This is never caused by bytes fetched from a provider, so another
+/// provider cannot fix it. Callers must abort the job instead of routing it
+/// to provider failover (the local counterpart of NZBGet's fatal tier).
+/// Carries no key material.
+#[derive(Debug)]
+pub struct LocalCryptoError {
+    message: String,
+}
+
+impl LocalCryptoError {
+    pub(crate) fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
+impl fmt::Display for LocalCryptoError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for LocalCryptoError {}
+
 pub struct EncryptionSession {
     master_key: Zeroizing<[u8; 32]>,
     control_key: Zeroizing<[u8; 32]>,

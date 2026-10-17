@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 mod aad_fields;
 mod geometry;
+mod local_failure;
 mod public_api;
 
 #[test]
