@@ -65,6 +65,14 @@ pub(super) async fn run(tuning: pesto::memory::ThreadTuning) -> Result<()> {
     let nzb_default = nzb_default.or_else(|| file_config.output.nzb.clone());
     // Read before `file_config` is consumed by `Config::resolve`.
     let session_log_enabled = !cli.no_session_log && file_config.output.session_log.unwrap_or(true);
+    // Q-A: bare `--encrypt` honours a configured `[encryption] password`;
+    // a random password is generated only when none is configured.
+    prepare_encrypt_password(
+        &mut cli,
+        file_config.encryption.password.as_deref(),
+        &mut std::io::stdout(),
+        &mut std::io::stderr(),
+    )?;
     let config = Arc::new(Config::resolve(file_config, cli.overrides())?);
     let json_mode = cli.output_format.trim().eq_ignore_ascii_case("json");
 
@@ -392,5 +400,163 @@ fn print_welcome() {
             "Set $HOME or $XDG_CONFIG_HOME so pesto can locate a config file,\n\
              or pass every setting as a flag (see `pesto --help`)."
         ),
+    }
+}
+
+// Keep password generation at command dispatch; querying overrides has no output.
+// Q-A: a bare `--encrypt` resolves to a configured `[encryption] password`
+// when one is set (generation happens only when none is configured). The
+// configured value is copied into `cli.encrypt` because `Config::resolve`
+// prefers the CLI value (`cli.or(file...)`); leaving the bare marker `""`
+// there would shadow the config and fail validation as an empty password.
+// An explicit `--encrypt=PASS` is a non-empty value and is untouched.
+fn prepare_encrypt_password(
+    cli: &mut Cli,
+    configured_password: Option<&str>,
+    stdout: &mut impl std::io::Write,
+    stderr: &mut impl std::io::Write,
+) -> Result<()> {
+    if cli.encrypt.as_deref() == Some("") {
+        if let Some(configured) = configured_password {
+            cli.encrypt = Some(configured.to_string());
+        } else {
+            let pass = pesto::compress::random_password();
+            if cli.output_format.trim().eq_ignore_ascii_case("json") {
+                writeln!(stderr, "encryption password: {pass}")?;
+            } else {
+                writeln!(stdout, "encryption password: {pass}")?;
+            }
+            cli.encrypt = Some(pass);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bare_encrypt_preserves_positional_files() {
+        let cli = Cli::try_parse_from(["pesto", "--encrypt", "file.mkv"]).unwrap();
+        assert_eq!(cli.encrypt, Some("".to_string()));
+        assert_eq!(cli.files, vec![PathBuf::from("file.mkv")]);
+    }
+
+    #[test]
+    fn explicit_encrypt_with_equals_preserves_positional_files() {
+        let cli = Cli::try_parse_from([
+            "pesto",
+            "--encrypt=public-conformance-vector-key-2026",
+            "file.mkv",
+        ])
+        .unwrap();
+        assert_eq!(
+            cli.encrypt,
+            Some("public-conformance-vector-key-2026".to_string())
+        );
+        assert_eq!(cli.files, vec![PathBuf::from("file.mkv")]);
+    }
+
+    #[test]
+    fn encrypt_password_spelling_is_an_unknown_arg_error() {
+        // DEC-1: `--encrypt[=PASS]` is the only form. The removed
+        // `--encrypt-password` alias must not swallow `x` as its value or
+        // as an input file; any form of it is an unknown-arg error.
+        let err = Cli::try_parse_from(["pesto", "--encrypt-password=x", "file.mkv"]).unwrap_err();
+        assert!(
+            err.to_string().contains("--encrypt-password"),
+            "unknown-arg error must name the removed alias, got: {err}"
+        );
+        assert!(!err.to_string().contains("random"), "got: {err}");
+    }
+
+    #[test]
+    fn bare_encrypt_prints_generated_password_once() {
+        for format in ["text", "json"] {
+            let mut cli =
+                Cli::try_parse_from(["pesto", "--encrypt", "--output-format", format, "file.bin"])
+                    .unwrap();
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            prepare_encrypt_password(&mut cli, None, &mut stdout, &mut stderr).unwrap();
+            let password = cli.overrides().encrypt_password.unwrap();
+            assert!(!password.is_empty());
+            prepare_encrypt_password(&mut cli, None, &mut stdout, &mut stderr).unwrap();
+            assert_eq!(
+                cli.overrides().encrypt_password.as_deref(),
+                Some(password.as_str())
+            );
+            let expected = format!("encryption password: {password}\n");
+            let (output, unused) = if format == "json" {
+                (&stderr, &stdout)
+            } else {
+                (&stdout, &stderr)
+            };
+            assert_eq!(output, expected.as_bytes());
+            assert!(unused.is_empty());
+        }
+    }
+
+    #[test]
+    fn bare_encrypt_honours_configured_password() {
+        // Q-A / R11-PU-03: with `[encryption] password` configured, a bare
+        // `--encrypt` must not generate or print a random password, and the
+        // resolved config must carry the configured password.
+        let mut cli = Cli::try_parse_from(["pesto", "--encrypt", "file.bin"]).unwrap();
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut file = FileConfig::default();
+        file.server.host = Some("news.example.com".into());
+        file.posting.groups = Some(vec!["alt.test".into()]);
+        file.encryption.password = Some("conformance-fixture-configured-password".into());
+        prepare_encrypt_password(
+            &mut cli,
+            file.encryption.password.as_deref(),
+            &mut stdout,
+            &mut stderr,
+        )
+        .unwrap();
+        assert!(stdout.is_empty(), "no generated password may be printed");
+        assert!(stderr.is_empty(), "no generated password may be printed");
+        let config = Config::resolve(file, cli.overrides()).unwrap();
+        assert_eq!(
+            config.encrypt_password.as_deref(),
+            Some("conformance-fixture-configured-password")
+        );
+    }
+
+    #[test]
+    fn explicit_encrypt_password_wins_over_configured() {
+        // An explicit `--encrypt=PASS` still wins over config (unchanged).
+        let mut cli = Cli::try_parse_from([
+            "pesto",
+            "--encrypt=public-conformance-vector-key-2026",
+            "file.bin",
+        ])
+        .unwrap();
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut file = FileConfig::default();
+        file.server.host = Some("news.example.com".into());
+        file.posting.groups = Some(vec!["alt.test".into()]);
+        file.encryption.password = Some("conformance-fixture-configured-password".into());
+        prepare_encrypt_password(
+            &mut cli,
+            file.encryption.password.as_deref(),
+            &mut stdout,
+            &mut stderr,
+        )
+        .unwrap();
+        assert_eq!(
+            cli.encrypt.as_deref(),
+            Some("public-conformance-vector-key-2026")
+        );
+        assert!(stdout.is_empty() && stderr.is_empty());
+        let config = Config::resolve(file, cli.overrides()).unwrap();
+        assert_eq!(
+            config.encrypt_password.as_deref(),
+            Some("public-conformance-vector-key-2026")
+        );
     }
 }
