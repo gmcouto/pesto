@@ -7,6 +7,51 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- PAR2 sets now include a Unicode Filename (`UniFileN`) packet after the File
+  Description of every file whose name is not ASCII, matching ParPar's default.
+  The File Description keeps the UTF-8 name. New public API:
+  `packet::TYPE_UNICODE_FILENAME`, `packet::unicode_filename_body` and
+  `packet::serialize_file_description`. An ignored `parpar_compat` test
+  compares these packets byte for byte with ParPar's output.
+- `CreateOptions::slice_unit` aligns automatic slice sizes to a unit: every
+  slice is a whole multiple of it, so a lost unit (an article, for a Usenet
+  poster) damages exactly one slice. Sets smaller than 4 GiB get more slices
+  per byte, up to one per unit, at about the total cost of a 4 GiB set.
+  Larger sets keep about 2000 slices. `CreateOptions::effort` scales that
+  slice budget, and the unaligned heuristic's 2000-slice target. Both fields
+  are new, so a `CreateOptions` struct literal must now set them or use
+  `..CreateOptions::default()`. `parmesan create` leaves the unit unset and
+  its geometry unchanged (#217).
+
+### Changed
+
+- `performance_core_count` never returns more than
+  `std::thread::available_parallelism`, so the default thread count of
+  `parmesan create` honours CPU affinity and cgroup CPU quotas instead of
+  counting every core of the host (#218).
+- When repair hits a singular matrix, the error now says that PAR2 does not
+  guarantee an inverse for non-consecutive recovery blocks, instead of blaming
+  a decoder bug. The matrix proptest now checks the property PAR2 does
+  guarantee, consecutive exponents, and no longer fails at random (#215).
+
+### Fixed
+
+- `parmesan create` now flushes each recovery packet before moving on. tokio
+  could still be writing the last packet when the volumes were published, so a
+  reader could see a volume without its final recovery block, most often on
+  machines with one or two CPUs.
+- File IDs are now sorted as little-endian 128-bit integers, as the PAR2 spec,
+  par2cmdline and ParPar do. Before, they were sorted as big-endian byte
+  strings, so a multi-file set had a different Main packet, recovery set ID and
+  input slice order than par2cmdline or ParPar would produce. Readers that
+  follow Main's listed order (par2cmdline and tools derived from it) repaired
+  those sets fine; readers that re-sort per the spec would not. Single-file sets
+  are unchanged. New public API: `packet::cmp_file_id`. The ignored
+  `parpar_compat` test now checks every Main, FileDesc, Unicode Filename, IFSC
+  and Recovery Slice packet byte for byte against ParPar (#212).
+
 ## [0.5.8] — 2026-10-19
 
 ### Added

@@ -70,16 +70,13 @@ fn season_base_packets(files: &[SeasonFileEntry], par2_slice_size: usize) -> ([u
     base_packets.extend(pkt_creator);
 
     for file in files {
-        let pkt_file_desc = packet::serialize_packet(
+        let pkt_file_desc = packet::serialize_file_description(
             &rsid,
-            &packet::TYPE_FILE_DESC,
-            &packet::file_description_body(
-                &file.file_id,
-                &file.hashes.md5_full,
-                &file.hashes.md5_16k,
-                file.hashes.length,
-                &file.name,
-            ),
+            &file.file_id,
+            &file.hashes.md5_full,
+            &file.hashes.md5_16k,
+            file.hashes.length,
+            &file.name,
         );
         let pkt_ifsc = packet::serialize_packet(
             &rsid,
@@ -261,7 +258,7 @@ async fn generate_season_par2(
     // files happen to be fed to the encoder. `episode_paths` arrives in
     // argument/directory order, so it must be re-sorted by File ID before any
     // slice is fed — exactly like the per-file PAR2 path above does for
-    // `metas` (see its own comment, `keyed.sort_by_key`). Skipping this once
+    // `metas` (see its own comment, `packet::cmp_file_id`). Skipping this once
     // produced PAR2 volumes that verified/repaired against pesto's own
     // encoder but failed real repair against par2cmdline, since its Main
     // packet lists File IDs in sorted order while the recovery blocks were
@@ -285,7 +282,7 @@ async fn generate_season_par2(
             let file_id = packet::compute_file_id(&md5_16k, size, &name);
             keyed.push((file_id, path, name, size));
         }
-        keyed.sort_by_key(|(file_id, ..)| *file_id);
+        keyed.sort_by(|(a, ..), (b, ..)| packet::cmp_file_id(a, b));
         ordered = keyed
             .into_iter()
             .map(|(_, path, name, size)| (path, name, size))
@@ -301,7 +298,7 @@ async fn generate_season_par2(
 
     // Validate PAR2 spec limits — same check `producer()` does for the
     // per-file path. Sharing `par2_geometry_from_sizes` between the two
-    // paths means an explicit `--par2-slice-count`/`--par2-recovery-count`
+    // paths means an explicit `--slice-count`/`--recovery-count`
     // can equally overflow the GF(2^16) exponent space here.
     if total_slices > 32768 {
         bail!("too many input slices: {total_slices} (max 32768). Increase --slice-size or decrease --slice-count.");
@@ -345,11 +342,7 @@ async fn generate_season_par2(
         } else {
             parmesan::detect_simd().to_string()
         };
-        let threads = if config.threads > 0 {
-            config.threads
-        } else {
-            parmesan::performance_core_count()
-        };
+        let threads = super::par2_threads(config.threads);
         let _ = tx.send(ProgressEvent::Par2EncodeStarted {
             input_bytes: sizes.iter().sum(),
             input_slices: total_slices,

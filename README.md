@@ -30,6 +30,7 @@ with a deliberately minimal scope: just the essentials, executed extremely fast.
   - [Multiple files](#multiple-files)
 - [Obfuscation](#obfuscation)
 - [Compression and passwords](#compression-and-passwords)
+- [Encryption (yEnc body & control lines)](#encryption-yenc-body--control-lines)
 - [PAR2 recovery data](#par2-recovery-data)
 - [Batch and watch modes](#batch-and-watch-modes)
 - [Reliability](#reliability)
@@ -299,6 +300,12 @@ including `.courseid`, are included unless a custom exclusion or extension
 allowlist removes them. See [directory exclusions](#directory-exclusions). The `.nzb` is named after the root folder
 (`MyShow.S01.nzb`).
 
+File and folder names with accents or other non-ASCII characters are posted
+unchanged as UTF-8 in the Subject, yEnc header, `.nzb` and PAR2 metadata, the
+same way nyuu, ngPost and ParPar do. NZBGet currently decodes PAR2 names as
+Latin-1, so a name it restores from PAR2 can come out garbled; SABnzbd restores
+them correctly. See [`docs/obfuscation.md`](docs/obfuscation.md).
+
 #### DVD / Blu-ray full-disc backups
 
 DVD and Blu-ray structures (e.g. `VIDEO_TS/`) often contain **0-byte
@@ -558,6 +565,72 @@ pesto --obfuscate=full --password=MySecret42 ./MyShow.S01/
 
 ---
 
+## Encryption (yEnc body & control lines)
+
+Pesto supports opt-in yEnc body and control-line encryption according to the
+yEnc Body and Control Lines Encryption Standards v1.2. Article bodies are encrypted with
+XChaCha20-Poly1305 before yEnc encoding, and yEnc control lines (`=ybegin`, `=ypart`,
+`=yend`, `=yencryption`) are encrypted using Radix 253 NIST SP 800-38G FF1.
+
+Under the v1.2 standards, each posted Usenet article is self-describing
+and embeds its salt and segment index directly into the wire bytes (indices are
+allocated from 1 upward, skipping any value whose big-endian bytes contain `0x0A`/`0x0D`):
+- A 20-byte bootstrap prefix (`[16-byte raw salt][4-byte uint32_be(segmentIndex)]`)
+  is prepended to physical Line 1 (`=ybegin`) before FF1 ciphertext.
+- A canonical 5-token header line (`=yencryption cipher=XChaCha20-Poly1305 salt=<32_hex> index=<8_hex> tag=<32_hex>`)
+  provides dual-bootstrap agreement for downloaders.
+
+Generated NZBs strictly conform to the standard NZB 1.1 DTD without custom
+XML attributes on `<segment>` elements. The `<head>` carries
+`<meta type="yenc_encrypted">true</meta>` and `<meta type="password">` (the
+transport password); the writer also emits the optional
+`yenc_version`/`yenc_cipher` provenance metas, which conforming readers gate
+fail-closed on unsupported values.
+
+Conforming downloaders detect `yenc_encrypted` and decrypt using the password
+in `<meta type="password">` (or from their own configured sources).
+
+Heads up: encrypted uploads need a downloader that supports this encryption.
+An ordinary downloader cannot decrypt them and will only get unreadable data.
+
+### CLI usage
+
+```bash
+# Encrypt with a random 24-character password (printed to stdout and stored in .nzb)
+pesto --encrypt movie.mkv
+
+# Encrypt with an explicit password
+pesto --encrypt=<password> movie.mkv
+```
+
+> **Removed:** `--encrypt-password` was previously accepted as an alias of
+> `--encrypt`; it was removed — use `--encrypt` / `--encrypt=PASSWORD` only.
+
+### Configuration
+
+Enable encryption or set a default password in `config.toml`:
+
+```toml
+[encryption]
+password = "<password>"
+```
+
+### Threat Model
+
+- **Confidentiality:** Content encryption at the article layer (XChaCha20-Poly1305) protects stored Usenet articles from parties without the NZB and password. However, because the encryption password is conventionally stored in the NZB (`<meta type="password">`), confidentiality depends strictly on private distribution of the generated `.nzb`.
+- **Transport Security:** TLS continues to protect communication between the poster/downloader and NNTP servers, while content encryption protects payload data at rest on Usenet backend storage.
+- **Integrity & Authenticity:** Poly1305 tags authenticate segment bodies; tampering or truncation causes fail-closed authentication errors releasing zero unauthenticated plaintext.
+
+### Unsupported Operations
+
+- **Archive Passwords vs Transport Encryption:** An archive password passed to `--password` encrypts the archive file itself. It is distinct from `--encrypt`, which activates yEnc body and control-line transport encryption. If both are set, the transport password wins for the NZB `<meta type="password">`. Conforming downloaders inspect `<meta type="yenc_encrypted">true</meta>` to distinguish transport encryption from archive extraction passwords.
+
+### Protocol Status
+
+The yEnc encryption protocol is explicitly **experimental** (spec v1.2). An independent formal cryptographic review is recommended prior to stabilizing the specification across the ecosystem.
+
+---
+
 ## PAR2 recovery data
 
 pesto generates PAR2 parity files using its own pure-Rust implementation.
@@ -592,6 +665,27 @@ pesto --par2-only ./MyShow.S01/
 # data files, which some indexers fail to group as one release.
 pesto --par2-before-upload movie.mkv
 ```
+
+### Slice size and protection
+
+Each PAR2 recovery block repairs one slice, however little of it is damaged,
+and on Usenet the damage unit is a missing article. By default every slice is
+a whole multiple of the article size, so a lost article costs exactly one
+recovery block. Releases up to about 2.4 GiB get one slice per article: with
+10 % PAR2 they survive 10 % of their articles missing anywhere. Larger releases
+keep about 2000 slices, so creating their PAR2 costs the same CPU as before.
+
+```bash
+# Most protection: one slice per article, at the most CPU time
+pesto --slice-size article movie.mkv
+
+# Twice the slices of the default for large releases (and twice the CPU)
+pesto --par2-effort 2 movie.mkv
+```
+
+Both can be set as defaults with `par2_slice_size` and `par2_effort` under
+`[posting]`. See [docs/par2-geometry.md](docs/par2-geometry.md) for the
+method and the numbers.
 
 ### PAR2 scratch directory
 
@@ -1249,12 +1343,13 @@ picked up automatically — no config change needed.
 | `--par2-before-upload` | `posting.par2_before_upload` | off | Generate all PAR2 recovery data before posting anything, instead of concurrently with the upload; posts data files then the PAR2 index/volumes back to back |
 | `--dry-run` | — | off | Encode only; never touch the network |
 | `--resume` | `output.resume` | off | Load a prior run's `.pesto-state` file and skip already-posted segments |
-| `--slice-size <SIZE>` | — | auto | Manual PAR2 slice size (e.g. `"1 MiB"`) |
+| `--slice-size <SIZE>` | `posting.par2_slice_size` | auto | PAR2 slice size: `auto`, `article` or a fixed size (e.g. `"4 MiB"`) |
+| `--par2-effort <FACTOR>` | `posting.par2_effort` | 1 | Scale the CPU budget of automatic PAR2 slicing (`2` = twice the slices) |
 | `--slice-count <N>` | — | auto | Target number of PAR2 input slices |
 | `--recovery-count <N>` | — | auto | Exact number of PAR2 recovery blocks |
 | `--memory-limit <SIZE>` | `posting.par2_memory_limit` | `"1 GiB"` | Max RAM for PAR2 recovery buffers |
-| `--threads <N>` | — | auto | Threads for PAR2 compute (`0` = physical cores) |
-| `--simd <MODE>` | — | auto | Force SIMD: `auto`, `avx2-gfni`, `avx2`, `ssse3`, `scalar` |
+| `--threads <N>` | `posting.threads` | auto | Threads for PAR2 compute (`0` = one per usable physical core, at most 16) |
+| `--simd <MODE>` | `posting.simd` | auto | Force SIMD: `auto`, `avx512-gfni`, `avx512-shuffle`, `avx2-gfni`, `avx2`, `ssse3`, `neon`, `scalar` |
 | `--check` / `--no-check` | `posting.check` | **on** | Streaming STAT check, concurrent with the upload; `--no-check` disables it |
 | `--check-delay <SECS>` | `posting.check_delay` | `5` | Seconds to wait after an article posts before its first STAT check |
 | `--check-retries <N>` | `posting.check_retries` | `3` | STAT attempts per posted copy; 20 s between each |
@@ -1268,6 +1363,8 @@ picked up automatically — no config change needed.
 | `--compress [FORMAT]` | `compression.format` | off | Bundle into an archive (`7z`, `zip`, `rar`) |
 | `--compress-temp-dir <DIR>` | `compression.temp_dir` | OS temp dir | Where the `--compress` archive is staged before posting |
 | `--password [PASSWORD]` | — | — | Archive password; bare flag = random |
+| **Encryption** | | | |
+| `--encrypt [PASSWORD]` | `encryption.password` | off | Enable yEnc body & control-line encryption; bare flag generates random password |
 | **Output** | | | |
 | `-o`, `--out <PATH>` | `output.nzb` | derived | Explicit `.nzb` output path |
 | `--nzb-dir <DIR>` | `output.nzb_dir` | — | Directory where `.nzb` files are saved |

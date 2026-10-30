@@ -131,6 +131,7 @@ fn config(addr: SocketAddr, par2_before_upload: bool) -> Config {
         par2_slice_size: Some(8192),
         par2_slice_count: None,
         par2_recovery_count: None,
+        par2_effort: 1.0,
         // Small enough that the recovery data for this file needs multiple
         // read passes (see the multi-pass log line `split into N passes`
         // `producer` emits when this happens).
@@ -150,6 +151,7 @@ fn config(addr: SocketAddr, par2_before_upload: bool) -> Config {
         compress_volume_size: None,
         nzb_title: None,
         nzb_password: None,
+        encrypt_password: None,
         nzb_category: None,
         nzb_tags: vec![],
         tmdb_id: None,

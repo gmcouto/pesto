@@ -94,8 +94,8 @@ pub async fn run_upload(
                         .into_owned()
                 })
             })
+            .filter(|stem| !stem.is_empty())
             .unwrap_or_else(|| "archive".to_string());
-        let client_archive_stem = crate::compress::portable_archive_stem(&client_archive_stem);
 
         let archive_stem = if config.obfuscate != ObfuscateMode::None {
             crate::article::obfuscated_name()
@@ -304,8 +304,9 @@ pub async fn run_upload(
                         .map(|n| n.to_string_lossy().into_owned())
                 }),
                 password: config
-                    .nzb_password
+                    .encrypt_password
                     .clone()
+                    .or_else(|| config.nzb_password.clone())
                     .or_else(|| effective_password.clone()),
                 category: config.nzb_category.clone(),
                 tmdb_id: config.tmdb_id.clone(),
@@ -313,6 +314,7 @@ pub async fn run_upload(
                 tvdb_id: config.tvdb_id.clone(),
                 mal_id: config.mal_id.clone(),
                 tags: config.nzb_tags.clone(),
+                yenc_encrypted: config.encrypt_password.is_some(),
             };
             crate::memory::set_phase(crate::memory::Phase::Nzb);
             let xml = crate::nzb::generate(
@@ -452,8 +454,9 @@ pub async fn run_upload(
             group: outcome.groups.first().cloned().unwrap_or_default(),
             groups: outcome.groups.join(":"),
             password: config
-                .nzb_password
+                .encrypt_password
                 .as_deref()
+                .or(config.nzb_password.as_deref())
                 .or(config.compress_password.as_deref())
                 .unwrap_or("")
                 .to_string(),

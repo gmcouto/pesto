@@ -12,10 +12,9 @@
 //! output name can be reused for an unrelated or edited file, or with
 //! different posting parameters (`--article-size`, `--obfuscate`,
 //! `--compress`, `--par2`, `--file-counter`) that change how the input is
-//! chunked and named.
-//! [`RunFingerprint`] and [`FileFingerprint`] guard against exactly that —
-//! a run-level mismatch discards the whole state, a per-file mismatch
-//! discards only that file's segments.
+//! chunked and named. [`RunFingerprint`] and [`FileFingerprint`] guard
+//! against that — a run-level mismatch discards the whole state, a per-file
+//! mismatch discards only that file's segments.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -30,7 +29,7 @@ use crate::config::{Config, ObfuscateMode};
 /// every recorded Message-ID in the state could reference the wrong byte
 /// range or the wrong wire name, so the whole state is discarded rather than
 /// trusted partially.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RunFingerprint {
     pub article_size: u64,
     pub obfuscate: ObfuscateMode,
@@ -38,9 +37,7 @@ pub struct RunFingerprint {
     pub par2_percent: u8,
     /// `--file-counter`: toggling it changes every subject in the release
     /// (the `[filenum/total]` prefix), so a mismatch must discard the state
-    /// the same way an `--obfuscate`/`--par2` change does — otherwise a
-    /// resumed run's reused Message-IDs would be recorded against a subject
-    /// that no longer matches what the original run actually posted.
+    /// the same way an `--obfuscate`/`--par2` change does.
     pub file_counter: bool,
     /// Geometry / compression options that change the posted bytes without
     /// touching `article_size` or `par2_percent`. `#[serde(default)]` so a
@@ -58,7 +55,30 @@ pub struct RunFingerprint {
     #[serde(default)]
     pub compress_password: Option<String>,
     #[serde(default)]
+    pub encrypt_password: Option<String>,
+    #[serde(default)]
     pub line_length: usize,
+    /// See [`Config::par2_effort`]. A state written before this field
+    /// existed was built at the default.
+    #[serde(default = "default_par2_effort")]
+    pub par2_effort: f64,
+    /// PAR2 layout the set was built with: [`PAR2_LAYOUT`] when `--par2` is
+    /// on, `0` otherwise. A state written by an older layout, or before this
+    /// field existed, defaults to `0` and is discarded if the resumed run has
+    /// PAR2 enabled, since its PAR2 segments do not match what this version
+    /// builds.
+    #[serde(default)]
+    pub par2_layout: u8,
+}
+
+/// [`RunFingerprint::par2_layout`] for the current PAR2 layout: File IDs
+/// sorted little-endian per the PAR2 spec (issue #212) and slices aligned to
+/// the article size (issue #217). Bump it whenever the same config would
+/// produce different PAR2 bytes.
+pub const PAR2_LAYOUT: u8 = 1;
+
+fn default_par2_effort() -> f64 {
+    crate::config::DEFAULT_PAR2_EFFORT
 }
 
 impl RunFingerprint {
@@ -74,7 +94,10 @@ impl RunFingerprint {
             par2_recovery_count: config.par2_recovery_count,
             compress_volume_size: config.compress_volume_size.clone(),
             compress_password: config.compress_password.as_deref().map(hash_secret),
+            encrypt_password: config.encrypt_password.as_deref().map(hash_secret),
             line_length: config.line_length,
+            par2_effort: config.par2_effort,
+            par2_layout: if config.par2 > 0 { PAR2_LAYOUT } else { 0 },
         }
     }
 }
@@ -182,34 +205,46 @@ pub struct PersistedWireIdentity {
     pub unix_date: Option<u64>,
 }
 
+/// Upload session identity: 16-byte salt, complete layout and ordered source names.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UploadSessionIdentity {
+    pub salt: [u8; 16],
+    pub layout: crate::poster::ReleaseLayout,
+    /// Ordered data file names in posting order. Replaced sources with
+    /// identical part counts must rotate salt (nonce-reuse guard).
+    /// `#[serde(default)]` so pre-identity state files load but fail this
+    /// comparison and rotate rather than trust a count-only match.
+    #[serde(default)]
+    pub source_names: Vec<String>,
+}
+
 /// Persistent state for a single upload session.
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ResumeState {
     /// Posting parameters this state was recorded under. `None` for a fresh
-    /// state (nothing recorded yet) or a state file written before this
-    /// field existed — in either case there is nothing to compare against
-    /// yet, so `validate_run` treats it as compatible and starts tracking.
+    /// state or one written before this field existed — either way nothing
+    /// to compare against, so `validate_run` treats it as compatible.
     fingerprint: Option<RunFingerprint>,
     /// The obfuscated archive stem this release was compressed under, when
-    /// `--compress`+`--obfuscate` produced one. Randomly generated fresh on
-    /// every run by default — recorded here so a `--resume` run with a
-    /// matching fingerprint can reuse the *same* name instead of generating
-    /// a new one, which would otherwise make this file's segments
-    /// unresumable (the resume key is this very name). See issue #18's
-    /// resume follow-up discussion.
+    /// `--compress`+`--obfuscate` produced one. Recorded so a `--resume`
+    /// run with a matching fingerprint reuses the *same* name (the resume
+    /// key is this very name). See issue #18's resume follow-up discussion.
     archive_stem: Option<String>,
-    /// The shared wire name prefix and sender identity every file in an
-    /// `ObfuscateMode::FullShared` run posts under — see
-    /// `ObfuscateMode::FullShared`. Randomly generated fresh on every run by
-    /// default; recorded here for the same reason as `archive_stem`, so a
-    /// `--resume` run reuses the same identity instead of a new one.
+    /// Shared wire name prefix/sender for an `ObfuscateMode::FullShared`
+    /// run; recorded so `--resume` reuses the same identity.
     release_prefix: Option<String>,
     release_from: Option<String>,
     /// Per-file identity, keyed by `file_name`.
     files: HashMap<String, FileFingerprint>,
     /// Key: `"{file_name}\0{part}"`.
     segments: HashMap<String, SegmentRecord>,
+    /// Session identity (salt, layout, ordered source names).
+    #[serde(default)]
+    session_identity: Option<UploadSessionIdentity>,
+    /// Set when the session was invalidated so the spool directory is cleared.
+    #[serde(skip)]
+    session_invalidated: bool,
 }
 
 impl ResumeState {
@@ -231,7 +266,7 @@ impl ResumeState {
                     .with_context(|| format!("reading resume state `{}`", path.display()));
             }
         };
-        match serde_json::from_str(&text) {
+        match serde_json::from_str::<Self>(&text) {
             Ok(state) => Ok(state),
             Err(_) => Ok(Self::default()),
         }
@@ -267,16 +302,66 @@ impl ResumeState {
     pub fn validate_run(&mut self, current: &RunFingerprint) -> bool {
         if let Some(stored) = &self.fingerprint {
             if stored != current {
-                self.segments.clear();
-                self.files.clear();
-                self.archive_stem = None;
-                self.release_prefix = None;
-                self.release_from = None;
+                self.invalidate_session();
                 self.fingerprint = Some(current.clone());
                 return false;
             }
         }
         self.fingerprint = Some(current.clone());
+        true
+    }
+
+    /// Record (or update) the upload session identity.
+    pub fn set_session_identity(&mut self, identity: UploadSessionIdentity) {
+        self.session_identity = Some(identity);
+    }
+
+    /// The opaque 16-byte session salt recorded for this state, if any.
+    pub fn session_salt(&self) -> Option<&[u8; 16]> {
+        self.session_identity.as_ref().map(|s| &s.salt)
+    }
+
+    /// Invalidate the entire upload session, clearing session identity (salt,
+    /// layout, source names), all segment records, all file fingerprints,
+    /// archive stem, and shared release identity. Used when the encrypted
+    /// session can no longer be trusted: a changed posting fingerprint,
+    /// layout, or source set can reuse the same key/index space over
+    /// *different* plaintext, so the salt must be regenerated and every
+    /// record dropped.
+    pub fn invalidate_session(&mut self) {
+        self.session_invalidated = true;
+        self.session_identity = None;
+        self.segments.clear();
+        self.files.clear();
+        self.archive_stem = None;
+        self.release_prefix = None;
+        self.release_from = None;
+    }
+
+    /// Take and clear the session_invalidated dirty bit (set by
+    /// `validate_run`/`invalidate_session`). `prepare_resources` consumes
+    /// it to clear the spool directory along with the invalidated state.
+    pub fn take_session_invalidated(&mut self) -> bool {
+        std::mem::take(&mut self.session_invalidated)
+    }
+
+    /// Validate the current release layout and ordered source identity
+    /// against this session's recorded identity. A mismatch (including a
+    /// stored identity without source names) invalidates the session and
+    /// returns `false`. (The posting fingerprint is validated separately
+    /// by `validate_run`.)
+    pub fn validate_session(
+        &mut self,
+        current_layout: &crate::poster::ReleaseLayout,
+        current_source_names: &[String],
+    ) -> bool {
+        if let Some(stored) = &self.session_identity {
+            if stored.layout != *current_layout || stored.source_names != current_source_names {
+                self.invalidate_session();
+                return false;
+            }
+        }
+
         true
     }
 
@@ -317,6 +402,11 @@ impl ResumeState {
             Some(stored) => stored == current,
             None => true,
         }
+    }
+
+    /// Whether this state file has a recorded fingerprint for `file_name`.
+    pub fn has_file(&self, file_name: &str) -> bool {
+        self.files.contains_key(file_name)
     }
 
     /// Record (or update) a file's fingerprint.
@@ -409,350 +499,8 @@ impl ResumeState {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
+#[cfg(test)]
+mod tests;
 
-    fn fp(article_size: u64) -> RunFingerprint {
-        RunFingerprint {
-            article_size,
-            obfuscate: ObfuscateMode::None,
-            compress_format: None,
-            par2_percent: 0,
-            file_counter: false,
-            par2_slice_size: None,
-            par2_slice_count: None,
-            par2_recovery_count: None,
-            compress_volume_size: None,
-            compress_password: None,
-            line_length: 128,
-        }
-    }
-
-    #[test]
-    fn round_trip() {
-        let mut s = ResumeState::default();
-        s.record("file.bin", 1, "abc@example.com", 100);
-        s.record("file.bin", 2, "def@example.com", 200);
-        assert_eq!(s.get("file.bin", 1).unwrap().message_id, "abc@example.com");
-        assert_eq!(s.get("file.bin", 1).unwrap().bytes, 100);
-        assert!(s.get("file.bin", 3).is_none());
-        assert_eq!(s.len(), 2);
-    }
-
-    #[test]
-    fn remove_forgets_a_recorded_segment() {
-        let mut s = ResumeState::default();
-        s.record("file.bin", 1, "abc@example.com", 100);
-        s.record("file.bin", 2, "def@example.com", 200);
-        s.remove("file.bin", 1);
-        assert!(s.get("file.bin", 1).is_none());
-        assert_eq!(s.get("file.bin", 2).unwrap().message_id, "def@example.com");
-        assert_eq!(s.len(), 1);
-    }
-
-    #[test]
-    fn remove_of_an_unrecorded_segment_is_a_no_op() {
-        let mut s = ResumeState::default();
-        s.record("file.bin", 1, "abc@example.com", 100);
-        s.remove("file.bin", 99);
-        assert_eq!(s.len(), 1);
-    }
-
-    #[test]
-    fn save_and_load() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("state.json");
-        let mut s = ResumeState::default();
-        s.record("a.bin", 1, "id1@x", 100);
-        s.save(&path).unwrap();
-        let loaded = ResumeState::load(&path).unwrap();
-        assert_eq!(loaded.get("a.bin", 1).unwrap().message_id, "id1@x");
-        assert_eq!(loaded.get("a.bin", 1).unwrap().bytes, 100);
-    }
-
-    #[test]
-    fn missing_file_returns_empty() {
-        let state = ResumeState::load(Path::new("/nonexistent/path.json")).unwrap();
-        assert!(state.is_empty());
-    }
-
-    #[test]
-    fn fresh_state_accepts_any_fingerprint() {
-        let mut s = ResumeState::default();
-        assert!(s.validate_run(&fp(768_000)));
-    }
-
-    #[test]
-    fn matching_fingerprint_keeps_segments() {
-        let mut s = ResumeState::default();
-        assert!(s.validate_run(&fp(768_000)));
-        s.record("a.bin", 1, "id1@x", 100);
-        assert!(s.validate_run(&fp(768_000)));
-        assert_eq!(s.len(), 1, "matching fingerprint must not clear segments");
-    }
-
-    #[test]
-    fn mismatched_fingerprint_discards_everything() {
-        let mut s = ResumeState::default();
-        assert!(s.validate_run(&fp(768_000)));
-        s.record_file(
-            "a.bin",
-            FileFingerprint {
-                size: 10,
-                mtime: Some(1),
-            },
-        );
-        s.record("a.bin", 1, "id1@x", 100);
-        s.set_archive_stem("Xk3mQp".to_string());
-        // A resume run using a different --article-size than the original.
-        assert!(!s.validate_run(&fp(384_000)));
-        assert_eq!(s.len(), 0, "mismatched fingerprint must discard segments");
-        assert!(
-            s.file_matches(
-                "a.bin",
-                &FileFingerprint {
-                    size: 10,
-                    mtime: Some(1)
-                }
-            ),
-            "per-file fingerprints must be cleared too"
-        );
-        assert_eq!(
-            s.archive_stem(),
-            None,
-            "archive stem must be cleared too — reusing it for incompatible parameters is unsafe"
-        );
-    }
-
-    #[test]
-    fn archive_stem_survives_a_matching_fingerprint() {
-        let mut s = ResumeState::default();
-        assert!(s.validate_run(&fp(768_000)));
-        s.set_archive_stem("Xk3mQp".to_string());
-        assert!(s.validate_run(&fp(768_000)));
-        assert_eq!(s.archive_stem(), Some("Xk3mQp"));
-    }
-
-    #[test]
-    fn file_matches_is_permissive_when_nothing_was_recorded() {
-        let s = ResumeState::default();
-        assert!(s.file_matches(
-            "new.bin",
-            &FileFingerprint {
-                size: 5,
-                mtime: Some(1)
-            }
-        ));
-    }
-
-    #[test]
-    fn file_matches_detects_content_change() {
-        let mut s = ResumeState::default();
-        s.record_file(
-            "a.bin",
-            FileFingerprint {
-                size: 100,
-                mtime: Some(1000),
-            },
-        );
-        assert!(s.file_matches(
-            "a.bin",
-            &FileFingerprint {
-                size: 100,
-                mtime: Some(1000)
-            }
-        ));
-        assert!(!s.file_matches(
-            "a.bin",
-            &FileFingerprint {
-                size: 200,
-                mtime: Some(1000)
-            }
-        ));
-        assert!(!s.file_matches(
-            "a.bin",
-            &FileFingerprint {
-                size: 100,
-                mtime: Some(2000)
-            }
-        ));
-    }
-
-    #[test]
-    fn forget_file_only_removes_that_files_segments() {
-        let mut s = ResumeState::default();
-        s.record("a.bin", 1, "id1@x", 10);
-        s.record("a.bin", 2, "id2@x", 10);
-        s.record("b.bin", 1, "id3@x", 10);
-        s.forget_file("a.bin");
-        assert!(s.get("a.bin", 1).is_none());
-        assert!(s.get("a.bin", 2).is_none());
-        assert!(s.get("b.bin", 1).is_some());
-    }
-
-    #[test]
-    fn forget_all_segments_clears_everything_including_par2_volumes() {
-        let mut s = ResumeState::default();
-        s.record("movie.mkv", 1, "id1@x", 10);
-        s.record("movie.mkv.vol000+001.par2", 1, "id2@x", 10);
-        s.record_file(
-            "movie.mkv",
-            FileFingerprint {
-                size: 100,
-                mtime: Some(1),
-            },
-        );
-        s.forget_all_segments();
-        assert!(s.get("movie.mkv", 1).is_none());
-        assert!(s.get("movie.mkv.vol000+001.par2", 1).is_none());
-        assert_eq!(s.len(), 0);
-        // Per-file fingerprints survive — an unrelated file's identity is
-        // still worth remembering.
-        assert!(s.file_matches(
-            "movie.mkv",
-            &FileFingerprint {
-                size: 100,
-                mtime: Some(1)
-            }
-        ));
-    }
-
-    #[test]
-    fn corrupt_state_file_loads_as_empty() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("state.json");
-        std::fs::write(&path, "this is not json {").unwrap();
-        let loaded = ResumeState::load(&path).unwrap();
-        assert!(loaded.is_empty());
-    }
-
-    #[test]
-    fn save_is_readable_after_replace() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("state.json");
-        let mut s = ResumeState::default();
-        s.record("a.bin", 1, "id1@x", 100);
-        s.save(&path).unwrap();
-        assert!(!path.with_file_name("state.json.tmp").exists());
-        let loaded = ResumeState::load(&path).unwrap();
-        assert_eq!(loaded.get("a.bin", 1).unwrap().message_id, "id1@x");
-    }
-
-    #[test]
-    fn each_new_fingerprint_field_changes_identity() {
-        let base = fp(768_000);
-        let mut slice = base.clone();
-        slice.par2_slice_size = Some(4096);
-        assert_ne!(base, slice);
-
-        let mut count = base.clone();
-        count.par2_slice_count = Some(100);
-        assert_ne!(base, count);
-
-        let mut rec = base.clone();
-        rec.par2_recovery_count = Some(20);
-        assert_ne!(base, rec);
-
-        let mut vol = base.clone();
-        vol.compress_volume_size = Some("500m".into());
-        assert_ne!(base, vol);
-
-        let mut pw = base.clone();
-        pw.compress_password = Some(hash_secret("secret"));
-        assert_ne!(base, pw);
-
-        let mut ll = base.clone();
-        ll.line_length = 256;
-        assert_ne!(base, ll);
-    }
-
-    #[test]
-    fn pre_schema_json_defaults_new_fields() {
-        let json = r#"{"files":{},"segments":{"a.bin\u00001":{"message_id":"id1@x","bytes":100}}}"#;
-        let loaded: ResumeState = serde_json::from_str(json).unwrap();
-        let rec = loaded.get("a.bin", 1).unwrap();
-        assert_eq!(rec.message_id, "id1@x");
-        assert_eq!(rec.bytes, 100);
-        assert!(!rec.confirmed);
-        assert!(!rec.check_disabled);
-        assert_eq!(rec.server_idx, 0);
-    }
-
-    #[test]
-    fn mark_confirmed_flips_only_that_record() {
-        let mut s = ResumeState::default();
-        s.record_with(
-            "a.bin",
-            1,
-            SegmentRecord {
-                message_id: "id1@x".into(),
-                bytes: 100,
-                confirmed: false,
-                check_disabled: true,
-                server_idx: 2,
-                wire_identity: None,
-            },
-        );
-        s.record("a.bin", 2, "id2@x", 50);
-        s.mark_confirmed("a.bin", 1);
-        let rec = s.get("a.bin", 1).unwrap();
-        assert!(rec.confirmed);
-        assert!(!rec.check_disabled);
-        assert_eq!(rec.server_idx, 2);
-        assert!(!s.get("a.bin", 2).unwrap().confirmed);
-    }
-
-    #[test]
-    fn resume_action_three_arms() {
-        let confirmed = SegmentRecord {
-            message_id: "id@x".into(),
-            bytes: 1,
-            confirmed: true,
-            check_disabled: false,
-            server_idx: 0,
-            wire_identity: None,
-        };
-        let unconfirmed = SegmentRecord {
-            confirmed: false,
-            ..confirmed.clone()
-        };
-        let check_off = SegmentRecord {
-            confirmed: false,
-            check_disabled: true,
-            ..confirmed.clone()
-        };
-        assert_eq!(resume_action(true, None), ResumeAction::Post);
-        assert_eq!(resume_action(false, None), ResumeAction::Post);
-        assert_eq!(resume_action(false, Some(&unconfirmed)), ResumeAction::Skip);
-        assert_eq!(resume_action(false, Some(&check_off)), ResumeAction::Skip);
-        assert_eq!(resume_action(false, Some(&confirmed)), ResumeAction::Skip);
-        assert_eq!(resume_action(true, Some(&confirmed)), ResumeAction::Skip);
-        assert_eq!(
-            resume_action(true, Some(&unconfirmed)),
-            ResumeAction::ReStatStoredId
-        );
-        assert_eq!(
-            resume_action(true, Some(&check_off)),
-            ResumeAction::ReStatStoredId
-        );
-    }
-
-    #[test]
-    fn no_check_record_never_sets_confirmed() {
-        let mut s = ResumeState::default();
-        s.record_with(
-            "a.bin",
-            1,
-            SegmentRecord {
-                message_id: "id@x".into(),
-                bytes: 10,
-                confirmed: false,
-                check_disabled: true,
-                server_idx: 0,
-                wire_identity: None,
-            },
-        );
-        let rec = s.get("a.bin", 1).unwrap();
-        assert!(!rec.confirmed && rec.check_disabled);
-    }
-}
+#[cfg(test)]
+mod session_tests;

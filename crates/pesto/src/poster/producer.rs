@@ -24,8 +24,8 @@ use super::par2::{
 use super::shared::Shared;
 use super::task::{PostTask, TaskDispatcher};
 use super::{
-    make_task, par2_output_dir, par2_release_base, par2_temp_dir, push_par2_file,
-    spawn_double_buffered_reader, FileMeta,
+    make_task, par2_output_dir, par2_release_base, par2_temp_dir, par2_volume_ordinal,
+    push_par2_file, spawn_double_buffered_reader, FileMeta,
 };
 /// Pad the accumulated real bytes to the full PAR2 slice size and forward
 /// the slice to the background [`Par2Worker`]. Leaves `accum` empty (or
@@ -215,11 +215,7 @@ pub(super) async fn producer(
     // Blowing past it aborts via `handle_alloc_error` — with `panic = "abort"`
     // in the release profile nothing unwinds long enough to flush a log line,
     // so it looks like the process just vanishes mid-upload.
-    let reserve_threads = if shared.config.threads > 0 {
-        shared.config.threads
-    } else {
-        parmesan::performance_core_count()
-    };
+    let reserve_threads = super::par2::par2_threads(shared.config.threads);
     let overhead_reserve = connection_overhead_reserve(active_connections, reserve_threads);
     let ceiling = crate::memory::Ceiling::discover(shared.config.memory_limit);
     let (memory_limit, passes) = par2_memory_plan(
@@ -283,11 +279,7 @@ pub(super) async fn producer(
         } else {
             parmesan::detect_simd().to_string()
         };
-        let effective_threads = if shared.config.threads > 0 {
-            shared.config.threads
-        } else {
-            parmesan::performance_core_count()
-        };
+        let effective_threads = super::par2::par2_threads(shared.config.threads);
         info!(
             simd = simd_method,
             threads = effective_threads,
@@ -306,7 +298,7 @@ pub(super) async fn producer(
             passes: passes.len(),
             chunk_size: chunk_size_bytes,
             simd_method: simd_method.to_string(),
-            threads: parmesan::performance_core_count(),
+            threads: effective_threads,
             memory_limit,
         });
         shared.emit(crate::progress::ProgressEvent::Par2WriteStarted {
@@ -473,6 +465,17 @@ pub(super) async fn producer(
                         if let Some(tx) = &tx_opt {
                             // Send buf to the worker; the worker will return it to
                             // the pool (Phase 12b) after encoding the article.
+                            // Encryption-gated (see `prepare_resources`):
+                            // unencrypted uploads have no bootstrap/index and
+                            // the empty layout returns `None`.
+                            let identity = if shared.encryption_adapter.is_some() {
+                                shared
+                                    .release_layout
+                                    .segment_identity(meta.file_index, i)
+                                    .context("valid segment identity for planned data file")?
+                            } else {
+                                0
+                            };
                             if tx
                                 .send(make_task(
                                     meta.clone(),
@@ -480,6 +483,7 @@ pub(super) async fn producer(
                                     total_parts,
                                     offset,
                                     buf,
+                                    identity,
                                     file_crc32,
                                     &shared.config,
                                 ))
@@ -610,16 +614,13 @@ pub(super) async fn producer(
 
                 for (idx, fh) in final_hashes.iter().enumerate() {
                     let fid = &file_ids[idx];
-                    let pkt_file_desc = packet::serialize_packet(
+                    let pkt_file_desc = packet::serialize_file_description(
                         &rsid,
-                        &packet::TYPE_FILE_DESC,
-                        &packet::file_description_body(
-                            fid,
-                            &fh.md5_full,
-                            &fh.md5_16k,
-                            fh.length,
-                            &metas[idx].client_path,
-                        ),
+                        fid,
+                        &fh.md5_full,
+                        &fh.md5_16k,
+                        fh.length,
+                        &metas[idx].client_path,
                     );
                     let pkt_ifsc = packet::serialize_packet(
                         &rsid,
@@ -723,6 +724,7 @@ pub(super) async fn producer(
                 file.flush().await.with_context(|| {
                     format!("flushing PAR2 recovery volume `{}`", vol_path.display())
                 })?;
+                drop(file);
                 par2_materialized_bytes += pkt.len() as u64;
                 shared.emit(crate::progress::ProgressEvent::Par2SliceWritten);
 
@@ -732,9 +734,11 @@ pub(super) async fn producer(
                             .release_prefix
                             .as_deref()
                             .map(|prefix| layout::volume_name(prefix, *vol));
-                        let index_offset =
-                            u32::from(shared.config.obfuscate.policy().publish_par2_index);
-                        let file_index = metas.len() as u32 + 1 + index_offset + vol_idx as u32;
+                        let file_index = par2_volume_ordinal(
+                            metas.len(),
+                            shared.config.obfuscate.policy().publish_par2_index,
+                            vol_idx,
+                        );
                         push_par2_file(&vol_path, vol_name, wire_override, file_index, &shared, tx)
                             .await?;
                     }

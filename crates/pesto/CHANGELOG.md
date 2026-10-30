@@ -12,6 +12,74 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
 
 ## [Unreleased]
 
+### Added
+
+- PAR2 sets for files with non-ASCII names now carry a Unicode Filename
+  (`UniFileN`) packet next to the File Description, as ParPar does. This
+  includes the season-wide set built by `--season`.
+- `threads` and `simd` can now be set under `[posting]` in the config file, as
+  well as with `--threads` and `--simd` (#218).
+- `--slice-size article` (`par2_slice_size = "article"`) uses one PAR2 slice
+  per article, so the `par2` percentage repairs that share of lost articles
+  however they are scattered. `--par2-effort` (`par2_effort`) scales the CPU
+  budget of automatic slicing. `--slice-size` can also be set in the config
+  file now, as `par2_slice_size` (#217).
+
+### Changed
+
+- The automatic PAR2 thread count is capped at 16 and never exceeds the CPUs
+  the process may use (CPU affinity and cgroup quotas). It used to start one
+  thread per physical core of the host: 64 on a shared 64-core seedbox, where
+  they encoded no faster than 16 but used twice the CPU. An explicit
+  `--threads` is not capped. The PAR2 progress event and the memory reserve
+  now use the same count, including an explicit `--threads` (#218).
+- Automatic PAR2 slices are now a whole multiple of the article size, so a
+  lost article costs exactly one recovery block instead of often two.
+  Releases up to about 2.4 GiB get one slice per article: with 10 % PAR2 they
+  survive 10 % of scattered lost articles, up from 4 to 8 %, and smaller ones
+  encode faster. Larger releases keep about 2000 slices and the same CPU cost,
+  and survive slightly more scattered loss than before. Sets of mostly
+  sub-article files keep the old geometry. Recovery data stays at the `par2`
+  percentage. See `docs/par2-geometry.md` (#217).
+- `--resume` discards state recorded by an older version when PAR2 is
+  enabled, since this version builds different PAR2 volumes for the same
+  config. `RunFingerprint::par2_file_id_order` and `PAR2_FILE_ID_ORDER` are
+  renamed `par2_layout` and `PAR2_LAYOUT`. `RunFingerprint` gained
+  `par2_effort` and no longer implements `Eq` (#217).
+- File and folder names with non-ASCII characters (accents, `ç`, CJK, …) are
+  now posted unchanged as UTF-8 in the Subject, yEnc `name=`, `.nzb` and PAR2
+  File Description, matching nyuu, ngPost and ParPar. They were previously
+  rejected unless the upload used `--compress`. No Unicode normalization is
+  applied. NZBGet decodes PAR2 names as Latin-1 and can restore them garbled;
+  SABnzbd restores them correctly (#209).
+- A compressed upload whose source name is non-ASCII now keeps that name for
+  the archive (`Lição.7z`) instead of falling back to `archive.7z`. The
+  `pesto::compress::portable_archive_stem` function was removed (#209).
+
+### Fixed
+
+- Ordinary (unencrypted) uploads no longer scan every article body for a
+  leading `.` before posting. That check was only ever needed for
+  `--encrypt` articles — their salt bootstrap and FF1-encrypted control
+  lines can legitimately start with `.` and need RFC 3977 dot-stuffing —
+  while the plain yEnc encoder already escapes a leading `.`, so the scan
+  always found nothing and only cost CPU on the posting hot path. The
+  scan and stuffing now run solely on the encrypted posting path
+  (`post_parts_encrypted` / `enqueue_post_encrypted` /
+  `repost_parts_confirmed_encrypted`); ordinary posting is back to the
+  original direct write, with the invariant kept as a debug-only assert.
+- Multi-file PAR2 sets (per-run and `--season`) now list and order files by
+  File ID as the PAR2 spec, par2cmdline and ParPar do, so they match ParPar
+  byte for byte. `--resume` discards state recorded by an older version when
+  PAR2 is enabled, instead of reusing PAR2 volumes built with the old order
+  (#212).
+- The retry command printed for `--resume` used `--par2-slice-size`,
+  `--par2-slice-count` and `--par2-recovery-count`, which do not exist. It now
+  prints `--slice-size`, `--slice-count` and `--recovery-count`, and
+  `--par2-effort` when it is not the default.
+- An invalid `--slice-size` value is now rejected. It used to be silently
+  ignored, leaving the slice size automatic.
+
 ## [0.10.6] — 2026-10-27
 
 ### Fixed
@@ -33,6 +101,14 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
 
 - Linux ARM64 release artifact `pesto-linux-aarch64`, built natively against
   Debian 12 / glibc 2.36 and validated with the full package test suite (#199).
+- **Opt-in yEnc body and control-line encryption (`--encrypt`).**
+  Per-segment AEAD encryption using XChaCha20-Poly1305 before yEnc encoding, and NIST SP 800-38G FF1 Radix 253 format-preserving encryption of yEnc control lines (`=ybegin`, `=ypart`, `=yend`, `=yencryption`) per the experimental yEnc Encryption Standards v1.2. The `--encrypt-password` alias was removed: `--encrypt[=PASSWORD]` is the only encryption flag form.
+- **NZB encryption metadata.**
+  Encrypted uploads emit `<meta type="yenc_encrypted">true</meta>` (alongside the optional `yenc_version`/`yenc_cipher` provenance metas emitted by the writer) in the NZB `<head>`; segment elements stay plain NZB 1.1. `NzbMeta`'s earlier provisional provenance fields were replaced by the single `yenc_encrypted` flag (the writer still emits the optional provenance metas and readers gate fail-closed on unsupported values), and `Config`/`FileConfig` gain the `[encryption]` section.
+
+### Changed
+
+- **`repost_failed_tasks` signature update**: adds an `adapter: Option<Arc<UploadEncryptionAdapter>>` argument for encrypted article retry; ordinary callers pass `None`.
 - Repeatable `--exclude <GLOB>` and `--no-exclude`, with root-level TOML
   `exclude` and `no_exclude` keys. Exclusions prune discovered directories,
   warn for skipped entries, and reject an empty upload. Explicit file arguments
